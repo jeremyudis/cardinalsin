@@ -1,0 +1,133 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cardinalsin-query
+  labels:
+    app: cardinalsin
+    component: query
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: cardinalsin
+      component: query
+  template:
+    metadata:
+      labels:
+        app: cardinalsin
+        component: query
+    spec:
+      containers:
+      - name: query
+        image: cardinalsin/query:latest
+        command: ["cardinalsin-query"]
+        args:
+        - "--l1-cache-mb=4096"
+        - "--l2-cache-mb=100000"
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8815
+          name: flight-sql
+        env:
+        - name: S3_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: cardinalsin-config
+              key: s3_bucket
+        - name: S3_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: cardinalsin-config
+              key: s3_region
+        - name: TENANT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: cardinalsin-config
+              key: tenant_id
+        - name: CACHE_DIR
+          value: "/cache"
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: cardinalsin-s3-credentials
+              key: access_key_id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cardinalsin-s3-credentials
+              key: secret_access_key
+        - name: RUST_LOG
+          value: "info"
+        resources:
+          requests:
+            memory: "8Gi"
+            cpu: "4"
+          limits:
+            memory: "32Gi"
+            cpu: "8"
+        volumeMounts:
+        - name: nvme-cache
+          mountPath: /cache
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: nvme-cache
+        hostPath:
+          path: /mnt/nvme
+          type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cardinalsin-query
+  labels:
+    app: cardinalsin
+    component: query
+spec:
+  selector:
+    app: cardinalsin
+    component: query
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+  - name: flight-sql
+    port: 8815
+    targetPort: 8815
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cardinalsin-query-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cardinalsin-query
+  minReplicas: 5
+  maxReplicas: 50
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Pods
+    pods:
+      metric:
+        name: active_queries
+      target:
+        type: AverageValue
+        averageValue: "50"

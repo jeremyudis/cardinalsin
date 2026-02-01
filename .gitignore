@@ -1,0 +1,45 @@
+# Generated files
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+
+# Test artifacts
+*.profraw
+*.profdata
+coverage/
+
+# Docker
+docker-compose.override.yml
+
+# Cache
+.cache/
+__pycache__/
+
+# Benchmark results
+target/criterion/

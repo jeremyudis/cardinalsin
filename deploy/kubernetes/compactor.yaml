@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cardinalsin-compactor
+  labels:
+    app: cardinalsin
+    component: compactor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cardinalsin
+      component: compactor
+  template:
+    metadata:
+      labels:
+        app: cardinalsin
+        component: compactor
+    spec:
+      containers:
+      - name: compactor
+        image: cardinalsin/compactor:latest
+        command: ["cardinalsin-compactor"]
+        args:
+        - "--l0-threshold=15"
+        - "--check-interval-secs=60"
+        - "--retention-days=90"
+        env:
+        - name: S3_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              name: cardinalsin-config
+              key: s3_bucket
+        - name: S3_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: cardinalsin-config
+              key: s3_region
+        - name: TENANT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: cardinalsin-config
+              key: tenant_id
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: cardinalsin-s3-credentials
+              key: access_key_id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: cardinalsin-s3-credentials
+              key: secret_access_key
+        - name: RUST_LOG
+          value: "info"
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "16Gi"
+            cpu: "4"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cardinalsin-config
+data:
+  s3_bucket: "cardinalsin-data"
+  s3_region: "us-east-1"
+  tenant_id: "default"

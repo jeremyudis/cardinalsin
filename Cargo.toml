@@ -1,0 +1,133 @@
+[package]
+name = "cardinalsin"
+version = "0.1.0"
+edition = "2021"
+description = "A high-cardinality time-series database built on object storage"
+license = "Apache-2.0"
+repository = "https://github.com/cardinalsin/cardinalsin"
+keywords = ["time-series", "database", "observability", "metrics", "arrow"]
+categories = ["database-implementations"]
+
+[lib]
+name = "cardinalsin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cardinalsin-ingester"
+path = "src/bin/ingester.rs"
+
+[[bin]]
+name = "cardinalsin-query"
+path = "src/bin/query.rs"
+
+[[bin]]
+name = "cardinalsin-compactor"
+path = "src/bin/compactor.rs"
+
+[dependencies]
+# Query Engine & Data Format
+datafusion = "44"
+# Use arrow versions compatible with datafusion 44 (which uses arrow 53.x)
+arrow = { version = "53", features = ["prettyprint"] }
+arrow-array = "53"
+arrow-schema = "53"
+arrow-ipc = "53"
+arrow-flight = "53"
+parquet = { version = "53", features = ["arrow", "zstd", "lz4", "snap"] }
+object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+
+# Compression
+zstd = "0.13"
+lz4_flex = "0.11"
+snap = "1.1"
+
+# Caching
+moka = { version = "0.12", features = ["future"] }
+foyer = "0.12"
+
+# Runtime & Networking
+tokio = { version = "1", features = ["full"] }
+tonic = "0.12"
+tonic-health = "0.12"
+axum = { version = "0.7", features = ["ws"] }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+
+# Protobuf
+prost = "0.13"
+prost-types = "0.13"
+
+# OpenTelemetry
+opentelemetry = "0.24"
+opentelemetry-proto = { version = "0.7", features = ["gen-tonic-messages", "metrics"] }
+opentelemetry_sdk = "0.24"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async utilities
+futures = "0.3"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-trait = "0.1"
+pin-project-lite = "0.2"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging & Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.23"
+metrics-exporter-prometheus = "0.15"
+
+# Utilities
+bytes = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+parking_lot = "0.12"
+once_cell = "1"
+url = "2"
+base64 = "0.22"
+rand = "0.8"
+hex = "0.4"
+itertools = "0.13"
+num_cpus = "1"
+regex = "1"
+
+# Configuration
+config = "0.14"
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+tempfile = "3"
+proptest = "1"
+tokio-test = "0.4"
+wiremock = "0.6"
+fake = { version = "2", features = ["derive"] }
+insta = { version = "1", features = ["json"] }
+
+[[bench]]
+name = "write_throughput"
+harness = false
+
+[[bench]]
+name = "query_latency"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
+debug = true
