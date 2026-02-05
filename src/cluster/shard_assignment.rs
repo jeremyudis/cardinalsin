@@ -119,30 +119,35 @@ impl ShardAssignment {
             }
         }
 
-        let mut moves = Vec::new();
-        let mut assignments = self.assignments.write().await;
+        let moves;
 
-        // Re-assign all shards using new ring
-        for (shard_id, old_node_id) in assignments.iter() {
-            let new_node_id = self.hash_ring.read().await.get_node(shard_id);
+        // Scope the assignments write lock so it's dropped before update_node_shards
+        {
+            let ring = self.hash_ring.read().await;
+            let mut assignments = self.assignments.write().await;
 
-            if let Some(new_node_id) = new_node_id {
-                if new_node_id != *old_node_id {
-                    moves.push((
-                        shard_id.clone(),
-                        old_node_id.clone(),
-                        new_node_id.clone(),
-                    ));
-                }
+            // Re-assign all shards using new ring
+            moves = assignments
+                .iter()
+                .filter_map(|(shard_id, old_node_id)| {
+                    ring.get_node(shard_id).and_then(|new_node_id| {
+                        if new_node_id != *old_node_id {
+                            Some((shard_id.clone(), old_node_id.clone(), new_node_id))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            // Apply moves
+            for (shard_id, _old_node, new_node) in &moves {
+                assignments.insert(shard_id.clone(), new_node.clone());
             }
         }
+        // Write lock on assignments is now dropped
 
-        // Apply moves
-        for (shard_id, _old_node, new_node) in &moves {
-            assignments.insert(shard_id.clone(), new_node.clone());
-        }
-
-        // Update all node shard lists
+        // Update all node shard lists (needs read lock on assignments)
         for node in nodes {
             self.update_node_shards(&node.id).await;
         }
