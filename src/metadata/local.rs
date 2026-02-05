@@ -1,13 +1,13 @@
 //! Local in-memory metadata client for development and testing
 
-use super::{MetadataClient, TimeRange, TimeIndexEntry, CompactionJob, CompactionStatus};
+use super::{CompactionJob, CompactionStatus, MetadataClient, SplitState, TimeIndexEntry, TimeRange};
 use crate::ingester::ChunkMetadata;
+use crate::sharding::SplitPhase;
 use crate::Result;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 /// Local in-memory metadata client
 ///
@@ -26,6 +26,10 @@ pub struct LocalMetadataClient {
     compaction_jobs: DashMap<String, CompactionJob>,
     /// Chunk levels (for compaction)
     chunk_levels: DashMap<String, u32>,
+    /// Shard split states
+    split_states: DashMap<String, SplitState>,
+    /// Shard metadata
+    shard_metadata: DashMap<String, crate::sharding::ShardMetadata>,
 }
 
 impl LocalMetadataClient {
@@ -36,6 +40,8 @@ impl LocalMetadataClient {
             time_index: RwLock::new(BTreeMap::new()),
             compaction_jobs: DashMap::new(),
             chunk_levels: DashMap::new(),
+            split_states: DashMap::new(),
+            shard_metadata: DashMap::new(),
         }
     }
 
@@ -251,13 +257,105 @@ impl MetadataClient for LocalMetadataClient {
     }
 
     async fn get_pending_compaction_jobs(&self) -> Result<Vec<CompactionJob>> {
-        let pending: Vec<CompactionJob> = self.compaction_jobs
+        let pending: Vec<CompactionJob> = self
+            .compaction_jobs
             .iter()
             .filter(|entry| entry.value().status == CompactionStatus::Pending)
             .map(|entry| entry.value().clone())
             .collect();
 
         Ok(pending)
+    }
+
+    // Shard split methods
+    async fn start_split(
+        &self,
+        old_shard: &str,
+        new_shards: Vec<String>,
+        split_point: Vec<u8>,
+    ) -> Result<()> {
+        let split_state = SplitState {
+            phase: SplitPhase::Preparation,
+            old_shard: old_shard.to_string(),
+            new_shards,
+            split_point,
+            split_timestamp: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            backfill_progress: 0.0,
+        };
+
+        self.split_states
+            .insert(old_shard.to_string(), split_state);
+        Ok(())
+    }
+
+    async fn get_split_state(&self, shard_id: &str) -> Result<Option<SplitState>> {
+        Ok(self.split_states.get(shard_id).map(|s| s.value().clone()))
+    }
+
+    async fn update_split_progress(
+        &self,
+        shard_id: &str,
+        progress: f64,
+        phase: SplitPhase,
+    ) -> Result<()> {
+        if let Some(mut state) = self.split_states.get_mut(shard_id) {
+            state.backfill_progress = progress;
+            state.phase = phase;
+        }
+        Ok(())
+    }
+
+    async fn complete_split(&self, old_shard: &str) -> Result<()> {
+        // Remove split state - split is complete
+        self.split_states.remove(old_shard);
+        Ok(())
+    }
+
+    async fn get_chunks_for_shard(&self, shard_id: &str) -> Result<Vec<TimeIndexEntry>> {
+        // In a real implementation, we'd have shard-to-chunk mappings
+        // For now, filter chunks by path pattern
+        let results: Vec<TimeIndexEntry> = self
+            .chunks
+            .iter()
+            .filter(|entry| entry.key().contains(shard_id))
+            .map(|entry| TimeIndexEntry::from(entry.value()))
+            .collect();
+
+        Ok(results)
+    }
+
+    async fn get_shard_metadata(
+        &self,
+        shard_id: &str,
+    ) -> Result<Option<crate::sharding::ShardMetadata>> {
+        Ok(self.shard_metadata.get(shard_id).map(|entry| entry.clone()))
+    }
+
+    async fn update_shard_metadata(
+        &self,
+        shard_id: &str,
+        metadata: &crate::sharding::ShardMetadata,
+        expected_generation: u64,
+    ) -> Result<()> {
+        // Check generation
+        if let Some(current) = self.shard_metadata.get(shard_id) {
+            if current.generation != expected_generation {
+                return Err(crate::Error::StaleGeneration {
+                    expected: expected_generation,
+                    actual: current.generation,
+                });
+            }
+        } else if expected_generation != 0 {
+            return Err(crate::Error::ShardNotFound(shard_id.to_string()));
+        }
+
+        // Update with incremented generation
+        let mut new_metadata = metadata.clone();
+        new_metadata.generation = expected_generation + 1;
+        self.shard_metadata
+            .insert(shard_id.to_string(), new_metadata);
+
+        Ok(())
     }
 }
 

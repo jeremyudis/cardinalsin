@@ -78,13 +78,274 @@ pub struct Sample {
 
 /// Parse a write request from protobuf bytes
 ///
-/// This is a simplified parser. In production, use prost-generated types.
-fn parse_write_request(_data: &[u8]) -> Result<WriteRequest> {
-    // In production, this would use prost to decode the protobuf
-    // For now, return empty request for compilation
-    Ok(WriteRequest {
-        timeseries: Vec::new(),
-    })
+/// Implements manual protobuf parsing for the Prometheus Remote Write format.
+/// The wire format follows proto3 conventions:
+/// - WriteRequest: field 1 = repeated TimeSeries (length-delimited)
+/// - TimeSeries: field 1 = repeated Label, field 2 = repeated Sample
+/// - Label: field 1 = name (string), field 2 = value (string)
+/// - Sample: field 1 = value (double), field 2 = timestamp (int64)
+fn parse_write_request(data: &[u8]) -> Result<WriteRequest> {
+    let mut timeseries = Vec::new();
+    let mut pos = 0;
+
+    while pos < data.len() {
+        // Read field tag (varint)
+        let (tag, new_pos) = read_varint(data, pos)?;
+        pos = new_pos;
+
+        let field_number = tag >> 3;
+        let wire_type = tag & 0x7;
+
+        match (field_number, wire_type) {
+            // Field 1: timeseries (repeated, length-delimited)
+            (1, 2) => {
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+                let end = pos + length as usize;
+                if end > data.len() {
+                    return Err(crate::Error::InvalidSchema("Truncated timeseries".into()));
+                }
+                let ts = parse_timeseries(&data[pos..end])?;
+                timeseries.push(ts);
+                pos = end;
+            }
+            // Skip unknown fields
+            (_, 0) => {
+                // Varint
+                let (_, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+            }
+            (_, 1) => {
+                // 64-bit
+                pos += 8;
+            }
+            (_, 2) => {
+                // Length-delimited
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos + length as usize;
+            }
+            (_, 5) => {
+                // 32-bit
+                pos += 4;
+            }
+            _ => {
+                return Err(crate::Error::InvalidSchema(format!(
+                    "Unknown wire type {} for field {}",
+                    wire_type, field_number
+                )));
+            }
+        }
+    }
+
+    Ok(WriteRequest { timeseries })
+}
+
+/// Parse a TimeSeries message from protobuf bytes
+fn parse_timeseries(data: &[u8]) -> Result<TimeSeries> {
+    let mut labels = Vec::new();
+    let mut samples = Vec::new();
+    let mut pos = 0;
+
+    while pos < data.len() {
+        let (tag, new_pos) = read_varint(data, pos)?;
+        pos = new_pos;
+
+        let field_number = tag >> 3;
+        let wire_type = tag & 0x7;
+
+        match (field_number, wire_type) {
+            // Field 1: labels (repeated, length-delimited)
+            (1, 2) => {
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+                let end = pos + length as usize;
+                if end > data.len() {
+                    return Err(crate::Error::InvalidSchema("Truncated label".into()));
+                }
+                let label = parse_label(&data[pos..end])?;
+                labels.push(label);
+                pos = end;
+            }
+            // Field 2: samples (repeated, length-delimited)
+            (2, 2) => {
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+                let end = pos + length as usize;
+                if end > data.len() {
+                    return Err(crate::Error::InvalidSchema("Truncated sample".into()));
+                }
+                let sample = parse_sample(&data[pos..end])?;
+                samples.push(sample);
+                pos = end;
+            }
+            // Skip unknown fields
+            (_, 0) => {
+                let (_, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+            }
+            (_, 1) => {
+                pos += 8;
+            }
+            (_, 2) => {
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos + length as usize;
+            }
+            (_, 5) => {
+                pos += 4;
+            }
+            _ => {
+                return Err(crate::Error::InvalidSchema(format!(
+                    "Unknown wire type in timeseries: {}",
+                    wire_type
+                )));
+            }
+        }
+    }
+
+    Ok(TimeSeries { labels, samples })
+}
+
+/// Parse a Label message from protobuf bytes
+fn parse_label(data: &[u8]) -> Result<Label> {
+    let mut name = String::new();
+    let mut value = String::new();
+    let mut pos = 0;
+
+    while pos < data.len() {
+        let (tag, new_pos) = read_varint(data, pos)?;
+        pos = new_pos;
+
+        let field_number = tag >> 3;
+        let wire_type = tag & 0x7;
+
+        match (field_number, wire_type) {
+            // Field 1: name (string, length-delimited)
+            (1, 2) => {
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+                let end = pos + length as usize;
+                if end > data.len() {
+                    return Err(crate::Error::InvalidSchema("Truncated label name".into()));
+                }
+                name = String::from_utf8_lossy(&data[pos..end]).to_string();
+                pos = end;
+            }
+            // Field 2: value (string, length-delimited)
+            (2, 2) => {
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+                let end = pos + length as usize;
+                if end > data.len() {
+                    return Err(crate::Error::InvalidSchema("Truncated label value".into()));
+                }
+                value = String::from_utf8_lossy(&data[pos..end]).to_string();
+                pos = end;
+            }
+            // Skip unknown fields
+            (_, 0) => {
+                let (_, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+            }
+            (_, 1) => {
+                pos += 8;
+            }
+            (_, 2) => {
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos + length as usize;
+            }
+            (_, 5) => {
+                pos += 4;
+            }
+            _ => {
+                return Err(crate::Error::InvalidSchema(format!(
+                    "Unknown wire type in label: {}",
+                    wire_type
+                )));
+            }
+        }
+    }
+
+    Ok(Label { name, value })
+}
+
+/// Parse a Sample message from protobuf bytes
+fn parse_sample(data: &[u8]) -> Result<Sample> {
+    let mut value = 0.0f64;
+    let mut timestamp_ms = 0i64;
+    let mut pos = 0;
+
+    while pos < data.len() {
+        let (tag, new_pos) = read_varint(data, pos)?;
+        pos = new_pos;
+
+        let field_number = tag >> 3;
+        let wire_type = tag & 0x7;
+
+        match (field_number, wire_type) {
+            // Field 1: value (double, 64-bit fixed)
+            (1, 1) => {
+                if pos + 8 > data.len() {
+                    return Err(crate::Error::InvalidSchema("Truncated sample value".into()));
+                }
+                let bytes: [u8; 8] = data[pos..pos + 8].try_into().unwrap();
+                value = f64::from_le_bytes(bytes);
+                pos += 8;
+            }
+            // Field 2: timestamp (int64, varint)
+            (2, 0) => {
+                let (ts, new_pos) = read_varint(data, pos)?;
+                timestamp_ms = ts as i64;
+                pos = new_pos;
+            }
+            // Skip unknown fields
+            (_, 0) => {
+                let (_, new_pos) = read_varint(data, pos)?;
+                pos = new_pos;
+            }
+            (_, 1) => {
+                pos += 8;
+            }
+            (_, 2) => {
+                let (length, new_pos) = read_varint(data, pos)?;
+                pos = new_pos + length as usize;
+            }
+            (_, 5) => {
+                pos += 4;
+            }
+            _ => {
+                return Err(crate::Error::InvalidSchema(format!(
+                    "Unknown wire type in sample: {}",
+                    wire_type
+                )));
+            }
+        }
+    }
+
+    Ok(Sample { timestamp_ms, value })
+}
+
+/// Read a varint from the buffer, returning (value, new_position)
+fn read_varint(data: &[u8], start: usize) -> Result<(u64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    let mut pos = start;
+
+    loop {
+        if pos >= data.len() {
+            return Err(crate::Error::InvalidSchema("Truncated varint".into()));
+        }
+        let byte = data[pos];
+        pos += 1;
+
+        result |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Ok((result, pos));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return Err(crate::Error::InvalidSchema("Varint too long".into()));
+        }
+    }
 }
 
 /// Convert Prometheus write request to Arrow RecordBatch

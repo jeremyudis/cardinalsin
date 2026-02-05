@@ -6,6 +6,7 @@
 //! - Applying retention policies
 //! - Garbage collection with grace periods
 //! - Backpressure signaling to ingesters
+//! - **Orchestrating hot shard splits**
 
 mod merge;
 mod levels;
@@ -15,6 +16,7 @@ pub use levels::Level;
 
 use crate::ingester::ParquetWriter;
 use crate::metadata::{MetadataClient, CompactionJob, CompactionStatus, TimeRange};
+use crate::sharding::{ShardAction, ShardMonitor, ShardSplitter};
 use crate::{Result, StorageConfig};
 
 use object_store::ObjectStore;
@@ -46,6 +48,8 @@ pub struct CompactorConfig {
     pub check_interval: Duration,
     /// Grace period before deleting old chunks
     pub gc_grace_period: Duration,
+    /// Enable automatic sharding
+    pub sharding_enabled: bool,
 }
 
 impl Default for CompactorConfig {
@@ -61,6 +65,7 @@ impl Default for CompactorConfig {
             downsample_resolution: Duration::from_secs(60), // 1 minute
             check_interval: Duration::from_secs(60),        // Check every minute
             gc_grace_period: Duration::from_secs(60),       // 60 seconds
+            sharding_enabled: true,
         }
     }
 }
@@ -96,6 +101,10 @@ pub struct Compactor {
     is_behind: AtomicBool,
     /// Chunks pending deletion (path, deletion_time)
     pending_deletions: std::sync::RwLock<Vec<(String, std::time::Instant)>>,
+    /// Shard monitor for detecting hot shards
+    shard_monitor: Arc<ShardMonitor>,
+    /// Shard splitter for executing splits
+    shard_splitter: Arc<ShardSplitter>,
 }
 
 impl Compactor {
@@ -105,9 +114,16 @@ impl Compactor {
         object_store: Arc<dyn ObjectStore>,
         metadata: Arc<dyn MetadataClient>,
         storage_config: StorageConfig,
+        // Pass in the ingester's shard monitor to get write metrics
+        shard_monitor: Arc<ShardMonitor>,
     ) -> Self {
         // Backpressure threshold: 3x the merge threshold
         let backpressure_threshold = (config.l0_merge_threshold * 3) as u64;
+
+        let shard_splitter = Arc::new(ShardSplitter::new(
+            Arc::clone(&metadata),
+            Arc::clone(&object_store),
+        ));
 
         Self {
             config,
@@ -118,6 +134,8 @@ impl Compactor {
             storage_config,
             active_compactions: AtomicU64::new(0),
             max_concurrent_compactions: 4, // Allow 4 concurrent compactions
+            shard_monitor,
+            shard_splitter,
             l0_pending_count: AtomicU64::new(0),
             backpressure_threshold,
             is_behind: AtomicBool::new(false),
@@ -151,18 +169,83 @@ impl Compactor {
         self.active_compactions.load(Ordering::Relaxed) < self.max_concurrent_compactions
     }
 
-    /// Run the compaction loop
+    /// Run the main service loop
     pub async fn run(&self) {
         let mut interval = tokio::time::interval(self.config.check_interval);
 
         loop {
             interval.tick().await;
-
-            if let Err(e) = self.run_compaction_cycle().await {
-                error!("Compaction cycle failed: {}", e);
+            if let Err(e) = self.run_cycle().await {
+                error!("Main service cycle failed: {}", e);
             }
         }
     }
+
+    /// Run a single service cycle (compaction, sharding, etc.)
+    pub async fn run_cycle(&self) -> Result<()> {
+        self.run_compaction_cycle().await?;
+
+        if self.config.sharding_enabled {
+            self.run_sharding_cycle().await?;
+        }
+
+        Ok(())
+    }
+    
+    /// Run a single sharding cycle
+    async fn run_sharding_cycle(&self) -> Result<()> {
+        info!("Starting sharding cycle: evaluating hot shards");
+        let actions = self.shard_monitor.evaluate_shards();
+        if actions.is_empty() {
+            info!("No hot shards detected");
+            return Ok(());
+        }
+
+        for action in actions {
+            match action {
+                ShardAction::Split(shard_id) => {
+                    info!("Hot shard detected: {}. Attempting to initiate split.", shard_id);
+                    let metadata_client = Arc::clone(&self.metadata);
+                    let splitter = Arc::clone(&self.shard_splitter);
+
+                    // Spawn the split process in the background so it doesn't block the main loop
+                    tokio::spawn(async move {
+                        let shard_metadata = match metadata_client.get_shard_metadata(&shard_id).await {
+                            Ok(Some(meta)) => meta,
+                            Ok(None) => {
+                                error!("Cannot split shard {}: metadata not found.", shard_id);
+                                return;
+                            }
+                            Err(e) => {
+                                error!("Cannot split shard {}: failed to get metadata: {}", shard_id, e);
+                                return;
+                            }
+                        };
+
+                        // Ensure we don't try to split a shard that's already splitting
+                        if !shard_metadata.is_active() {
+                             info!("Skipping split for shard {}: already in non-active state ({:?}).", shard_id, shard_metadata.state);
+                             return;
+                        }
+
+                        if let Err(e) = splitter.execute_split_with_monitoring(&shard_metadata).await {
+                            error!("Failed to execute split for shard {}: {}", shard_id, e);
+                        }
+                    });
+                }
+                ShardAction::TransferLease(shard_id, target_node) => {
+                    info!("Lease transfer requested for shard {} to node {}", shard_id, target_node);
+                    // TODO: Implement lease transfer when cluster mode is enabled
+                }
+                ShardAction::MoveReplica(shard_id, from_node, to_node) => {
+                    info!("Replica move requested for shard {} from {} to {}", shard_id, from_node, to_node);
+                    // TODO: Implement replica movement when cluster mode is enabled
+                }
+            }
+        }
+        Ok(())
+    }
+
 
     /// Run a single compaction cycle
     pub async fn run_compaction_cycle(&self) -> Result<()> {

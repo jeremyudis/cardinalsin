@@ -24,6 +24,18 @@ path = "src/bin/query.rs"
 name = "cardinalsin-compactor"
 path = "src/bin/compactor.rs"
 
+[[bin]]
+name = "rebuild-metadata"
+path = "src/bin/rebuild_metadata.rs"
+
+[[bin]]
+name = "backfill-levels"
+path = "src/bin/backfill_levels.rs"
+
+[[bin]]
+name = "test-data-generator"
+path = "src/bin/test_data_generator.rs"
+
 [dependencies]
 # Query Engine & Data Format
 datafusion = "44"
@@ -86,6 +98,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 
+# SQL Parsing
+sqlparser = "0.51"
+
 # Utilities
 bytes = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -105,6 +120,8 @@ regex = "1"
 config = "0.14"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
+humantime = "2"
+reqwest = { version = "0.12", features = ["json"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -114,6 +131,8 @@ tokio-test = "0.4"
 wiremock = "0.6"
 fake = { version = "2", features = ["derive"] }
 insta = { version = "1", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
+humantime = "2"
 
 [[bench]]
 name = "write_throughput"

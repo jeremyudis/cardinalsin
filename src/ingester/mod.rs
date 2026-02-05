@@ -10,10 +10,12 @@
 mod buffer;
 mod parquet_writer;
 mod broadcast;
+mod topic_broadcast;
 
 pub use buffer::WriteBuffer;
 pub use parquet_writer::ParquetWriter;
 pub use broadcast::BroadcastChannel;
+pub use topic_broadcast::{TopicBroadcastChannel, TopicBatch, BatchMetadata, TopicFilter, FilteredReceiver};
 
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
@@ -73,8 +75,10 @@ pub struct Ingester {
     metadata: Arc<dyn MetadataClient>,
     /// Parquet writer
     parquet_writer: ParquetWriter,
-    /// Broadcast channel for streaming queries
+    /// Broadcast channel for streaming queries (deprecated - use topic_broadcast)
     broadcast: BroadcastChannel,
+    /// Topic-based broadcast channel for filtered streaming
+    topic_broadcast: TopicBroadcastChannel,
     /// Storage configuration
     storage_config: StorageConfig,
     /// Metric schema
@@ -98,6 +102,7 @@ impl Ingester {
         schema: MetricSchema,
     ) -> Self {
         let broadcast = BroadcastChannel::new(1024);
+        let topic_broadcast = TopicBroadcastChannel::new(1024);
 
         // Initialize shard monitor with default config
         let shard_monitor = Arc::new(ShardMonitor::new(HotShardConfig::default()));
@@ -109,6 +114,7 @@ impl Ingester {
             metadata,
             parquet_writer: ParquetWriter::new(),
             broadcast,
+            topic_broadcast,
             storage_config,
             schema,
             last_flush: Arc::new(RwLock::new(Instant::now())),
@@ -128,6 +134,7 @@ impl Ingester {
         tenant_id: u32,
     ) -> Self {
         let broadcast = BroadcastChannel::new(1024);
+        let topic_broadcast = TopicBroadcastChannel::new(1024);
         let shard_monitor = Arc::new(ShardMonitor::new(shard_config));
 
         Self {
@@ -137,6 +144,7 @@ impl Ingester {
             metadata,
             parquet_writer: ParquetWriter::new(),
             broadcast,
+            topic_broadcast,
             storage_config,
             schema,
             last_flush: Arc::new(RwLock::new(Instant::now())),
@@ -153,6 +161,19 @@ impl Ingester {
         // Compute shard key for this batch (for monitoring)
         let shard_id = self.compute_shard_id(&batch);
 
+        // Check if shard is being split - if so, use dual-write
+        if let Some(split_state) = self.metadata.get_split_state(&shard_id).await? {
+            use crate::sharding::SplitPhase;
+            if matches!(split_state.phase, SplitPhase::DualWrite | SplitPhase::Backfill) {
+                info!(
+                    "Shard {} is splitting, enabling dual-write mode",
+                    shard_id
+                );
+                return self.write_with_split_awareness(batch, &shard_id).await;
+            }
+        }
+
+        // Normal single-write path
         let mut buffer = self.buffer.write().await;
 
         // Check if buffer is too full
@@ -175,6 +196,135 @@ impl Ingester {
         }
 
         Ok(())
+    }
+
+    /// Write with split awareness (dual-write to old and new shards)
+    async fn write_with_split_awareness(
+        &self,
+        batch: RecordBatch,
+        shard_id: &str,
+    ) -> Result<()> {
+        let split_state = self
+            .metadata
+            .get_split_state(shard_id)
+            .await?
+            .ok_or_else(|| Error::Internal("Split state disappeared".to_string()))?;
+
+        // Write to old shard first (for consistency during transition)
+        let mut buffer = self.buffer.write().await;
+        buffer.append(batch.clone())?;
+        drop(buffer);
+
+        // Split batch by key range and write to new shards
+        let (batch_a, batch_b) = self.split_batch_by_key(&batch, &split_state.split_point)?;
+
+        if batch_a.num_rows() > 0 {
+            info!(
+                "Dual-write: {} rows to shard {}",
+                batch_a.num_rows(),
+                split_state.new_shards[0]
+            );
+            self.write_to_shard(&batch_a, &split_state.new_shards[0])
+                .await?;
+        }
+
+        if batch_b.num_rows() > 0 {
+            info!(
+                "Dual-write: {} rows to shard {}",
+                batch_b.num_rows(),
+                split_state.new_shards[1]
+            );
+            self.write_to_shard(&batch_b, &split_state.new_shards[1])
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Write a batch directly to a specific shard (bypass buffer)
+    async fn write_to_shard(&self, batch: &RecordBatch, shard_id: &str) -> Result<()> {
+        // Convert batch to Parquet
+        let parquet_bytes = self.parquet_writer.write_batch(batch)?;
+        let parquet_size = parquet_bytes.len() as u64;
+
+        // Generate path for this shard
+        let now = chrono::Utc::now();
+        let uuid = uuid::Uuid::new_v4();
+        let path = format!(
+            "{}/data/shard={}/year={}/month={:02}/day={:02}/hour={:02}/chunk_{}.parquet",
+            self.storage_config.tenant_id,
+            shard_id,
+            now.format("%Y"),
+            now.format("%m"),
+            now.format("%d"),
+            now.format("%H"),
+            uuid
+        );
+
+        // Upload to object storage
+        self.object_store
+            .put(&path.clone().into(), parquet_bytes.into())
+            .await?;
+
+        // Register in metadata store
+        let chunk_metadata = ChunkMetadata {
+            path: path.clone(),
+            min_timestamp: self.extract_min_timestamp(batch)?,
+            max_timestamp: self.extract_max_timestamp(batch)?,
+            row_count: batch.num_rows() as u64,
+            size_bytes: parquet_size,
+        };
+        self.metadata.register_chunk(&path, &chunk_metadata).await?;
+
+        Ok(())
+    }
+
+    /// Split a batch by key range (based on timestamp split point)
+    fn split_batch_by_key(
+        &self,
+        batch: &RecordBatch,
+        split_point: &[u8],
+    ) -> Result<(RecordBatch, RecordBatch)> {
+        use arrow_array::cast::AsArray;
+        use arrow_array::types::Int64Type;
+
+        // Extract timestamp column (our shard key is based on time)
+        let ts_column = batch
+            .column_by_name("timestamp")
+            .ok_or_else(|| Error::InvalidSchema("Missing timestamp column".into()))?;
+
+        let ts_array = ts_column
+            .as_primitive_opt::<Int64Type>()
+            .ok_or_else(|| Error::InvalidSchema("Timestamp not Int64".into()))?;
+
+        // Build selection indices
+        let mut indices_a = Vec::new();
+        let mut indices_b = Vec::new();
+
+        // Convert split point to timestamp
+        let split_ts = i64::from_be_bytes(
+            split_point
+                .try_into()
+                .map_err(|_| Error::Internal("Invalid split point".to_string()))?,
+        );
+
+        for i in 0..batch.num_rows() {
+            let ts = ts_array.value(i);
+            if ts < split_ts {
+                indices_a.push(i as u32);
+            } else {
+                indices_b.push(i as u32);
+            }
+        }
+
+        // Use Arrow take kernel to extract rows
+        let indices_a_array = arrow::array::UInt32Array::from(indices_a);
+        let indices_b_array = arrow::array::UInt32Array::from(indices_b);
+
+        let batch_a = arrow::compute::take_record_batch(batch, &indices_a_array)?;
+        let batch_b = arrow::compute::take_record_batch(batch, &indices_b_array)?;
+
+        Ok((batch_a, batch_b))
     }
 
     /// Compute shard ID for a batch based on tenant and metric
@@ -210,6 +360,26 @@ impl Ingester {
         format!("shard-{:x}", u64::from_be_bytes(shard_key.to_bytes()[0..8].try_into().unwrap_or([0u8; 8])))
     }
 
+    /// Extract all unique metric names from a batch for topic routing
+    fn extract_metrics(&self, batch: &RecordBatch) -> Vec<String> {
+        use arrow_array::cast::AsArray;
+
+        if let Some(col) = batch.column_by_name("metric_name") {
+            use arrow_array::Array;
+            if let Some(arr) = col.as_string_opt::<i32>() {
+                let mut metrics = std::collections::HashSet::new();
+                for i in 0..arr.len() {
+                    if !arr.is_null(i) {
+                        metrics.insert(arr.value(i).to_string());
+                    }
+                }
+                return metrics.into_iter().collect();
+            }
+        }
+
+        vec!["unknown".to_string()]
+    }
+
     /// Get the shard monitor for external monitoring
     pub fn shard_monitor(&self) -> &Arc<ShardMonitor> {
         &self.shard_monitor
@@ -218,6 +388,16 @@ impl Ingester {
     /// Evaluate shards and get recommended actions (for external orchestration)
     pub fn evaluate_shards(&self) -> Vec<crate::sharding::ShardAction> {
         self.shard_monitor.evaluate_shards()
+    }
+
+    /// Get a reference to the topic broadcast channel for filtered streaming subscriptions
+    pub fn topic_broadcast(&self) -> &TopicBroadcastChannel {
+        &self.topic_broadcast
+    }
+
+    /// Subscribe to filtered streaming with a topic filter
+    pub async fn subscribe_filtered(&self, filter: TopicFilter) -> FilteredReceiver {
+        self.topic_broadcast.subscribe(filter).await
     }
 
     /// Check if flush is needed based on thresholds
@@ -267,9 +447,24 @@ impl Ingester {
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
-        // Broadcast to streaming query subscribers
-        if let Err(e) = self.broadcast.send(combined) {
-            debug!("No streaming subscribers: {}", e);
+        // Broadcast to streaming query subscribers (legacy)
+        if let Err(e) = self.broadcast.send(combined.clone()) {
+            debug!("No streaming subscribers (legacy): {}", e);
+        }
+
+        // Broadcast to topic-aware streaming query subscribers
+        let shard_id = self.compute_shard_id(&combined);
+        let metrics = self.extract_metrics(&combined);
+        let topic_batch = TopicBatch {
+            batch: combined,
+            metadata: BatchMetadata {
+                shard_id,
+                tenant_id: self.default_tenant_id,
+                metrics,
+            },
+        };
+        if let Err(e) = self.topic_broadcast.send(topic_batch) {
+            debug!("No topic broadcast subscribers: {}", e);
         }
 
         // Update last flush time
@@ -366,7 +561,7 @@ impl Ingester {
 }
 
 /// Chunk metadata for registration in metadata store
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChunkMetadata {
     pub path: String,
     pub min_timestamp: i64,

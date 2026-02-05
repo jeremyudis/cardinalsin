@@ -5,13 +5,15 @@
 
 mod client;
 mod local;
+mod s3;
+pub mod predicates;
 
-pub use client::MetadataClient;
+pub use client::{MetadataClient, SplitState};
 pub use local::LocalMetadataClient;
+pub use s3::{S3MetadataClient, S3MetadataConfig, ColumnStats};
+pub use predicates::{ColumnPredicate, PredicateValue};
 
 use crate::ingester::ChunkMetadata;
-use crate::Result;
-use async_trait::async_trait;
 use std::ops::Range;
 
 /// Time range for queries
@@ -64,7 +66,7 @@ impl From<&ChunkMetadata> for TimeIndexEntry {
 }
 
 /// Compaction job definition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CompactionJob {
     pub id: String,
     pub source_chunks: Vec<String>,
@@ -72,7 +74,7 @@ pub struct CompactionJob {
     pub status: CompactionStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CompactionStatus {
     Pending,
     InProgress,

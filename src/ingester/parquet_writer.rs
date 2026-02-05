@@ -3,9 +3,8 @@
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::{Compression, Encoding, ZstdLevel};
+use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
-use parquet::schema::types::ColumnPath;
 use crate::Result;
 
 /// Parquet writer optimized for time-series metrics

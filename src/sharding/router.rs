@@ -102,7 +102,7 @@ impl ShardRouter {
                         continue;
                     }
                 }
-                Err(Error::ShardMoved { new_location }) => {
+                Err(Error::ShardMoved { new_location: _ }) => {
                     self.invalidate(&shard.shard_id);
                     // In production, fetch new shard info from metadata
                     if attempt < MAX_RETRIES - 1 {

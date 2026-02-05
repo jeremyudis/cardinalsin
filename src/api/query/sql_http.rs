@@ -3,7 +3,6 @@
 //! REST API for executing SQL queries and retrieving results.
 
 use crate::api::ApiState;
-use crate::Result;
 
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::StreamWriter;

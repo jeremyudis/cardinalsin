@@ -13,7 +13,6 @@ pub use splitter::{ShardSplitter, SplitPhase};
 pub use rebalancer::RebalanceStrategy;
 pub use router::ShardRouter;
 
-use crate::Error;
 use std::time::Duration;
 
 /// Shard identifier
@@ -80,7 +79,7 @@ impl ShardKey {
 }
 
 /// Shard state
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ShardState {
     /// Shard is active and accepting writes/queries
     Active,
@@ -91,7 +90,7 @@ pub enum ShardState {
 }
 
 /// Replica information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReplicaInfo {
     pub replica_id: String,
     pub node_id: String,
@@ -99,7 +98,7 @@ pub struct ReplicaInfo {
 }
 
 /// Shard metadata
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShardMetadata {
     pub shard_id: ShardId,
     pub generation: u64,

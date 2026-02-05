@@ -139,7 +139,7 @@ pub struct MetricSchema {
     /// Label columns by name
     label_columns: HashMap<String, ColumnDefinition>,
     /// Whether to include all value types
-    multi_value: bool,
+    _multi_value: bool,
 }
 
 impl MetricSchema {
@@ -255,7 +255,7 @@ impl MetricSchemaBuilder {
         MetricSchema {
             schema,
             label_columns,
-            multi_value: self.multi_value,
+            _multi_value: self.multi_value,
         }
     }
 }

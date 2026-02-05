@@ -3,11 +3,11 @@
 //! Background service that merges and optimizes Parquet files.
 
 use cardinalsin::compactor::{Compactor, CompactorConfig};
-use cardinalsin::metadata::LocalMetadataClient;
+use cardinalsin::config::ComponentFactory;
+use cardinalsin::sharding::{HotShardConfig, ShardMonitor};
 use cardinalsin::StorageConfig;
 
 use clap::Parser;
-use object_store::memory::InMemory;
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{info, Level};
@@ -81,13 +81,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tenant_id: args.tenant_id.clone(),
     };
 
-    // Create object store
-    let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    info!("Using in-memory object store (development mode)");
+    // Create object store from environment
+    let object_store = ComponentFactory::create_object_store().await?;
 
-    // Create metadata client
-    let metadata: Arc<dyn cardinalsin::metadata::MetadataClient> =
-        Arc::new(LocalMetadataClient::new());
+    // Create metadata client from environment
+    let metadata = ComponentFactory::create_metadata_client(object_store.clone()).await?;
 
     // Create compactor config
     let compactor_config = CompactorConfig {
@@ -97,12 +95,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // Create shard monitor for hot shard detection
+    let shard_monitor = Arc::new(ShardMonitor::new(HotShardConfig::default()));
+
     // Create compactor
     let compactor = Compactor::new(
         compactor_config,
         object_store,
         metadata,
         storage_config,
+        shard_monitor,
     );
 
     info!(

@@ -1,9 +1,7 @@
 //! Query routing with shard awareness
 
 use crate::metadata::TimeRange;
-use crate::{Error, Result};
 use std::collections::HashMap;
-use std::sync::Arc;
 use parking_lot::RwLock;
 
 /// Shard information

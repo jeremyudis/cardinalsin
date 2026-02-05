@@ -3,15 +3,13 @@
 //! Stateless query node that executes queries via DataFusion.
 
 use cardinalsin::api;
+use cardinalsin::config::ComponentFactory;
 use cardinalsin::ingester::{Ingester, IngesterConfig};
-use cardinalsin::metadata::LocalMetadataClient;
 use cardinalsin::query::{QueryNode, QueryConfig};
 use cardinalsin::schema::MetricSchema;
 use cardinalsin::StorageConfig;
 
-use axum::Router;
 use clap::Parser;
-use object_store::memory::InMemory;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -95,13 +93,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tenant_id: args.tenant_id.clone(),
     };
 
-    // Create object store
-    let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    info!("Using in-memory object store (development mode)");
+    // Create object store from environment
+    let object_store = ComponentFactory::create_object_store().await?;
 
-    // Create metadata client
-    let metadata: Arc<dyn cardinalsin::metadata::MetadataClient> =
-        Arc::new(LocalMetadataClient::new());
+    // Create metadata client from environment
+    let metadata = ComponentFactory::create_metadata_client(object_store.clone()).await?;
 
     // Create query config
     let query_config = QueryConfig {

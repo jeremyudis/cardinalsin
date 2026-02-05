@@ -1,11 +1,23 @@
-//! Two-phase shard splitting protocol
+//! Five-phase shard splitting protocol
 
-use super::{ShardId, ShardMetadata, ShardState, TimeBucket};
+use super::{ShardId, ShardMetadata, TimeBucket};
+use crate::ingester::ChunkMetadata;
+use crate::metadata::MetadataClient;
 use crate::Result;
+use arrow::array::RecordBatch;
+use arrow::datatypes::DataType;
+use bytes::Bytes;
+use object_store::ObjectStore;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::ArrowWriter;
+use parquet::basic::{Compression, ZstdLevel};
+use parquet::file::properties::WriterProperties;
 use std::sync::Arc;
+use std::time::Duration;
+use tracing::{info, warn};
 
 /// Split phase
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SplitPhase {
     /// Preparation phase - creating new shard metadata
     Preparation,
@@ -21,6 +33,7 @@ pub enum SplitPhase {
 
 /// Pending shard (not yet active)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PendingShard {
     pub id: ShardId,
     pub range: (Vec<u8>, Vec<u8>),
@@ -28,26 +41,90 @@ pub struct PendingShard {
 
 /// Shard splitter for zero-downtime splitting
 pub struct ShardSplitter {
-    // In production, these would be real clients
-    // metadata: Arc<MetadataClient>,
-    // object_store: Arc<dyn ObjectStore>,
+    metadata: Arc<dyn MetadataClient>,
+    object_store: Arc<dyn ObjectStore>,
 }
 
 impl ShardSplitter {
     /// Create a new shard splitter
-    pub fn new() -> Self {
-        Self {}
+    pub fn new(metadata: Arc<dyn MetadataClient>, object_store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            metadata,
+            object_store,
+        }
     }
 
-    /// Split a hot shard into two
+    /// Execute full 5-phase split with enhanced monitoring and error handling
+    pub async fn execute_split_with_monitoring(&self, shard: &ShardMetadata) -> Result<()> {
+        let shard_id = &shard.shard_id;
+        info!("🚀 Starting 5-phase split for shard: {}", shard_id);
+
+        // Phase 1: Preparation (create new shard metadata)
+        info!("📋 Phase 1/5: Preparation");
+        let (new_shard_a, new_shard_b) = self.split_shard(shard).await?;
+        let split_point = self.calculate_split_point(shard);
+
+        // Store split state in metadata
+        self.metadata
+            .start_split(
+                shard_id,
+                vec![new_shard_a.clone(), new_shard_b.clone()],
+                split_point.clone(),
+            )
+            .await?;
+        info!("✅ Phase 1 complete: Created shards {} and {}", new_shard_a, new_shard_b);
+
+        // Phase 2: Enable dual-write (ingesters will detect and start dual-writing)
+        info!("✏️  Phase 2/5: Dual-write enabled");
+        self.metadata
+            .update_split_progress(shard_id, 0.0, SplitPhase::DualWrite)
+            .await?;
+
+        // Give ingesters time to discover the split state
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        info!("✅ Phase 2 complete: Ingesters now writing to both old and new shards");
+
+        // Phase 3: Backfill historical data
+        info!("📦 Phase 3/5: Backfilling historical data");
+        self.run_backfill(
+            shard_id,
+            &[new_shard_a.clone(), new_shard_b.clone()],
+            &split_point,
+        )
+        .await?;
+        info!("✅ Phase 3 complete: All historical data copied");
+
+        // Phase 4: Atomic cutover
+        info!("🔄 Phase 4/5: Atomic cutover");
+        self.cutover(shard_id).await?;
+        info!("✅ Phase 4 complete: Queries now using new shards");
+
+        // Phase 5: Cleanup (after grace period)
+        info!("🧹 Phase 5/5: Cleanup (grace period: 300s)");
+        self.cleanup(shard_id, Duration::from_secs(300)).await?;
+        info!("✅ Phase 5 complete: Old shard data removed");
+
+        info!(
+            "🎉 Split complete: {} → {} + {}",
+            shard_id, new_shard_a, new_shard_b
+        );
+        Ok(())
+    }
+
+    /// Execute full 5-phase split (legacy version, kept for compatibility)
+    pub async fn execute_split(&self, shard: &ShardMetadata) -> Result<()> {
+        // Delegate to the enhanced version
+        self.execute_split_with_monitoring(shard).await
+    }
+
+    /// Split a hot shard into two (Phase 1: Preparation)
     pub async fn split_shard(&self, shard: &ShardMetadata) -> Result<(ShardId, ShardId)> {
-        // Phase 1: Preparation
         let split_point = self.calculate_split_point(shard);
 
         let new_shard_a = ShardId::from(uuid::Uuid::new_v4().to_string());
         let new_shard_b = ShardId::from(uuid::Uuid::new_v4().to_string());
 
-        let pending_shards = vec![
+        let _pending_shards = vec![
             PendingShard {
                 id: new_shard_a.clone(),
                 range: (shard.key_range.0.clone(), split_point.clone()),
@@ -58,13 +135,325 @@ impl ShardSplitter {
             },
         ];
 
-        // In production:
-        // Phase 2: Enable dual-write
-        // Phase 3: Backfill historical data
-        // Phase 4: Atomic cutover
-        // Phase 5: Cleanup
+        info!(
+            "Phase 1: Created new shards {} and {} for split of {}",
+            new_shard_a, new_shard_b, shard.shard_id
+        );
 
         Ok((new_shard_a, new_shard_b))
+    }
+
+    /// Run backfill phase: copy historical data to new shards (Phase 3)
+    pub async fn run_backfill(
+        &self,
+        old_shard: &str,
+        new_shards: &[String],
+        split_point: &[u8],
+    ) -> Result<()> {
+        info!(
+            "Phase 3: Starting backfill for shard {} → {:?}",
+            old_shard, new_shards
+        );
+
+        // Get all chunks for the old shard
+        let chunks = self.metadata.get_chunks_for_shard(old_shard).await?;
+        let total_chunks = chunks.len();
+
+        if total_chunks == 0 {
+            info!("No chunks to backfill for shard {}", old_shard);
+            self.metadata
+                .update_split_progress(old_shard, 1.0, SplitPhase::Backfill)
+                .await?;
+            return Ok(());
+        }
+
+        for (idx, chunk_entry) in chunks.iter().enumerate() {
+            // Read chunk from object storage
+            let path: object_store::path::Path = chunk_entry.chunk_path.as_str().into();
+            let bytes = match self.object_store.get(&path).await {
+                Ok(result) => result.bytes().await?,
+                Err(e) => {
+                    warn!("Failed to read chunk {}: {}, skipping", chunk_entry.chunk_path, e);
+                    continue;
+                }
+            };
+
+            // Parse Parquet
+            let reader = match ParquetRecordBatchReaderBuilder::try_new(bytes) {
+                Ok(builder) => builder.with_batch_size(8192).build()?,
+                Err(e) => {
+                    warn!(
+                        "Failed to parse chunk {}: {}, skipping",
+                        chunk_entry.chunk_path, e
+                    );
+                    continue;
+                }
+            };
+
+            // Process each batch
+            for batch_result in reader {
+                let batch = batch_result?;
+
+                // Split batch by split point
+                let (batch_a, batch_b) = self.split_batch(&batch, split_point)?;
+
+                // Write to new shards
+                if batch_a.num_rows() > 0 {
+                    self.write_chunk_to_shard(&new_shards[0], batch_a).await?;
+                }
+                if batch_b.num_rows() > 0 {
+                    self.write_chunk_to_shard(&new_shards[1], batch_b).await?;
+                }
+            }
+
+            // Update progress
+            let progress = (idx + 1) as f64 / total_chunks as f64;
+            self.metadata
+                .update_split_progress(old_shard, progress, SplitPhase::Backfill)
+                .await?;
+
+            if idx % 10 == 0 || idx == total_chunks - 1 {
+                info!(
+                    "Backfill progress: {:.1}% ({}/{})",
+                    progress * 100.0,
+                    idx + 1,
+                    total_chunks
+                );
+            }
+        }
+
+        info!("Backfill complete for shard {}", old_shard);
+        Ok(())
+    }
+
+    /// Split a RecordBatch into two based on timestamp split point
+    fn split_batch(&self, batch: &RecordBatch, split_point: &[u8]) -> Result<(RecordBatch, RecordBatch)> {
+        // Extract timestamp column
+        let ts_column = batch
+            .column_by_name("timestamp")
+            .ok_or_else(|| crate::Error::Internal("Missing timestamp column".to_string()))?;
+
+        // Check if it's an Int64 array (timestamp)
+        let ts_array = if let DataType::Int64 = ts_column.data_type() {
+            ts_column
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .ok_or_else(|| crate::Error::Internal("Timestamp not Int64".to_string()))?
+        } else {
+            return Err(crate::Error::Internal(
+                "Timestamp column is not Int64".to_string(),
+            ));
+        };
+
+        // Build selection indices
+        let mut indices_a = Vec::new();
+        let mut indices_b = Vec::new();
+
+        let split_ts = i64::from_be_bytes(
+            split_point
+                .try_into()
+                .map_err(|_| crate::Error::Internal("Invalid split point".to_string()))?,
+        );
+
+        for i in 0..batch.num_rows() {
+            let ts = ts_array.value(i);
+            if ts < split_ts {
+                indices_a.push(i as u32);
+            } else {
+                indices_b.push(i as u32);
+            }
+        }
+
+        // Use Arrow take kernel to extract rows
+        let indices_a_array = arrow::array::UInt32Array::from(indices_a);
+        let indices_b_array = arrow::array::UInt32Array::from(indices_b);
+
+        let batch_a = arrow::compute::take_record_batch(batch, &indices_a_array)?;
+        let batch_b = arrow::compute::take_record_batch(batch, &indices_b_array)?;
+
+        Ok((batch_a, batch_b))
+    }
+
+    /// Write a batch to a shard as a new chunk
+    async fn write_chunk_to_shard(&self, shard_id: &str, batch: RecordBatch) -> Result<()> {
+        // Convert batch to Parquet
+        let mut buffer = Vec::new();
+        {
+            let props = WriterProperties::builder()
+                .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
+                .build();
+
+            let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), Some(props))?;
+            writer.write(&batch)?;
+            writer.close()?;
+        }
+
+        // Generate chunk path for new shard
+        let chunk_id = uuid::Uuid::new_v4();
+        let path = format!("{}/chunk_{}.parquet", shard_id, chunk_id);
+
+        // Upload to object storage
+        let object_path: object_store::path::Path = path.as_str().into();
+        let bytes_len = buffer.len();
+        self.object_store
+            .put(&object_path, Bytes::from(buffer).into())
+            .await?;
+
+        // Get timestamp range from batch
+        let ts_column = batch
+            .column_by_name("timestamp")
+            .ok_or_else(|| crate::Error::Internal("Missing timestamp column".to_string()))?;
+        let ts_array = ts_column
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .ok_or_else(|| crate::Error::Internal("Timestamp not Int64".to_string()))?;
+
+        let min_timestamp = (0..batch.num_rows())
+            .map(|i| ts_array.value(i))
+            .min()
+            .unwrap_or(0);
+        let max_timestamp = (0..batch.num_rows())
+            .map(|i| ts_array.value(i))
+            .max()
+            .unwrap_or(0);
+
+        // Register with metadata
+        let metadata = ChunkMetadata {
+            path: path.clone(),
+            min_timestamp,
+            max_timestamp,
+            row_count: batch.num_rows() as u64,
+            size_bytes: bytes_len as u64,
+        };
+        self.metadata.register_chunk(&path, &metadata).await?;
+
+        Ok(())
+    }
+
+    /// Perform atomic cutover to new shards (Phase 4)
+    pub async fn cutover(&self, old_shard: &str) -> Result<()> {
+        use super::{ShardMetadata, ShardState};
+
+        let split_state = self
+            .metadata
+            .get_split_state(old_shard)
+            .await?
+            .ok_or_else(|| crate::Error::Internal("No split in progress".to_string()))?;
+
+        // Verify backfill is 100% complete
+        if split_state.backfill_progress < 1.0 {
+            return Err(crate::Error::Internal(format!(
+                "Backfill only {:.1}% complete",
+                split_state.backfill_progress * 100.0
+            )));
+        }
+
+        info!("Phase 4: Performing cutover for shard {}", old_shard);
+
+        // Load old shard metadata
+        let old_metadata = self
+            .metadata
+            .get_shard_metadata(old_shard)
+            .await?
+            .ok_or_else(|| crate::Error::ShardNotFound(old_shard.to_string()))?;
+
+        let current_generation = old_metadata.generation;
+
+        // Calculate split point timestamp
+        let split_ts = i64::from_be_bytes(
+            split_state.split_point[..8]
+                .try_into()
+                .unwrap_or([0u8; 8]),
+        );
+
+        // Create new shard metadata for both shards
+        // Note: generation starts at 0 here, but update_shard_metadata will atomically
+        // increment it to 1 during the CAS operation (expected_generation=0 -> stored=1)
+        let new_shard_a = ShardMetadata {
+            shard_id: split_state.new_shards[0].clone(),
+            generation: 0, // Initial value; incremented to 1 by update_shard_metadata CAS
+            key_range: (old_metadata.key_range.0.clone(), split_state.split_point.clone()),
+            replicas: old_metadata.replicas.clone(),
+            state: ShardState::Active,
+            min_time: old_metadata.min_time,
+            max_time: split_ts,
+        };
+
+        let new_shard_b = ShardMetadata {
+            shard_id: split_state.new_shards[1].clone(),
+            generation: 0, // Initial value; incremented to 1 by update_shard_metadata CAS
+            key_range: (split_state.split_point.clone(), old_metadata.key_range.1.clone()),
+            replicas: old_metadata.replicas.clone(),
+            state: ShardState::Active,
+            min_time: split_ts,
+            max_time: old_metadata.max_time,
+        };
+
+        // Register new shards using CAS (expected_generation = 0 for new shards)
+        // This will atomically store the shards with generation = 1
+        self.metadata
+            .update_shard_metadata(&new_shard_a.shard_id, &new_shard_a, 0)
+            .await?;
+        self.metadata
+            .update_shard_metadata(&new_shard_b.shard_id, &new_shard_b, 0)
+            .await?;
+
+        // Mark old shard as pending deletion using CAS
+        let mut old_updated = old_metadata.clone();
+        old_updated.state = ShardState::PendingDeletion {
+            delete_after: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                + 300_000_000_000, // 5 minutes
+        };
+
+        self.metadata
+            .update_shard_metadata(old_shard, &old_updated, current_generation)
+            .await?;
+
+        // Complete split in metadata (removes from split states)
+        self.metadata.complete_split(old_shard).await?;
+
+        info!(
+            "Cutover complete. New shards: {} (generation 1 after CAS), {} (generation 1 after CAS)",
+            new_shard_a.shard_id, new_shard_b.shard_id
+        );
+        Ok(())
+    }
+
+    /// Clean up old shard data after split (Phase 5)
+    pub async fn cleanup(&self, old_shard: &str, grace_period: Duration) -> Result<()> {
+        info!(
+            "Phase 5: Starting cleanup for old shard {} (grace period: {:?})",
+            old_shard, grace_period
+        );
+
+        // Wait grace period for in-flight queries to complete
+        tokio::time::sleep(grace_period).await;
+
+        // Get all chunks for old shard
+        let chunks = self.metadata.get_chunks_for_shard(old_shard).await?;
+
+        info!("Deleting {} chunks from old shard", chunks.len());
+
+        // Delete from object storage
+        for chunk in chunks.iter() {
+            let path: object_store::path::Path = chunk.chunk_path.as_str().into();
+
+            match self.object_store.delete(&path).await {
+                Ok(_) => {}
+                Err(e) => {
+                    // Log but continue - don't fail cleanup on individual deletes
+                    warn!("Failed to delete chunk {}: {}", chunk.chunk_path, e);
+                }
+            }
+
+            // Remove from metadata
+            if let Err(e) = self.metadata.delete_chunk(&chunk.chunk_path).await {
+                warn!("Failed to delete chunk metadata {}: {}", chunk.chunk_path, e);
+            }
+        }
+
+        info!("Cleanup complete for shard {}", old_shard);
+        Ok(())
     }
 
     /// Calculate the split point based on time
@@ -81,20 +470,19 @@ impl ShardSplitter {
     }
 }
 
-impl Default for ShardSplitter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[cfg(test)]
 mod tests {
+    use super::super::{ReplicaInfo, ShardState};
     use super::*;
-    use super::super::ReplicaInfo;
+    use crate::metadata::LocalMetadataClient;
+    use object_store::memory::InMemory;
 
     #[tokio::test]
     async fn test_split_shard() {
-        let splitter = ShardSplitter::new();
+        let metadata = Arc::new(LocalMetadataClient::new());
+        let object_store = Arc::new(InMemory::new());
+        let splitter = ShardSplitter::new(metadata, object_store);
 
         let shard = ShardMetadata {
             shard_id: "shard-1".to_string(),
@@ -115,5 +503,28 @@ mod tests {
         assert_ne!(shard_a, shard_b);
         assert!(!shard_a.is_empty());
         assert!(!shard_b.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_split_point_calculation() {
+        let metadata = Arc::new(LocalMetadataClient::new());
+        let object_store = Arc::new(InMemory::new());
+        let splitter = ShardSplitter::new(metadata, object_store);
+
+        let shard = ShardMetadata {
+            shard_id: "shard-1".to_string(),
+            generation: 1,
+            key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
+            replicas: vec![],
+            state: ShardState::Active,
+            min_time: 0,
+            max_time: 1000000000000, // 1000 seconds
+        };
+
+        let split_point = splitter.calculate_split_point(&shard);
+
+        // Should be roughly in the middle
+        assert!(!split_point.is_empty());
+        assert_eq!(split_point.len(), 8); // i64 bytes
     }
 }

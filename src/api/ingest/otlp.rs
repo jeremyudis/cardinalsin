@@ -16,7 +16,7 @@ use std::sync::Arc;
 /// OTLP metrics receiver
 pub struct OtlpReceiver {
     ingester: Arc<Ingester>,
-    schema: Arc<Schema>,
+    _schema: Arc<Schema>,
 }
 
 impl OtlpReceiver {
@@ -34,7 +34,7 @@ impl OtlpReceiver {
             // Dynamic label columns would be added based on actual data
         ]));
 
-        Self { ingester, schema }
+        Self { ingester, _schema: schema }
     }
 
     /// Convert OTLP metrics to Arrow RecordBatch

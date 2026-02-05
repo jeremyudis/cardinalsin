@@ -8,6 +8,7 @@ use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use parquet::arrow::ArrowWriter;
 use std::sync::Arc;
+use tempfile::tempdir;
 
 fn create_test_batch(rows: usize) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
@@ -49,24 +50,40 @@ fn create_parquet_bytes(rows: usize) -> Bytes {
     Bytes::from(buffer)
 }
 
+fn create_cache_config() -> (CacheConfig, tempfile::TempDir) {
+    let dir = tempdir().unwrap();
+    let config = CacheConfig {
+        l1_size: 100 * 1024 * 1024, // 100MB
+        l2_size: 500 * 1024 * 1024, // 500MB
+        l2_dir: Some(dir.path().to_str().unwrap().to_string()),
+    };
+    (config, dir)
+}
+
 fn benchmark_cache_hit(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     let mut group = c.benchmark_group("cache_hit");
     group.throughput(Throughput::Elements(1));
 
-    let cache = TieredCache::new(CacheConfig::default()).unwrap();
+    let (config, _dir) = create_cache_config();
     let data = create_parquet_bytes(10_000);
 
-    // Pre-populate cache
-    rt.block_on(async {
-        cache.insert("test_key", data.clone()).await;
+    // Create cache and pre-populate it via get_or_fetch
+    let cache = rt.block_on(async {
+        let cache = TieredCache::new(config).await.unwrap();
+        let data_clone = data.clone();
+        // Pre-populate cache by fetching once
+        let _ = cache.get_or_fetch("test_key", || async move {
+            Ok(data_clone)
+        }).await.unwrap();
+        cache
     });
 
     group.bench_function("l1_hit", |b| {
         b.to_async(&rt).iter(|| async {
             let result = cache.get_or_fetch("test_key", || async {
-                panic!("Should not fetch");
+                panic!("Should not fetch - cache should be populated");
             }).await.unwrap();
             black_box(result);
         });
@@ -85,11 +102,17 @@ fn benchmark_cache_miss(c: &mut Criterion) {
 
     group.bench_function("fetch_and_cache", |b| {
         b.to_async(&rt).iter_batched(
-            || TieredCache::new(CacheConfig::default()).unwrap(),
-            |cache| async {
-                let data = data.clone();
-                let result = cache.get_or_fetch("test_key", || async {
-                    Ok(data)
+            || {
+                let (config, dir) = create_cache_config();
+                let cache = rt.block_on(async {
+                    TieredCache::new(config).await.unwrap()
+                });
+                let data_clone = data.clone();
+                (cache, data_clone, dir)
+            },
+            |(cache, data_clone, _dir)| async move {
+                let result = cache.get_or_fetch("test_key", || async move {
+                    Ok(data_clone)
                 }).await.unwrap();
                 black_box(result);
             },

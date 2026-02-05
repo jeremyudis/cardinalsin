@@ -41,6 +41,8 @@ services:
     container_name: cardinalsin-ingester
     command: ["cardinalsin-ingester"]
     environment:
+      STORAGE_BACKEND: s3
+      METADATA_BACKEND: s3
       S3_BUCKET: cardinalsin-data
       S3_REGION: us-east-1
       S3_ENDPOINT: http://minio:9000
@@ -63,6 +65,8 @@ services:
     container_name: cardinalsin-query
     command: ["cardinalsin-query"]
     environment:
+      STORAGE_BACKEND: s3
+      METADATA_BACKEND: s3
       S3_BUCKET: cardinalsin-data
       S3_REGION: us-east-1
       S3_ENDPOINT: http://minio:9000
@@ -85,6 +89,8 @@ services:
     container_name: cardinalsin-compactor
     command: ["cardinalsin-compactor"]
     environment:
+      STORAGE_BACKEND: s3
+      METADATA_BACKEND: s3
       S3_BUCKET: cardinalsin-data
       S3_REGION: us-east-1
       S3_ENDPOINT: http://minio:9000

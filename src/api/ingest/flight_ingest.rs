@@ -6,7 +6,7 @@ use crate::ingester::Ingester;
 use crate::Result;
 
 use arrow_array::RecordBatch;
-use arrow_flight::{FlightData, SchemaAsIpc};
+use arrow_flight::FlightData;
 use arrow_ipc::reader::StreamDecoder;
 use arrow_schema::Schema;
 use std::sync::Arc;

@@ -2,15 +2,17 @@
 //!
 //! Stateless ingester node that receives metrics and writes to object storage.
 
+use cardinalsin::api;
+use cardinalsin::config::ComponentFactory;
 use cardinalsin::ingester::{Ingester, IngesterConfig};
-use cardinalsin::metadata::LocalMetadataClient;
+use cardinalsin::query::{QueryConfig, QueryNode};
 use cardinalsin::schema::MetricSchema;
 use cardinalsin::StorageConfig;
 
 use clap::Parser;
-use object_store::memory::InMemory;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use tokio::signal;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -66,7 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Level::INFO,
     };
 
-    let subscriber = FmtSubscriber::builder()
+    let _subscriber = FmtSubscriber::builder()
         .with_max_level(log_level)
         .with_target(true)
         .with_thread_ids(true)
@@ -83,15 +85,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tenant_id: args.tenant_id.clone(),
     };
 
-    // Create object store
-    // In production, use object_store::aws::AmazonS3Builder
-    let object_store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-    info!("Using in-memory object store (development mode)");
+    // Create object store from environment
+    let object_store = ComponentFactory::create_object_store().await?;
 
-    // Create metadata client
-    let metadata: Arc<dyn cardinalsin::metadata::MetadataClient> =
-        Arc::new(LocalMetadataClient::new());
-    info!("Using local metadata store (development mode)");
+    // Create metadata client from environment
+    let metadata = ComponentFactory::create_metadata_client(object_store.clone()).await?;
 
     // Create ingester
     let ingester_config = IngesterConfig {
@@ -105,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ingester_config,
         object_store,
         metadata,
-        storage_config,
+        storage_config.clone(),
         schema,
     ));
 
@@ -115,8 +113,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ingester_timer.run_flush_timer().await;
     });
 
-    // Build API router
-    // Note: In a real deployment, we'd also start gRPC servers for OTLP
+    // Create a minimal query node for the API (ingester doesn't serve queries, but API needs it)
+    let query_node = Arc::new(
+        QueryNode::new(
+            QueryConfig::default(),
+            ComponentFactory::create_object_store().await?,
+            ComponentFactory::create_metadata_client(ComponentFactory::create_object_store().await?).await?,
+            storage_config.clone(),
+        )
+        .await?,
+    );
+
+    // Build HTTP router
+    let router = api::build_http_router(ingester, query_node);
+
+    // Start HTTP server
+    let addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
+    let listener = TcpListener::bind(addr).await?;
 
     info!(
         http_port = args.http_port,
@@ -124,8 +137,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Ingester ready"
     );
 
-    // Wait for shutdown signal
-    shutdown_signal().await;
+    // Start server with graceful shutdown
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     info!("Ingester shutting down");
 

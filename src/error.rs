@@ -48,6 +48,12 @@ pub enum Error {
     RateLimitExceeded { tenant_id: String, limit: u64 },
     /// Too many subscriptions
     TooManySubscriptions,
+    /// Metadata conflict (CAS failure)
+    Conflict,
+    /// Too many retries
+    TooManyRetries,
+    /// Shard not found
+    ShardNotFound(String),
 }
 
 /// Shard-specific errors
@@ -103,6 +109,9 @@ impl fmt::Display for Error {
                 write!(f, "Rate limit exceeded for tenant {}: {} req/s", tenant_id, limit)
             }
             Error::TooManySubscriptions => write!(f, "Too many active subscriptions"),
+            Error::Conflict => write!(f, "Metadata conflict: concurrent modification detected"),
+            Error::TooManyRetries => write!(f, "Too many retries: operation failed after maximum retry attempts"),
+            Error::ShardNotFound(shard_id) => write!(f, "Shard not found: {}", shard_id),
         }
     }
 }

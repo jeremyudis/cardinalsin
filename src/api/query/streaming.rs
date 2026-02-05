@@ -5,7 +5,6 @@ use crate::api::ApiState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::IntoResponse;
-use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 
 /// Streaming query request

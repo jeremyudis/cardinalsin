@@ -1,31 +1,30 @@
 //! DataFusion query engine integration
 
 use super::cache::TieredCache;
+use super::cached_store::CachedObjectStore;
 use crate::metadata::TimeRange;
 use crate::{Error, Result};
 
 use arrow_array::RecordBatch;
 use datafusion::prelude::*;
-use datafusion::datasource::listing::{ListingTable, ListingTableConfig, ListingTableUrl, ListingOptions};
+use datafusion::datasource::listing::{
+    ListingTable, ListingTableConfig, ListingTableUrl, ListingOptions,
+};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::execution::context::SessionState;
-use datafusion::execution::runtime_env::{RuntimeConfig, RuntimeEnv};
-use datafusion::logical_expr::{LogicalPlan, Expr, Operator};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+use datafusion::execution::SessionStateBuilder;
+use datafusion::logical_expr::{Expr, LogicalPlan, Operator};
 use datafusion::scalar::ScalarValue;
 use object_store::ObjectStore;
-use std::sync::Arc;
-use std::collections::HashSet;
 use parking_lot::RwLock;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Query engine powered by DataFusion
 #[derive(Clone)]
 pub struct QueryEngine {
     /// DataFusion session context
     ctx: SessionContext,
-    /// Object store reference
-    object_store: Arc<dyn ObjectStore>,
-    /// Tiered cache
-    cache: Arc<TieredCache>,
     /// Registered table paths
     registered_paths: Arc<RwLock<HashSet<String>>>,
 }
@@ -36,9 +35,24 @@ impl QueryEngine {
         object_store: Arc<dyn ObjectStore>,
         cache: Arc<TieredCache>,
     ) -> Result<Self> {
+        // Wrap object store with caching layer
+        let cached_store = Arc::new(CachedObjectStore::new(
+            object_store.clone(),
+            cache.clone(),
+        ));
+
         // Configure runtime environment
-        let runtime_config = RuntimeConfig::new();
-        let runtime_env = Arc::new(RuntimeEnv::try_new(runtime_config)?);
+        let runtime_env = RuntimeEnvBuilder::new()
+            .build_arc()
+            .map_err(|e| Error::Config(format!("Failed to build runtime env: {}", e)))?;
+
+        // Register object store with DataFusion for s3:// URLs
+        // DataFusion uses the URL scheme to look up the appropriate ObjectStore
+        let s3_url = url::Url::parse("s3://bucket").map_err(|e| {
+            Error::Config(format!("Failed to parse S3 URL: {}", e))
+        })?;
+        runtime_env
+            .register_object_store(&s3_url, cached_store.clone());
 
         // Create session config with optimizations
         let session_config = SessionConfig::new()
@@ -49,13 +63,17 @@ impl QueryEngine {
             .with_collect_statistics(true);
 
         // Create session state and context
-        let state = SessionState::new_with_config_rt(session_config, runtime_env);
+        let state = SessionStateBuilder::new()
+            .with_config(session_config)
+            .with_runtime_env(runtime_env)
+            .build();
         let ctx = SessionContext::new_with_state(state);
+
+        // object_store and cache are used indirectly through CachedObjectStore
+        let _ = (&object_store, &cache);
 
         Ok(Self {
             ctx,
-            object_store,
-            cache,
             registered_paths: Arc::new(RwLock::new(HashSet::new())),
         })
     }
@@ -74,17 +92,20 @@ impl QueryEngine {
         let table_name = Self::path_to_table_name(path);
 
         // Create listing table configuration
-        let file_format = ParquetFormat::default()
-            .with_enable_pruning(true);
+        let file_format = ParquetFormat::default().with_enable_pruning(true);
 
         let listing_options = ListingOptions::new(Arc::new(file_format))
             .with_file_extension(".parquet")
             .with_collect_stat(true);
 
-        // Register the file as a table
-        // Note: In production, we'd use the object_store directly
-        // For now, we create a simple table config
-        let url = format!("file://{}", path);
+        // Use S3 URL directly (DataFusion recognizes s3:// scheme)
+        // Path from metadata already has format: bucket/tenant/data/year=.../chunk.parquet
+        let url = if path.starts_with("s3://") {
+            path.to_string()
+        } else {
+            format!("s3://{}", path) // Add s3:// if not present
+        };
+
         if let Ok(table_url) = ListingTableUrl::parse(&url) {
             let config = ListingTableConfig::new(table_url)
                 .with_listing_options(listing_options);
@@ -107,6 +128,105 @@ impl QueryEngine {
         let df = self.ctx.sql(sql).await?;
         let batches = df.collect().await?;
         Ok(batches)
+    }
+
+    /// Execute a SQL query with index awareness for adaptive indexing
+    pub async fn execute_with_indexes(
+        &self,
+        sql: &str,
+        tenant_id: &str,
+        index_controller: Arc<crate::adaptive_index::AdaptiveIndexController>,
+    ) -> Result<Vec<RecordBatch>> {
+        // 1. Analyze query for filter predicates
+        let df = self.ctx.sql(sql).await?;
+        let plan = df.logical_plan();
+        let filter_columns = Self::extract_filter_columns(plan);
+
+        // 2. Get visible indexes for this tenant
+        let tenant_string = tenant_id.to_string();
+        let available_indexes = index_controller
+            .lifecycle_manager
+            .get_visible_index_metadata(&tenant_string);
+
+        // 3. Match indexes to query predicates and record usage
+        for index in &available_indexes {
+            if filter_columns.contains(&index.column_name) {
+                index_controller.lifecycle_manager.record_usage(&index.id);
+            }
+        }
+
+        // 4. Execute query (DataFusion handles predicate pushdown automatically)
+        let batches = df.collect().await?;
+
+        // 5. Track would-have-helped for invisible indexes
+        let invisible_indexes = index_controller
+            .lifecycle_manager
+            .get_invisible_indexes(&tenant_string);
+
+        for index in invisible_indexes {
+            if filter_columns.contains(&index.column_name) {
+                index_controller
+                    .lifecycle_manager
+                    .record_would_have_helped(&index.id);
+            }
+        }
+
+        Ok(batches)
+    }
+
+    /// Extract filter columns from a logical plan
+    fn extract_filter_columns(plan: &LogicalPlan) -> Vec<String> {
+        let mut columns = Vec::new();
+        Self::extract_filter_columns_recursive(plan, &mut columns);
+        columns.sort();
+        columns.dedup();
+        columns
+    }
+
+    /// Recursively extract filter columns from a logical plan
+    fn extract_filter_columns_recursive(plan: &LogicalPlan, columns: &mut Vec<String>) {
+        match plan {
+            LogicalPlan::Filter(filter) => {
+                Self::extract_columns_from_expr(&filter.predicate, columns);
+                Self::extract_filter_columns_recursive(&filter.input, columns);
+            }
+            LogicalPlan::Projection(proj) => {
+                Self::extract_filter_columns_recursive(&proj.input, columns);
+            }
+            LogicalPlan::Sort(sort) => {
+                Self::extract_filter_columns_recursive(&sort.input, columns);
+            }
+            LogicalPlan::Limit(limit) => {
+                Self::extract_filter_columns_recursive(&limit.input, columns);
+            }
+            LogicalPlan::Aggregate(agg) => {
+                Self::extract_filter_columns_recursive(&agg.input, columns);
+            }
+            _ => {}
+        }
+    }
+
+    /// Extract column names from an expression
+    fn extract_columns_from_expr(expr: &Expr, columns: &mut Vec<String>) {
+        match expr {
+            Expr::Column(col) => {
+                columns.push(col.name.clone());
+            }
+            Expr::BinaryExpr(binary) => {
+                Self::extract_columns_from_expr(&binary.left, columns);
+                Self::extract_columns_from_expr(&binary.right, columns);
+            }
+            Expr::Between(between) => {
+                Self::extract_columns_from_expr(&between.expr, columns);
+            }
+            Expr::InList(in_list) => {
+                Self::extract_columns_from_expr(&in_list.expr, columns);
+            }
+            Expr::Not(not) => {
+                Self::extract_columns_from_expr(&not, columns);
+            }
+            _ => {}
+        }
     }
 
     /// Execute a SQL query and return a stream
@@ -237,6 +357,171 @@ impl QueryEngine {
         }
     }
 
+    /// Extract column predicates from a SQL query for metadata-level filtering
+    ///
+    /// This enables predicate pushdown to the metadata layer, dramatically
+    /// reducing S3 read costs by pruning chunks before DataFusion sees them.
+    pub async fn extract_column_predicates(
+        &self,
+        sql: &str,
+    ) -> Result<Vec<crate::metadata::predicates::ColumnPredicate>> {
+        
+
+        let df = self.ctx.sql(sql).await?;
+        let plan = df.logical_plan();
+
+        let mut predicates = Vec::new();
+        Self::extract_predicates_from_plan(plan, &mut predicates);
+
+        Ok(predicates)
+    }
+
+    /// Recursively extract predicates from a logical plan
+    fn extract_predicates_from_plan(
+        plan: &LogicalPlan,
+        predicates: &mut Vec<crate::metadata::predicates::ColumnPredicate>,
+    ) {
+        
+
+        match plan {
+            LogicalPlan::Filter(filter) => {
+                if let Some(pred) = Self::convert_expr_to_predicate(&filter.predicate) {
+                    predicates.push(pred);
+                }
+                Self::extract_predicates_from_plan(&filter.input, predicates);
+            }
+            LogicalPlan::Projection(proj) => {
+                Self::extract_predicates_from_plan(&proj.input, predicates);
+            }
+            LogicalPlan::Sort(sort) => {
+                Self::extract_predicates_from_plan(&sort.input, predicates);
+            }
+            LogicalPlan::Limit(limit) => {
+                Self::extract_predicates_from_plan(&limit.input, predicates);
+            }
+            LogicalPlan::Aggregate(agg) => {
+                Self::extract_predicates_from_plan(&agg.input, predicates);
+            }
+            _ => {}
+        }
+    }
+
+    /// Convert a DataFusion expression to a ColumnPredicate
+    fn convert_expr_to_predicate(
+        expr: &Expr,
+    ) -> Option<crate::metadata::predicates::ColumnPredicate> {
+        use crate::metadata::predicates::ColumnPredicate;
+
+        match expr {
+            Expr::BinaryExpr(binary) => {
+                // Skip timestamp predicates (already handled by time range extraction)
+                if let Expr::Column(col) = binary.left.as_ref() {
+                    if col.name == "timestamp" || col.name == "time" {
+                        return None;
+                    }
+
+                    let value = Self::convert_scalar_to_predicate_value(&binary.right)?;
+
+                    match binary.op {
+                        Operator::Eq => Some(ColumnPredicate::Eq(col.name.clone(), value)),
+                        Operator::NotEq => Some(ColumnPredicate::NotEq(col.name.clone(), value)),
+                        Operator::Lt => Some(ColumnPredicate::Lt(col.name.clone(), value)),
+                        Operator::LtEq => Some(ColumnPredicate::LtEq(col.name.clone(), value)),
+                        Operator::Gt => Some(ColumnPredicate::Gt(col.name.clone(), value)),
+                        Operator::GtEq => Some(ColumnPredicate::GtEq(col.name.clone(), value)),
+                        Operator::And => {
+                            let left = Self::convert_expr_to_predicate(&binary.left)?;
+                            let right = Self::convert_expr_to_predicate(&binary.right)?;
+                            Some(ColumnPredicate::And(Box::new(left), Box::new(right)))
+                        }
+                        Operator::Or => {
+                            let left = Self::convert_expr_to_predicate(&binary.left)?;
+                            let right = Self::convert_expr_to_predicate(&binary.right)?;
+                            Some(ColumnPredicate::Or(Box::new(left), Box::new(right)))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    // Handle AND/OR without column reference
+                    match binary.op {
+                        Operator::And => {
+                            let left = Self::convert_expr_to_predicate(&binary.left)?;
+                            let right = Self::convert_expr_to_predicate(&binary.right)?;
+                            Some(ColumnPredicate::And(Box::new(left), Box::new(right)))
+                        }
+                        Operator::Or => {
+                            let left = Self::convert_expr_to_predicate(&binary.left)?;
+                            let right = Self::convert_expr_to_predicate(&binary.right)?;
+                            Some(ColumnPredicate::Or(Box::new(left), Box::new(right)))
+                        }
+                        _ => None,
+                    }
+                }
+            }
+            Expr::Between(between) => {
+                if let Expr::Column(col) = between.expr.as_ref() {
+                    if col.name == "timestamp" || col.name == "time" {
+                        return None;
+                    }
+
+                    let low = Self::convert_scalar_to_predicate_value(&between.low)?;
+                    let high = Self::convert_scalar_to_predicate_value(&between.high)?;
+                    Some(ColumnPredicate::Between(col.name.clone(), low, high))
+                } else {
+                    None
+                }
+            }
+            Expr::InList(in_list) => {
+                if let Expr::Column(col) = in_list.expr.as_ref() {
+                    if col.name == "timestamp" || col.name == "time" {
+                        return None;
+                    }
+
+                    let values: Option<Vec<_>> = in_list
+                        .list
+                        .iter()
+                        .map(Self::convert_scalar_to_predicate_value)
+                        .collect();
+                    let values = values?;
+
+                    if in_list.negated {
+                        Some(ColumnPredicate::NotIn(col.name.clone(), values))
+                    } else {
+                        Some(ColumnPredicate::In(col.name.clone(), values))
+                    }
+                } else {
+                    None
+                }
+            }
+            Expr::Not(inner) => {
+                let inner_pred = Self::convert_expr_to_predicate(inner)?;
+                Some(ColumnPredicate::Not(Box::new(inner_pred)))
+            }
+            _ => None,
+        }
+    }
+
+    /// Convert a DataFusion scalar expression to a PredicateValue
+    fn convert_scalar_to_predicate_value(expr: &Expr) -> Option<crate::metadata::predicates::PredicateValue> {
+        use crate::metadata::predicates::PredicateValue;
+
+        match expr {
+            Expr::Literal(scalar) => match scalar {
+                ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
+                    Some(PredicateValue::String(s.clone()))
+                }
+                ScalarValue::Int64(Some(i)) => Some(PredicateValue::Int64(*i)),
+                ScalarValue::Int32(Some(i)) => Some(PredicateValue::Int64(*i as i64)),
+                ScalarValue::Float64(Some(f)) => Some(PredicateValue::Float64(*f)),
+                ScalarValue::Float32(Some(f)) => Some(PredicateValue::Float64(*f as f64)),
+                ScalarValue::Boolean(Some(b)) => Some(PredicateValue::Boolean(*b)),
+                ScalarValue::Null => Some(PredicateValue::Null),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     /// Analyze a query without executing
     pub async fn analyze(&self, sql: &str) -> Result<datafusion::logical_expr::LogicalPlan> {
         let df = self.ctx.sql(sql).await?;
@@ -272,11 +557,18 @@ impl QueryEngine {
 mod tests {
     use super::*;
     use object_store::memory::InMemory;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_engine_creation() {
         let object_store = Arc::new(InMemory::new());
-        let cache = Arc::new(TieredCache::new(super::super::CacheConfig::default()).unwrap());
+        let dir = tempdir().unwrap();
+        let config = super::super::CacheConfig {
+            l1_size: 10 * 1024 * 1024,
+            l2_size: 50 * 1024 * 1024,
+            l2_dir: Some(dir.path().to_str().unwrap().to_string()),
+        };
+        let cache = Arc::new(TieredCache::new(config).await.unwrap());
 
         let engine = QueryEngine::new(object_store, cache).await;
         assert!(engine.is_ok());

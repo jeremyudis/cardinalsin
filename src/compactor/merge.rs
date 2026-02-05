@@ -4,7 +4,6 @@ use crate::{Error, Result};
 
 use arrow_array::RecordBatch;
 use arrow::compute::{concat_batches, sort_to_indices, take};
-use bytes::Bytes;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::sync::Arc;
@@ -83,6 +82,7 @@ impl ChunkMerger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use object_store::memory::InMemory;
     use arrow_array::{Int64Array, Float64Array, TimestampNanosecondArray};
     use arrow_schema::{Schema, Field, DataType, TimeUnit};

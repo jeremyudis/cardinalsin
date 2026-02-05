@@ -28,6 +28,8 @@ pub mod adaptive_index;
 pub mod sharding;
 pub mod metadata;
 pub mod api;
+pub mod config;
+pub mod cluster;
 
 mod error;
 

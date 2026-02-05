@@ -10,7 +10,7 @@ mod column_promoter;
 
 pub use stats_collector::{QueryStatsCollector, TenantQueryStats, ColumnStats};
 pub use recommender::{IndexRecommendationEngine, IndexRecommendation, IndexType, TenantIndexConfig};
-pub use lifecycle::{IndexLifecycleManager, IndexVisibility};
+pub use lifecycle::{IndexLifecycleManager, IndexVisibility, IndexMetadata};
 pub use column_promoter::ColumnPromoter;
 
 use std::sync::Arc;
@@ -60,10 +60,10 @@ pub type TenantId = String;
 /// - Index recommendations (based on collected stats)
 /// - Index lifecycle management (invisible → visible → deprecated)
 pub struct AdaptiveIndexController {
-    config: AdaptiveIndexConfig,
+    _config: AdaptiveIndexConfig,
     stats_collector: Arc<QueryStatsCollector>,
     recommendation_engine: IndexRecommendationEngine,
-    lifecycle_manager: IndexLifecycleManager,
+    pub lifecycle_manager: IndexLifecycleManager,
     /// Tenant-specific configurations
     tenant_configs: std::sync::RwLock<std::collections::HashMap<TenantId, TenantIndexConfig>>,
     /// Check interval for the controller loop
@@ -78,7 +78,7 @@ impl AdaptiveIndexController {
         let lifecycle_manager = IndexLifecycleManager::new(config.clone());
 
         Self {
-            config,
+            _config: config,
             stats_collector,
             recommendation_engine,
             lifecycle_manager,

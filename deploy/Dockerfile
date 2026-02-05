@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.82-bookworm AS builder
+FROM rust:latest AS builder
 
 WORKDIR /app
 
@@ -15,11 +15,16 @@ RUN apt-get update && apt-get install -y \
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy main for dependency caching
-RUN mkdir -p src/bin && \
+RUN mkdir -p src/bin benches && \
     echo "fn main() {}" > src/lib.rs && \
     echo "fn main() {}" > src/bin/ingester.rs && \
     echo "fn main() {}" > src/bin/query.rs && \
-    echo "fn main() {}" > src/bin/compactor.rs
+    echo "fn main() {}" > src/bin/compactor.rs && \
+    echo "fn main() {}" > src/bin/rebuild_metadata.rs && \
+    echo "fn main() {}" > src/bin/backfill_levels.rs && \
+    echo "fn main() {}" > src/bin/test_data_generator.rs && \
+    echo "fn main() {}" > benches/write_throughput.rs && \
+    echo "fn main() {}" > benches/query_latency.rs
 
 # Build dependencies only
 RUN cargo build --release && rm -rf src

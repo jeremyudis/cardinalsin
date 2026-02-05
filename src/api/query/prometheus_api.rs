@@ -82,6 +82,21 @@ pub async fn instant_query(
     let results = match state.query_node.query(&sql).await {
         Ok(results) => results,
         Err(e) => {
+            // For Prometheus compatibility, return success with empty results
+            // when the table doesn't exist (no data yet) or similar non-fatal errors.
+            // This matches Prometheus behavior where querying a non-existent metric
+            // returns empty results, not an error.
+            let error_msg = e.to_string();
+            if error_msg.contains("table") && error_msg.contains("not found") {
+                return Json(PrometheusResponse {
+                    status: "success".to_string(),
+                    data: PrometheusData {
+                        result_type: "vector".to_string(),
+                        result: Vec::new(),
+                    },
+                    warnings: Some(vec![format!("No data available: {}", error_msg)]),
+                });
+            }
             return Json(PrometheusResponse {
                 status: "error".to_string(),
                 data: PrometheusData {
@@ -120,6 +135,19 @@ pub async fn range_query(
     let results = match state.query_node.query(&sql).await {
         Ok(results) => results,
         Err(e) => {
+            // For Prometheus compatibility, return success with empty results
+            // when the table doesn't exist (no data yet)
+            let error_msg = e.to_string();
+            if error_msg.contains("table") && error_msg.contains("not found") {
+                return Json(PrometheusResponse {
+                    status: "success".to_string(),
+                    data: PrometheusData {
+                        result_type: "matrix".to_string(),
+                        result: Vec::new(),
+                    },
+                    warnings: Some(vec![format!("No data available: {}", error_msg)]),
+                });
+            }
             return Json(PrometheusResponse {
                 status: "error".to_string(),
                 data: PrometheusData {
@@ -443,7 +471,7 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
 
     // Handle rate/increase functions
     if let Some(func) = &parsed.function {
-        let range_ns = parsed.range_seconds.unwrap_or(step) as i64 * 1_000_000_000;
+        let _range_ns = parsed.range_seconds.unwrap_or(step) as i64 * 1_000_000_000;
 
         return match func.as_str() {
             "rate" | "irate" => format!(
