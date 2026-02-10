@@ -48,6 +48,10 @@ async fn test_ingester_write() {
 
     let config = IngesterConfig {
         flush_row_count: 100, // Low threshold for testing
+        wal: cardinalsin::ingester::WalConfig {
+            enabled: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
 

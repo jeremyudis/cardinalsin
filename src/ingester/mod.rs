@@ -11,11 +11,13 @@ mod buffer;
 mod parquet_writer;
 mod broadcast;
 mod topic_broadcast;
+mod wal;
 
 pub use buffer::WriteBuffer;
 pub use parquet_writer::ParquetWriter;
 pub use broadcast::BroadcastChannel;
 pub use topic_broadcast::{TopicBroadcastChannel, TopicBatch, BatchMetadata, TopicFilter, FilteredReceiver};
+pub use wal::{WalConfig, WalSyncMode, WriteAheadLog};
 
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
@@ -26,7 +28,7 @@ use arrow_array::RecordBatch;
 use object_store::ObjectStore;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
 use tracing::{debug, error, info};
 
@@ -47,6 +49,8 @@ pub struct IngesterConfig {
     pub flush_parallelism: usize,
     /// Maximum buffer size before rejecting writes
     pub max_buffer_size_bytes: usize,
+    /// WAL configuration
+    pub wal: WalConfig,
 }
 
 impl Default for IngesterConfig {
@@ -59,6 +63,7 @@ impl Default for IngesterConfig {
             batch_size_bytes: 8 * 1024 * 1024,               // 8MB
             flush_parallelism: 4,
             max_buffer_size_bytes: 512 * 1024 * 1024,        // 512MB
+            wal: WalConfig::default(),
         }
     }
 }
@@ -90,6 +95,8 @@ pub struct Ingester {
     shard_monitor: Arc<ShardMonitor>,
     /// Default tenant ID (for single-tenant mode)
     default_tenant_id: u32,
+    /// Write-ahead log for durability
+    wal: Option<Arc<Mutex<WriteAheadLog>>>,
 }
 
 impl Ingester {
@@ -101,6 +108,7 @@ impl Ingester {
         storage_config: StorageConfig,
         schema: MetricSchema,
     ) -> Self {
+        let wal = init_wal(&config.wal);
         let broadcast = BroadcastChannel::new(1024);
         let topic_broadcast = TopicBroadcastChannel::new(1024);
 
@@ -120,6 +128,7 @@ impl Ingester {
             last_flush: Arc::new(RwLock::new(Instant::now())),
             shard_monitor,
             default_tenant_id: 0, // Single-tenant mode by default
+            wal,
         }
     }
 
@@ -133,6 +142,7 @@ impl Ingester {
         shard_config: HotShardConfig,
         tenant_id: u32,
     ) -> Self {
+        let wal = init_wal(&config.wal);
         let broadcast = BroadcastChannel::new(1024);
         let topic_broadcast = TopicBroadcastChannel::new(1024);
         let shard_monitor = Arc::new(ShardMonitor::new(shard_config));
@@ -150,6 +160,7 @@ impl Ingester {
             last_flush: Arc::new(RwLock::new(Instant::now())),
             shard_monitor,
             default_tenant_id: tenant_id,
+            wal,
         }
     }
 
@@ -174,6 +185,10 @@ impl Ingester {
         }
 
         // Normal single-write path
+        if let Some(wal) = self.wal.as_ref() {
+            let mut wal = wal.lock().await;
+            wal.append(&batch).await?;
+        }
         let mut buffer = self.buffer.write().await;
 
         // Check if buffer is too full
@@ -209,6 +224,11 @@ impl Ingester {
             .get_split_state(shard_id)
             .await?
             .ok_or_else(|| Error::Internal("Split state disappeared".to_string()))?;
+
+        if let Some(wal) = self.wal.as_ref() {
+            let mut wal = wal.lock().await;
+            wal.append(&batch).await?;
+        }
 
         // Write to old shard first (for consistency during transition)
         let mut buffer = self.buffer.write().await;
@@ -556,6 +576,20 @@ impl Ingester {
             row_count: buffer.row_count(),
             size_bytes: buffer.size_bytes(),
             batch_count: buffer.batch_count(),
+        }
+    }
+}
+
+fn init_wal(config: &WalConfig) -> Option<Arc<Mutex<WriteAheadLog>>> {
+    if !config.enabled {
+        return None;
+    }
+
+    match WriteAheadLog::open(config.clone()) {
+        Ok(wal) => Some(Arc::new(Mutex::new(wal))),
+        Err(error) => {
+            error!("Failed to initialize WAL: {}", error);
+            None
         }
     }
 }

@@ -115,6 +115,8 @@ hex = "0.4"
 itertools = "0.13"
 num_cpus = "1"
 regex = "1"
+crc32fast = "1.5"
+libc = "0.2"
 
 # Configuration
 config = "0.14"

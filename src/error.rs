@@ -28,6 +28,8 @@ pub enum Error {
     MissingMetricName,
     /// Buffer full
     BufferFull,
+    /// WAL disk is full
+    WalFull,
     /// Query error
     Query(String),
     /// Metadata error
@@ -93,6 +95,7 @@ impl fmt::Display for Error {
             Error::InvalidSchema(msg) => write!(f, "Invalid schema: {}", msg),
             Error::MissingMetricName => write!(f, "Missing metric name"),
             Error::BufferFull => write!(f, "Write buffer is full"),
+            Error::WalFull => write!(f, "WAL disk is full"),
             Error::Query(msg) => write!(f, "Query error: {}", msg),
             Error::Metadata(msg) => write!(f, "Metadata error: {}", msg),
             Error::Shard(e) => write!(f, "Shard error: {:?}", e),
