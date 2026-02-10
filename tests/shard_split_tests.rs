@@ -259,7 +259,7 @@ async fn test_full_split_execution() {
     let object_store = Arc::new(InMemory::new());
     let splitter = ShardSplitter::new(metadata.clone(), object_store.clone());
 
-    let mut shard = create_test_shard();
+    let shard = create_test_shard();
 
     // Store shard metadata for CAS operations
     metadata

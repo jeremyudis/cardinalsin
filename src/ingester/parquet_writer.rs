@@ -104,7 +104,7 @@ impl Default for ParquetWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Int64Array, Float64Array, StringArray, TimestampNanosecondArray};
+    use arrow_array::{Float64Array, StringArray, TimestampNanosecondArray};
     use arrow_schema::{Schema, Field, DataType, TimeUnit};
     use std::sync::Arc;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;

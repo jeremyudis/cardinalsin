@@ -122,6 +122,7 @@ clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
 humantime = "2"
 reqwest = { version = "0.12", features = ["json"] }
+crc32fast = "1.5.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

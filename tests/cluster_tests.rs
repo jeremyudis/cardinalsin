@@ -7,7 +7,6 @@ use cardinalsin::cluster::{
     NodeStatus, NodeType, ShardAssignment,
 };
 use std::sync::Arc;
-use std::time::Duration;
 
 #[tokio::test]
 async fn test_node_registration_and_discovery() {

@@ -16,6 +16,7 @@ async fn test_new_chunks_start_at_l0() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = S3MetadataClient::new(object_store, config);
@@ -53,6 +54,7 @@ async fn test_l0_to_l1_progression() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));
@@ -116,6 +118,7 @@ async fn test_l1_to_l2_progression() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));
@@ -220,6 +223,7 @@ async fn test_full_level_progression() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));
@@ -362,6 +366,7 @@ async fn test_level_filtering() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));

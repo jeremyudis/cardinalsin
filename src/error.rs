@@ -1,149 +1,94 @@
 //! Error types for CardinalSin
 
-use std::fmt;
-
 /// Result type alias for CardinalSin operations
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Error types for CardinalSin
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Arrow-related errors
-    Arrow(arrow::error::ArrowError),
+    #[error("Arrow error: {0}")]
+    Arrow(#[from] arrow::error::ArrowError),
     /// Parquet-related errors
-    Parquet(parquet::errors::ParquetError),
+    #[error("Parquet error: {0}")]
+    Parquet(#[from] parquet::errors::ParquetError),
     /// Object store errors
-    ObjectStore(object_store::Error),
+    #[error("Object store error: {0}")]
+    ObjectStore(#[from] object_store::Error),
     /// DataFusion errors
-    DataFusion(datafusion::error::DataFusionError),
+    #[error("DataFusion error: {0}")]
+    DataFusion(#[from] datafusion::error::DataFusionError),
     /// IO errors
-    Io(std::io::Error),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
     /// Serialization errors
+    #[error("Serialization error: {0}")]
     Serialization(String),
     /// Configuration errors
+    #[error("Configuration error: {0}")]
     Config(String),
     /// Invalid schema
+    #[error("Invalid schema: {0}")]
     InvalidSchema(String),
     /// Missing metric name
+    #[error("Missing metric name")]
     MissingMetricName,
     /// Buffer full
+    #[error("Write buffer is full")]
     BufferFull,
+    /// WAL disk is full
+    #[error("WAL disk is full")]
+    WalFull,
     /// Query error
+    #[error("Query error: {0}")]
     Query(String),
     /// Metadata error
+    #[error("Metadata error: {0}")]
     Metadata(String),
     /// Shard error
-    Shard(ShardError),
+    #[error("Shard error: {0}")]
+    Shard(#[from] ShardError),
     /// Cache error
+    #[error("Cache error: {0}")]
     Cache(String),
     /// Timeout
+    #[error("Operation timed out")]
     Timeout,
     /// Internal error
+    #[error("Internal error: {0}")]
     Internal(String),
     /// Stale generation (optimistic concurrency)
+    #[error("Stale generation: expected {expected}, got {actual}")]
     StaleGeneration { expected: u64, actual: u64 },
     /// Shard moved during operation
+    #[error("Shard moved to: {new_location}")]
     ShardMoved { new_location: String },
     /// Rate limit exceeded
+    #[error("Rate limit exceeded for tenant {tenant_id}: {limit} req/s")]
     RateLimitExceeded { tenant_id: String, limit: u64 },
     /// Too many subscriptions
+    #[error("Too many active subscriptions")]
     TooManySubscriptions,
     /// Metadata conflict (CAS failure)
+    #[error("Metadata conflict: concurrent modification detected")]
     Conflict,
     /// Too many retries
+    #[error("Too many retries: operation failed after maximum retry attempts")]
     TooManyRetries,
     /// Shard not found
+    #[error("Shard not found: {0}")]
     ShardNotFound(String),
 }
 
 /// Shard-specific errors
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ShardError {
-    /// Shard not found
-    NotFound(String),
     /// Shard is splitting
+    #[error("Shard is splitting: {0}")]
     Splitting(String),
     /// Shard is being deleted
+    #[error("Shard pending deletion: {0}")]
     PendingDeletion(String),
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Error::Arrow(e) => Some(e),
-            Error::Parquet(e) => Some(e),
-            Error::ObjectStore(e) => Some(e),
-            Error::DataFusion(e) => Some(e),
-            Error::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Arrow(e) => write!(f, "Arrow error: {}", e),
-            Error::Parquet(e) => write!(f, "Parquet error: {}", e),
-            Error::ObjectStore(e) => write!(f, "Object store error: {}", e),
-            Error::DataFusion(e) => write!(f, "DataFusion error: {}", e),
-            Error::Io(e) => write!(f, "IO error: {}", e),
-            Error::Serialization(msg) => write!(f, "Serialization error: {}", msg),
-            Error::Config(msg) => write!(f, "Configuration error: {}", msg),
-            Error::InvalidSchema(msg) => write!(f, "Invalid schema: {}", msg),
-            Error::MissingMetricName => write!(f, "Missing metric name"),
-            Error::BufferFull => write!(f, "Write buffer is full"),
-            Error::Query(msg) => write!(f, "Query error: {}", msg),
-            Error::Metadata(msg) => write!(f, "Metadata error: {}", msg),
-            Error::Shard(e) => write!(f, "Shard error: {:?}", e),
-            Error::Cache(msg) => write!(f, "Cache error: {}", msg),
-            Error::Timeout => write!(f, "Operation timed out"),
-            Error::Internal(msg) => write!(f, "Internal error: {}", msg),
-            Error::StaleGeneration { expected, actual } => {
-                write!(f, "Stale generation: expected {}, got {}", expected, actual)
-            }
-            Error::ShardMoved { new_location } => {
-                write!(f, "Shard moved to: {}", new_location)
-            }
-            Error::RateLimitExceeded { tenant_id, limit } => {
-                write!(f, "Rate limit exceeded for tenant {}: {} req/s", tenant_id, limit)
-            }
-            Error::TooManySubscriptions => write!(f, "Too many active subscriptions"),
-            Error::Conflict => write!(f, "Metadata conflict: concurrent modification detected"),
-            Error::TooManyRetries => write!(f, "Too many retries: operation failed after maximum retry attempts"),
-            Error::ShardNotFound(shard_id) => write!(f, "Shard not found: {}", shard_id),
-        }
-    }
-}
-
-impl From<arrow::error::ArrowError> for Error {
-    fn from(e: arrow::error::ArrowError) -> Self {
-        Error::Arrow(e)
-    }
-}
-
-impl From<parquet::errors::ParquetError> for Error {
-    fn from(e: parquet::errors::ParquetError) -> Self {
-        Error::Parquet(e)
-    }
-}
-
-impl From<object_store::Error> for Error {
-    fn from(e: object_store::Error) -> Self {
-        Error::ObjectStore(e)
-    }
-}
-
-impl From<datafusion::error::DataFusionError> for Error {
-    fn from(e: datafusion::error::DataFusionError) -> Self {
-        Error::DataFusion(e)
-    }
-}
-
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
-        Error::Io(e)
-    }
 }
 
 impl From<serde_json::Error> for Error {

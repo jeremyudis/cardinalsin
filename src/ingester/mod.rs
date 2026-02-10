@@ -11,11 +11,13 @@ mod buffer;
 mod parquet_writer;
 mod broadcast;
 mod topic_broadcast;
+mod wal;
 
 pub use buffer::WriteBuffer;
 pub use parquet_writer::ParquetWriter;
 pub use broadcast::BroadcastChannel;
 pub use topic_broadcast::{TopicBroadcastChannel, TopicBatch, BatchMetadata, TopicFilter, FilteredReceiver};
+pub use wal::{WalConfig, WalSyncMode, WriteAheadLog};
 
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
@@ -26,9 +28,22 @@ use arrow_array::RecordBatch;
 use object_store::ObjectStore;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
 use tracing::{debug, error, info};
+
+/// Initialize WAL from config, returning None if disabled.
+/// WAL requires async initialization, so this always returns None.
+/// Call `ensure_wal()` after construction to initialize the WAL.
+fn init_wal(config: &WalConfig) -> Option<Mutex<WriteAheadLog>> {
+    if !config.enabled {
+        return None;
+    }
+    // WAL open is async and cannot be called from a sync context
+    // (block_on panics inside a tokio runtime). The write path handles
+    // None gracefully. Use ensure_wal() to initialize after construction.
+    None
+}
 
 /// Configuration for the ingester
 #[derive(Debug, Clone)]
@@ -47,6 +62,8 @@ pub struct IngesterConfig {
     pub flush_parallelism: usize,
     /// Maximum buffer size before rejecting writes
     pub max_buffer_size_bytes: usize,
+    /// WAL configuration
+    pub wal: WalConfig,
 }
 
 impl Default for IngesterConfig {
@@ -59,6 +76,7 @@ impl Default for IngesterConfig {
             batch_size_bytes: 8 * 1024 * 1024,               // 8MB
             flush_parallelism: 4,
             max_buffer_size_bytes: 512 * 1024 * 1024,        // 512MB
+            wal: WalConfig::default(),
         }
     }
 }
@@ -90,6 +108,8 @@ pub struct Ingester {
     shard_monitor: Arc<ShardMonitor>,
     /// Default tenant ID (for single-tenant mode)
     default_tenant_id: u32,
+    /// Write-ahead log for durability
+    wal: Option<Mutex<WriteAheadLog>>,
 }
 
 impl Ingester {
@@ -106,6 +126,7 @@ impl Ingester {
 
         // Initialize shard monitor with default config
         let shard_monitor = Arc::new(ShardMonitor::new(HotShardConfig::default()));
+        let wal = init_wal(&config.wal);
 
         Self {
             config,
@@ -120,6 +141,7 @@ impl Ingester {
             last_flush: Arc::new(RwLock::new(Instant::now())),
             shard_monitor,
             default_tenant_id: 0, // Single-tenant mode by default
+            wal,
         }
     }
 
@@ -136,6 +158,7 @@ impl Ingester {
         let broadcast = BroadcastChannel::new(1024);
         let topic_broadcast = TopicBroadcastChannel::new(1024);
         let shard_monitor = Arc::new(ShardMonitor::new(shard_config));
+        let wal = init_wal(&config.wal);
 
         Self {
             config,
@@ -150,7 +173,19 @@ impl Ingester {
             last_flush: Arc::new(RwLock::new(Instant::now())),
             shard_monitor,
             default_tenant_id: tenant_id,
+            wal,
         }
+    }
+
+    /// Initialize WAL asynchronously. Call after construction in production.
+    /// The write path handles a missing WAL gracefully (skips WAL writes).
+    pub async fn ensure_wal(&mut self) -> Result<()> {
+        if self.config.wal.enabled && self.wal.is_none() {
+            let wal = WriteAheadLog::open(self.config.wal.clone()).await?;
+            self.wal = Some(Mutex::new(wal));
+            info!("WAL initialized at {:?}", self.config.wal.wal_dir);
+        }
+        Ok(())
     }
 
     /// Write metrics to the buffer
@@ -174,6 +209,9 @@ impl Ingester {
         }
 
         // Normal single-write path
+        if let Some(wal) = self.wal.as_ref() {
+            wal.lock().await.append(&batch).await?;
+        }
         let mut buffer = self.buffer.write().await;
 
         // Check if buffer is too full
@@ -209,6 +247,10 @@ impl Ingester {
             .get_split_state(shard_id)
             .await?
             .ok_or_else(|| Error::Internal("Split state disappeared".to_string()))?;
+
+        if let Some(wal) = self.wal.as_ref() {
+            wal.lock().await.append(&batch).await?;
+        }
 
         // Write to old shard first (for consistency during transition)
         let mut buffer = self.buffer.write().await;

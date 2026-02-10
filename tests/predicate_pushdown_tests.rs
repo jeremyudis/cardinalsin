@@ -18,6 +18,7 @@ fn create_test_client() -> S3MetadataClient {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: true,
+        allow_unsafe_overwrite: false,
     };
     S3MetadataClient::new(store, config)
 }
@@ -587,9 +588,10 @@ async fn test_empty_result_optimization() {
         .await
         .unwrap();
 
-    // Without value stats, this would return all chunks conservatively
-    assert!(
-        chunks.len() >= 0,
-        "Conservative behavior without stats"
+    // Without value stats, all chunks should be returned conservatively
+    assert_eq!(
+        chunks.len(),
+        2,
+        "Without value column stats, predicate should not prune chunks (conservative)"
     );
 }

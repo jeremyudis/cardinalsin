@@ -18,6 +18,7 @@ async fn test_concurrent_chunk_registration() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));
@@ -65,6 +66,7 @@ async fn test_atomic_retry_on_conflict() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));
@@ -121,6 +123,7 @@ async fn test_heavy_concurrent_load() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));
@@ -191,6 +194,7 @@ async fn test_atomic_compaction_completion() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));
@@ -252,6 +256,7 @@ async fn test_concurrent_compactions() {
         bucket: "test-bucket".to_string(),
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
+        allow_unsafe_overwrite: false,
     };
 
     let metadata_client = Arc::new(S3MetadataClient::new(object_store, config));

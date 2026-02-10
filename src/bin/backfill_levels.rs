@@ -69,6 +69,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bucket: args.bucket.clone(),
         metadata_prefix: args.prefix.clone(),
         enable_cache: false,
+        allow_unsafe_overwrite: std::env::var("S3_METADATA_ALLOW_UNSAFE_OVERWRITE")
+            .map(|value| {
+                let value = value.trim();
+                value == "1" || value.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false),
     };
 
     let metadata_client = S3MetadataClient::new(object_store, config);

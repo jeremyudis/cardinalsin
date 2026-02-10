@@ -312,7 +312,7 @@ impl QueryFilter {
         let value = match val_expr {
             Expr::Value(v) => match v {
                 Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                    PredicateValue::String(s.to_lowercase())
+                    PredicateValue::String(s.to_string())
                 }
                 Value::Number(n, _) => {
                     // Try to parse as integer first, then float
