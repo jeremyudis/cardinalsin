@@ -141,6 +141,26 @@ impl WriteAheadLog {
         Ok(entries)
     }
 
+    /// Read entries with sequence number strictly greater than `after_seq`.
+    pub fn read_entries_after(&self, after_seq: u64) -> Result<Vec<WalEntry>> {
+        let segments = list_segments(&self.config.wal_dir)?;
+        let mut entries = Vec::new();
+        for segment in segments {
+            let segment_entries = read_entries_from_path(&segment.path)?;
+            for entry in segment_entries {
+                if entry.seq > after_seq {
+                    entries.push(entry);
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Get the current next sequence number (the seq that will be assigned to the next append).
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
     /// Truncate segments whose max sequence is strictly before `seq`.
     pub async fn truncate_before(&mut self, seq: u64) -> Result<()> {
         let segments = list_segments(&self.config.wal_dir)?;
@@ -378,6 +398,32 @@ async fn open_segment(path: &Path) -> Result<tokio::fs::File> {
         .open(path)
         .await
         .map_err(map_io_error)
+}
+
+const FLUSHED_SEQ_FILE: &str = "flushed_seq";
+
+/// Persist the last flushed WAL sequence number to a file in the WAL directory.
+pub fn persist_flushed_seq(wal_dir: &Path, seq: u64) -> Result<()> {
+    let path = wal_dir.join(FLUSHED_SEQ_FILE);
+    std::fs::write(&path, seq.to_le_bytes()).map_err(map_io_error)?;
+    Ok(())
+}
+
+/// Load the last flushed WAL sequence number from the WAL directory.
+/// Returns 0 if the file does not exist.
+pub fn load_flushed_seq(wal_dir: &Path) -> Result<u64> {
+    let path = wal_dir.join(FLUSHED_SEQ_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) if bytes.len() == 8 => {
+            Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+        }
+        Ok(_) => {
+            warn!("Corrupt flushed_seq file, resetting to 0");
+            Ok(0)
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(map_io_error(e)),
+    }
 }
 
 fn map_io_error(error: io::Error) -> Error {

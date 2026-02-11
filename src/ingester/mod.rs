@@ -17,7 +17,7 @@ pub use buffer::WriteBuffer;
 pub use parquet_writer::ParquetWriter;
 pub use broadcast::BroadcastChannel;
 pub use topic_broadcast::{TopicBroadcastChannel, TopicBatch, BatchMetadata, TopicFilter, FilteredReceiver};
-pub use wal::{WalConfig, WalSyncMode, WriteAheadLog};
+pub use wal::{WalConfig, WalSyncMode, WriteAheadLog, load_flushed_seq, persist_flushed_seq};
 
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
@@ -26,7 +26,7 @@ use crate::{Error, Result, StorageConfig};
 
 use arrow_array::RecordBatch;
 use object_store::ObjectStore;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
@@ -113,6 +113,10 @@ pub struct Ingester {
     wal: Option<Mutex<WriteAheadLog>>,
     /// Whether we've already warned about WAL not being initialized
     wal_warned: AtomicBool,
+    /// Last WAL sequence number appended (high watermark for current buffer)
+    last_wal_seq: AtomicU64,
+    /// Last WAL sequence number that was successfully flushed to S3
+    last_flushed_seq: AtomicU64,
 }
 
 impl Ingester {
@@ -146,6 +150,8 @@ impl Ingester {
             default_tenant_id: 0, // Single-tenant mode by default
             wal,
             wal_warned: AtomicBool::new(false),
+            last_wal_seq: AtomicU64::new(0),
+            last_flushed_seq: AtomicU64::new(0),
         }
     }
 
@@ -179,14 +185,62 @@ impl Ingester {
             default_tenant_id: tenant_id,
             wal,
             wal_warned: AtomicBool::new(false),
+            last_wal_seq: AtomicU64::new(0),
+            last_flushed_seq: AtomicU64::new(0),
         }
     }
 
-    /// Initialize WAL asynchronously. Call after construction in production.
-    /// The write path handles a missing WAL gracefully (skips WAL writes).
+    /// Initialize WAL asynchronously and recover any unflushed entries.
+    ///
+    /// Call after construction in production. This will:
+    /// 1. Open the WAL directory
+    /// 2. Load the last flushed sequence number
+    /// 3. Replay any WAL entries after the last flush into the buffer
+    /// 4. Truncate already-flushed WAL segments
     pub async fn ensure_wal(&mut self) -> Result<()> {
         if self.config.wal.enabled && self.wal.is_none() {
+            let flushed_seq = load_flushed_seq(&self.config.wal.wal_dir)?;
+            self.last_flushed_seq.store(flushed_seq, Ordering::Release);
+
             let wal = WriteAheadLog::open(self.config.wal.clone()).await?;
+
+            // Recover unflushed entries
+            let entries = wal.read_entries_after(flushed_seq)?;
+            if !entries.is_empty() {
+                let mut buffer = self.buffer.write().await;
+                let mut replayed = 0u64;
+                let mut max_seq = flushed_seq;
+                for entry in &entries {
+                    match entry.batches() {
+                        Ok(batches) => {
+                            for batch in batches {
+                                buffer.append(batch)?;
+                                replayed += 1;
+                            }
+                            if entry.seq > max_seq {
+                                max_seq = entry.seq;
+                            }
+                        }
+                        Err(e) => {
+                            warn!(seq = entry.seq, error = %e, "Skipping corrupt WAL entry during recovery");
+                        }
+                    }
+                }
+                self.last_wal_seq.store(max_seq, Ordering::Release);
+                info!(
+                    replayed_entries = replayed,
+                    buffer_rows = buffer.row_count(),
+                    wal_seq_range = format!("({}, {}]", flushed_seq, max_seq),
+                    "WAL recovery complete"
+                );
+            }
+
+            // Truncate already-flushed segments
+            let mut wal = wal;
+            if flushed_seq > 0 {
+                wal.truncate_before(flushed_seq + 1).await?;
+            }
+
             self.wal = Some(Mutex::new(wal));
             info!("WAL initialized at {:?}", self.config.wal.wal_dir);
         }
@@ -215,7 +269,8 @@ impl Ingester {
 
         // Normal single-write path
         if let Some(wal) = self.wal.as_ref() {
-            wal.lock().await.append(&batch).await?;
+            let seq = wal.lock().await.append(&batch).await?;
+            self.last_wal_seq.store(seq, Ordering::Release);
         } else if self.config.wal.enabled
             && !self.wal_warned.swap(true, Ordering::Relaxed)
         {
@@ -258,7 +313,8 @@ impl Ingester {
             .ok_or_else(|| Error::Internal("Split state disappeared".to_string()))?;
 
         if let Some(wal) = self.wal.as_ref() {
-            wal.lock().await.append(&batch).await?;
+            let seq = wal.lock().await.append(&batch).await?;
+            self.last_wal_seq.store(seq, Ordering::Release);
         } else if self.config.wal.enabled
             && !self.wal_warned.swap(true, Ordering::Relaxed)
         {
@@ -520,6 +576,18 @@ impl Ingester {
         };
         if let Err(e) = self.topic_broadcast.send(topic_batch) {
             debug!("No topic broadcast subscribers: {}", e);
+        }
+
+        // Truncate WAL after successful flush
+        let flushed_up_to = self.last_wal_seq.load(Ordering::Acquire);
+        if flushed_up_to > 0 {
+            if let Some(wal) = self.wal.as_ref() {
+                wal.lock().await.truncate_before(flushed_up_to).await?;
+            }
+            self.last_flushed_seq.store(flushed_up_to, Ordering::Release);
+            if let Err(e) = persist_flushed_seq(&self.config.wal.wal_dir, flushed_up_to) {
+                warn!(error = %e, "Failed to persist flushed WAL sequence number");
+            }
         }
 
         // Update last flush time
