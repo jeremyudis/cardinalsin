@@ -147,8 +147,9 @@ impl S3MetadataClient {
         context: &str,
     ) -> Result<()> {
         let opts = if expected_etag == "none" {
+            // First write: use Create to prevent racing with another process
             PutOptions {
-                mode: PutMode::Overwrite,
+                mode: PutMode::Create,
                 ..Default::default()
             }
         } else {
@@ -163,9 +164,13 @@ impl S3MetadataClient {
 
         match self.object_store.put_opts(path, payload.clone(), opts).await {
             Ok(_) => Ok(()),
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                // Another process created the file first - treat as conflict so caller retries
+                Err(Error::Conflict)
+            }
             Err(object_store::Error::Precondition { .. }) => Err(Error::Conflict),
             Err(object_store::Error::NotImplemented) | Err(object_store::Error::NotSupported { .. }) => {
-                if !self.allow_unsafe_overwrite() || expected_etag == "none" {
+                if !self.allow_unsafe_overwrite() {
                     return Err(Error::Metadata(format!(
                         "CAS not supported for {} (path: {})",
                         context,
@@ -1197,13 +1202,21 @@ impl MetadataClient for S3MetadataClient {
             // Clean up empty time index buckets
             catalog.time_index.retain(|_, chunks| !chunks.is_empty());
 
-            // Update target chunk level
-            if let Some(meta) = catalog.chunks.get_mut(target_chunk) {
-                meta.level = new_level;
-                debug!(
-                    "Set compacted chunk {} to level {}",
-                    target_chunk, new_level
-                );
+            // Update target chunk level - target must exist in catalog
+            match catalog.chunks.get_mut(target_chunk) {
+                Some(meta) => {
+                    meta.level = new_level;
+                    debug!(
+                        "Set compacted chunk {} to level {}",
+                        target_chunk, new_level
+                    );
+                }
+                None => {
+                    return Err(Error::Metadata(format!(
+                        "Compaction target chunk not found in catalog: {}",
+                        target_chunk
+                    )));
+                }
             }
 
             // Ensure version is set to 2 for new writes

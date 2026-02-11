@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
+use tracing::warn;
 
 const MAGIC: &[u8; 4] = b"CSWA";
 const VERSION: u8 = 1;
@@ -262,19 +263,52 @@ fn read_entries_from_path(path: &Path) -> Result<Vec<WalEntry>> {
     let mut entries = Vec::new();
     loop {
         let mut header = [0u8; HEADER_LEN];
-        if !read_exact_or_eof(&mut reader, &mut header)? {
-            break;
+        match read_exact_or_eof(&mut reader, &mut header) {
+            Ok(false) => break, // Clean EOF
+            Ok(true) => {}
+            Err(_) => {
+                // Truncated header at end of segment = crash point. Recover entries before it.
+                warn!(
+                    "Truncated WAL header in {:?} after {} entries - treating as crash point",
+                    path,
+                    entries.len()
+                );
+                break;
+            }
         }
-        let (seq, flags, len, expected_crc) = decode_header(&header)?;
+        let (seq, flags, len, expected_crc) = match decode_header(&header) {
+            Ok(v) => v,
+            Err(_) => {
+                warn!(
+                    "Corrupt WAL header in {:?} after {} entries - stopping recovery",
+                    path,
+                    entries.len()
+                );
+                break;
+            }
+        };
         let mut payload = vec![0u8; len];
-        if !read_exact_or_eof(&mut reader, &mut payload)? {
-            return Err(Error::Serialization("Truncated WAL entry".to_string()));
+        match read_exact_or_eof(&mut reader, &mut payload) {
+            Ok(true) => {}
+            _ => {
+                // Truncated payload = crash during write. Discard this entry.
+                warn!(
+                    "Truncated WAL payload (seq={}) in {:?} - discarding incomplete entry",
+                    seq, path
+                );
+                break;
+            }
         }
         let mut hasher = Hasher::new();
         hasher.update(&payload);
         let actual_crc = hasher.finalize();
         if actual_crc != expected_crc {
-            return Err(Error::Serialization("WAL entry CRC mismatch".to_string()));
+            // CRC mismatch on last entry = crash during write with partial data.
+            warn!(
+                "WAL CRC mismatch (seq={}) in {:?} - discarding corrupt trailing entry",
+                seq, path
+            );
+            break;
         }
         entries.push(WalEntry { seq, flags, payload });
     }
@@ -458,10 +492,10 @@ mod tests {
         byte[0] ^= 0xFF;
         file.write_all(&byte).unwrap();
 
-        let err = wal.read_entries().unwrap_err();
-        match err {
-            Error::Serialization(_) => {}
-            other => panic!("unexpected error: {other:?}"),
-        }
+        // After crash-tolerant recovery, a corrupt trailing entry is discarded
+        // (logged as warning) and entries before it are returned.
+        // Since there's only one entry and it's corrupt, we get an empty vec.
+        let entries = wal.read_entries().unwrap();
+        assert!(entries.is_empty(), "corrupt entry should be discarded during recovery");
     }
 }

@@ -26,11 +26,12 @@ use crate::{Error, Result, StorageConfig};
 
 use arrow_array::RecordBatch;
 use object_store::ObjectStore;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Initialize WAL from config, returning None if disabled.
 /// WAL requires async initialization, so this always returns None.
@@ -110,6 +111,8 @@ pub struct Ingester {
     default_tenant_id: u32,
     /// Write-ahead log for durability
     wal: Option<Mutex<WriteAheadLog>>,
+    /// Whether we've already warned about WAL not being initialized
+    wal_warned: AtomicBool,
 }
 
 impl Ingester {
@@ -142,6 +145,7 @@ impl Ingester {
             shard_monitor,
             default_tenant_id: 0, // Single-tenant mode by default
             wal,
+            wal_warned: AtomicBool::new(false),
         }
     }
 
@@ -174,6 +178,7 @@ impl Ingester {
             shard_monitor,
             default_tenant_id: tenant_id,
             wal,
+            wal_warned: AtomicBool::new(false),
         }
     }
 
@@ -211,6 +216,10 @@ impl Ingester {
         // Normal single-write path
         if let Some(wal) = self.wal.as_ref() {
             wal.lock().await.append(&batch).await?;
+        } else if self.config.wal.enabled
+            && !self.wal_warned.swap(true, Ordering::Relaxed)
+        {
+            warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
         }
         let mut buffer = self.buffer.write().await;
 
@@ -250,6 +259,10 @@ impl Ingester {
 
         if let Some(wal) = self.wal.as_ref() {
             wal.lock().await.append(&batch).await?;
+        } else if self.config.wal.enabled
+            && !self.wal_warned.swap(true, Ordering::Relaxed)
+        {
+            warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
         }
 
         // Write to old shard first (for consistency during transition)
