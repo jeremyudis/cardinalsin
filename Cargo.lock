@@ -802,6 +802,7 @@ dependencies = [
  "chrono",
  "clap",
  "config",
+ "crc32fast",
  "criterion",
  "dashmap",
  "datafusion",

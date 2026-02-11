@@ -90,9 +90,9 @@ impl ShardRouter {
 
         for attempt in 0..MAX_RETRIES {
             let shard = self.get_shard(key)
-                .ok_or_else(|| Error::Shard(crate::error::ShardError::NotFound(
+                .ok_or_else(|| Error::ShardNotFound(
                     format!("No shard found for key: {:?}", key)
-                )))?;
+                ))?;
 
             match execute(shard.clone()).await {
                 Ok(result) => return Ok(result),
@@ -126,7 +126,7 @@ impl Default for ShardRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::{ShardState, ReplicaInfo};
+    use super::super::ShardState;
 
     #[test]
     fn test_routing() {

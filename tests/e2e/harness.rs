@@ -3,6 +3,8 @@
 //! Provides utilities for orchestrating end-to-end tests against
 //! a running CardinalSin deployment (typically via docker-compose).
 
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -10,6 +12,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// E2E test harness for interacting with deployed CardinalSin services
+#[derive(Clone)]
 pub struct E2EHarness {
     /// HTTP client for API requests
     pub http_client: Client,

@@ -10,7 +10,7 @@ pub mod predicates;
 
 pub use client::{MetadataClient, SplitState};
 pub use local::LocalMetadataClient;
-pub use s3::{S3MetadataClient, S3MetadataConfig, ColumnStats};
+pub use s3::{S3MetadataClient, S3MetadataConfig, ColumnStats, MetadataCatalog, ChunkMetadataExtended};
 pub use predicates::{ColumnPredicate, PredicateValue};
 
 use crate::ingester::ChunkMetadata;

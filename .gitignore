@@ -42,3 +42,6 @@ __pycache__/
 
 # Benchmark results
 target/criterion/
+
+# Worktrees
+.worktrees/

@@ -51,8 +51,8 @@ impl ChunkMerger {
             .build()?;
 
         let batches: Vec<RecordBatch> = reader
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| Error::Internal(format!("Failed to read Parquet row group: {}", e)))?;
 
         Ok(batches)
     }
@@ -84,7 +84,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use object_store::memory::InMemory;
-    use arrow_array::{Int64Array, Float64Array, TimestampNanosecondArray};
+    use arrow_array::{Float64Array, TimestampNanosecondArray};
     use arrow_schema::{Schema, Field, DataType, TimeUnit};
     use parquet::arrow::ArrowWriter;
 

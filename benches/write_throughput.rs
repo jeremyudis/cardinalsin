@@ -1,14 +1,10 @@
 //! Write throughput benchmark
 
-use cardinalsin::ingester::{Ingester, IngesterConfig, ParquetWriter};
-use cardinalsin::metadata::LocalMetadataClient;
-use cardinalsin::schema::MetricSchema;
-use cardinalsin::StorageConfig;
+use cardinalsin::ingester::ParquetWriter;
 
 use arrow_array::{Float64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use object_store::memory::InMemory;
 use std::sync::Arc;
 
 fn create_test_batch(rows: usize) -> RecordBatch {

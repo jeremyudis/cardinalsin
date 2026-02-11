@@ -3,40 +3,19 @@
 //! These tests verify that the query engine correctly extracts filter columns,
 //! tracks index usage, and manages index lifecycle.
 
-use cardinalsin::adaptive_index::{
-    AdaptiveIndexController, AdaptiveIndexConfig, IndexVisibility,
-};
-use cardinalsin::query::{QueryEngine, QueryConfig, QueryNode};
-use cardinalsin::metadata::{LocalMetadataClient, MetadataClient};
-use cardinalsin::ingester::ChunkMetadata;
-use cardinalsin::{StorageConfig};
+use cardinalsin::adaptive_index::{AdaptiveIndexConfig, AdaptiveIndexController, IndexVisibility};
+use cardinalsin::metadata::LocalMetadataClient;
+use cardinalsin::query::{QueryConfig, QueryNode};
+use cardinalsin::StorageConfig;
 use object_store::memory::InMemory;
 use std::sync::Arc;
-
-/// Helper to create a test query engine
-async fn create_test_query_engine() -> QueryEngine {
-    let object_store = Arc::new(InMemory::new());
-    let cache = Arc::new(cardinalsin::query::TieredCache::new(
-        cardinalsin::query::CacheConfig {
-            l1_size: 1024 * 1024,
-            l2_size: 10 * 1024 * 1024,
-            l2_dir: None,
-        },
-    ).await.unwrap());
-
-    QueryEngine::new(object_store, cache).await.unwrap()
-}
 
 /// Test filter column extraction from simple WHERE clause
 #[tokio::test]
 async fn test_extract_filter_columns_simple() {
-    let engine = create_test_query_engine().await;
-
     // This would require actually executing a query, which needs data
     // For now, we'll test the integration exists
-    let index_controller = Arc::new(AdaptiveIndexController::new(
-        AdaptiveIndexConfig::default(),
-    ));
+    let index_controller = Arc::new(AdaptiveIndexController::new(AdaptiveIndexConfig::default()));
 
     // Verify controller was created
     assert!(Arc::strong_count(&index_controller) >= 1);
@@ -215,7 +194,7 @@ async fn test_query_node_integration() {
         AdaptiveIndexConfig::default(),
     ));
 
-    let query_node = QueryNode::new(
+    let _query_node = QueryNode::new(
         QueryConfig::default(),
         object_store,
         metadata,

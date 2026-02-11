@@ -106,19 +106,21 @@ impl QueryEngine {
             format!("s3://{}", path) // Add s3:// if not present
         };
 
-        if let Ok(table_url) = ListingTableUrl::parse(&url) {
-            let config = ListingTableConfig::new(table_url)
-                .with_listing_options(listing_options);
+        let table_url = ListingTableUrl::parse(&url)
+            .map_err(|e| Error::Config(format!("Failed to parse table URL '{}': {}", url, e)))?;
 
-            if let Ok(config) = config.infer_schema(&self.ctx.state()).await {
-                let table = ListingTable::try_new(config)?;
-                self.ctx.register_table(&table_name, Arc::new(table))?;
+        let config = ListingTableConfig::new(table_url)
+            .with_listing_options(listing_options)
+            .infer_schema(&self.ctx.state())
+            .await
+            .map_err(|e| Error::Internal(format!("Failed to infer schema for '{}': {}", path, e)))?;
 
-                // Mark as registered
-                let mut registered = self.registered_paths.write();
-                registered.insert(path.to_string());
-            }
-        }
+        let table = ListingTable::try_new(config)?;
+        self.ctx.register_table(&table_name, Arc::new(table))?;
+
+        // Mark as registered
+        let mut registered = self.registered_paths.write();
+        registered.insert(path.to_string());
 
         Ok(())
     }

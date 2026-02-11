@@ -70,14 +70,10 @@ impl ColumnPredicate {
                     true
                 }
             }
-            ColumnPredicate::NotEq(col, _val) => {
+            ColumnPredicate::NotEq(_col, _val) => {
                 // Can't rule out chunks for != predicate
                 // (chunk might have both matching and non-matching values)
-                if column_stats.contains_key(col) {
-                    true
-                } else {
-                    true
-                }
+                true
             }
             ColumnPredicate::Lt(col, val) | ColumnPredicate::LtEq(col, val) => {
                 if let Some(stats) = column_stats.get(col) {
@@ -105,13 +101,9 @@ impl ColumnPredicate {
                     true
                 }
             }
-            ColumnPredicate::NotIn(col, _values) => {
+            ColumnPredicate::NotIn(_col, _values) => {
                 // Can't rule out chunks for NOT IN predicate
-                if column_stats.contains_key(col) {
-                    true
-                } else {
-                    true
-                }
+                true
             }
             ColumnPredicate::Between(col, low, high) => {
                 if let Some(stats) = column_stats.get(col) {
@@ -133,14 +125,11 @@ impl ColumnPredicate {
                 left.evaluate_against_stats(column_stats)
                     || right.evaluate_against_stats(column_stats)
             }
-            ColumnPredicate::Not(inner) => {
-                // Negation: if inner is definitely false, return true
-                // But we can't safely prune on NOT predicates, so be conservative
-                let inner_result = inner.evaluate_against_stats(column_stats);
-                // If inner is definitely false, chunk doesn't match
-                // But if inner is maybe true, we can't rule it out
-                // Be conservative: only prune if we're certain
-                inner_result
+            ColumnPredicate::Not(_) => {
+                // Cannot safely prune on negated predicates using chunk statistics.
+                // A NOT predicate requires knowing exact row values, not just min/max.
+                // Always include the chunk (conservative/correct behavior).
+                true
             }
         }
     }

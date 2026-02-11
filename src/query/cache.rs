@@ -205,7 +205,7 @@ mod tests {
         let config = CacheConfig {
             l1_size: 10 * 1024 * 1024, // 10MB
             l2_size: 50 * 1024 * 1024, // 50MB
-            l2_dir: Some(dir.into_path().to_str().unwrap().to_string()),
+            l2_dir: Some(dir.keep().to_str().unwrap().to_string()),
         };
         TieredCache::new(config).await.unwrap()
     }
