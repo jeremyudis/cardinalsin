@@ -249,7 +249,12 @@ impl Ingester {
         Ok(())
     }
 
-    /// Write metrics to the buffer
+    /// Write metrics to the buffer.
+    ///
+    /// Ack semantics: this method returns (acks) after the WAL append completes
+    /// (buffered file write), NOT after fsync. The data loss window equals the
+    /// WAL sync interval (default 100ms). This matches InfluxDB 3 and Prometheus
+    /// behavior — fsync runs asynchronously on the configured interval.
     pub async fn write(&self, batch: RecordBatch) -> Result<()> {
         let start_time = std::time::Instant::now();
         let batch_size = batch.get_array_memory_size();
