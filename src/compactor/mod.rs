@@ -14,6 +14,7 @@ mod merge;
 pub use levels::Level;
 pub use merge::ChunkMerger;
 
+use crate::clock::BoundedClock;
 use crate::ingester::ParquetWriter;
 use crate::metadata::{CompactionJob, CompactionStatus, MetadataClient, TimeRange};
 use crate::sharding::{ShardAction, ShardMonitor, ShardSplitter};
@@ -105,6 +106,8 @@ pub struct Compactor {
     shard_monitor: Arc<ShardMonitor>,
     /// Shard splitter for executing splits
     shard_splitter: Arc<ShardSplitter>,
+    /// Bounded clock for skew-safe timestamp operations
+    clock: Arc<BoundedClock>,
 }
 
 impl Compactor {
@@ -140,6 +143,7 @@ impl Compactor {
             backpressure_threshold,
             is_behind: AtomicBool::new(false),
             pending_deletions: std::sync::RwLock::new(Vec::new()),
+            clock: Arc::new(BoundedClock::default()),
         }
     }
 
@@ -531,7 +535,7 @@ impl Compactor {
     /// Enforce data retention policy
     async fn enforce_retention(&self) -> Result<()> {
         let retention_nanos = self.config.retention_days as i64 * 24 * 3600 * 1_000_000_000;
-        let cutoff = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - retention_nanos;
+        let cutoff = self.clock.retention_cutoff_nanos(retention_nanos);
 
         // Find chunks older than retention period
         let old_chunks = self.metadata.get_chunks(TimeRange::new(0, cutoff)).await?;
@@ -569,7 +573,7 @@ impl Compactor {
 
     /// Generate path for compacted file
     fn generate_compacted_path(&self, level: Level) -> String {
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let uuid = uuid::Uuid::new_v4();
 
         format!(
