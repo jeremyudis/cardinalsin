@@ -19,6 +19,7 @@ pub use streaming::{
     Predicate, PredicateOp, PredicateValue, QueryFilter, StreamingQuery, StreamingQueryExecutor,
 };
 
+use crate::compactor::ChunkPinRegistry;
 use crate::ingester::FilteredReceiver;
 use crate::metadata::MetadataClient;
 use crate::{Error, Result, StorageConfig};
@@ -78,6 +79,8 @@ pub struct QueryNode {
     filtered_rx: Option<FilteredReceiver>,
     /// Adaptive index controller (optional)
     adaptive_index_controller: Option<Arc<crate::adaptive_index::AdaptiveIndexController>>,
+    /// Chunk pin registry shared with compactor to prevent GC during queries
+    pin_registry: Option<ChunkPinRegistry>,
 }
 
 impl QueryNode {
@@ -109,6 +112,7 @@ impl QueryNode {
             broadcast_rx: None,
             filtered_rx: None,
             adaptive_index_controller: None,
+            pin_registry: None,
         })
     }
 
@@ -123,6 +127,15 @@ impl QueryNode {
     /// by only receiving data matching the subscription filter at the ingester level.
     pub fn with_topic_filter(mut self, filtered_rx: FilteredReceiver) -> Self {
         self.filtered_rx = Some(filtered_rx);
+        self
+    }
+
+    /// Set a chunk pin registry shared with the compactor.
+    ///
+    /// When set, chunks are pinned during query execution to prevent
+    /// the compactor's GC from deleting them mid-query.
+    pub fn with_pin_registry(mut self, registry: ChunkPinRegistry) -> Self {
+        self.pin_registry = Some(registry);
         self
     }
 
@@ -153,6 +166,10 @@ impl QueryNode {
             .metadata
             .get_chunks_with_predicates(time_range, &predicates)
             .await?;
+
+        // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)
+        let chunk_paths: Vec<String> = chunks.iter().map(|c| c.chunk_path.clone()).collect();
+        let _pin_guard = self.pin_registry.as_ref().map(|r| r.pin(chunk_paths));
 
         // Register chunks with DataFusion
         for chunk in &chunks {
