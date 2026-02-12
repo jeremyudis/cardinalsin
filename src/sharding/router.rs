@@ -1,6 +1,6 @@
 //! Shard-aware query routing
 
-use super::{ShardId, ShardKey, ShardMetadata};
+use super::{ShardId, ShardMetadata, ShardKey};
 use crate::{Error, Result};
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
@@ -29,7 +29,7 @@ impl ShardRouter {
         }
     }
 
-    /// Get shard for a key
+    /// Get shard for a key, skipping expired and non-active entries.
     pub fn get_shard(&self, key: &ShardKey) -> Option<ShardMetadata> {
         let key_bytes = key.to_bytes();
 
@@ -39,6 +39,12 @@ impl ShardRouter {
             }
 
             let shard = &entry.shard;
+
+            // Skip shards that are splitting or pending deletion
+            if !shard.is_active() {
+                continue;
+            }
+
             if key_bytes >= shard.key_range.0 && key_bytes < shard.key_range.1 {
                 return Some(shard.clone());
             }
@@ -47,15 +53,35 @@ impl ShardRouter {
         None
     }
 
-    /// Update routing for a shard
+    /// Get shard for a key, also validating that its generation matches.
+    ///
+    /// Returns `None` if the cached generation doesn't match, forcing the
+    /// caller to re-fetch from metadata. This prevents stale routing
+    /// during shard splits.
+    pub fn get_shard_if_generation(
+        &self,
+        key: &ShardKey,
+        expected_generation: u64,
+    ) -> Option<ShardMetadata> {
+        self.get_shard(key).filter(|s| s.generation == expected_generation)
+    }
+
+    /// Update routing for a shard.
+    ///
+    /// Rejects updates with a lower generation than the cached entry to
+    /// prevent stale metadata from overwriting fresher data.
     pub fn update_routing(&self, shard: ShardMetadata) {
-        self.cache.insert(
-            shard.shard_id.clone(),
-            RoutingEntry {
-                shard,
-                cached_at: Instant::now(),
-            },
-        );
+        let shard_id = shard.shard_id.clone();
+        // Only update if the new generation is >= the cached generation
+        if let Some(existing) = self.cache.get(&shard_id) {
+            if shard.generation < existing.shard.generation {
+                return; // Reject stale update
+            }
+        }
+        self.cache.insert(shard_id, RoutingEntry {
+            shard,
+            cached_at: Instant::now(),
+        });
     }
 
     /// Invalidate routing for a shard
@@ -80,7 +106,11 @@ impl ShardRouter {
     }
 
     /// Route a query with automatic retry on shard moves
-    pub async fn route_query<F, Fut, T>(&self, key: &ShardKey, execute: F) -> Result<T>
+    pub async fn route_query<F, Fut, T>(
+        &self,
+        key: &ShardKey,
+        execute: F,
+    ) -> Result<T>
     where
         F: Fn(ShardMetadata) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
@@ -88,9 +118,10 @@ impl ShardRouter {
         const MAX_RETRIES: usize = 3;
 
         for attempt in 0..MAX_RETRIES {
-            let shard = self.get_shard(key).ok_or_else(|| {
-                Error::ShardNotFound(format!("No shard found for key: {:?}", key))
-            })?;
+            let shard = self.get_shard(key)
+                .ok_or_else(|| Error::ShardNotFound(
+                    format!("No shard found for key: {:?}", key)
+                ))?;
 
             match execute(shard.clone()).await {
                 Ok(result) => return Ok(result),
@@ -123,8 +154,8 @@ impl Default for ShardRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ShardState;
     use super::*;
+    use super::super::ShardState;
 
     #[test]
     fn test_routing() {
@@ -147,6 +178,80 @@ mod tests {
 
         assert!(found.is_some());
         assert_eq!(found.unwrap().shard_id, "shard-1");
+    }
+
+    #[test]
+    fn test_skips_non_active_shards() {
+        let router = ShardRouter::default();
+
+        let shard = ShardMetadata {
+            shard_id: "shard-1".to_string(),
+            generation: 1,
+            key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
+            replicas: vec![],
+            state: ShardState::Splitting {
+                new_shards: vec!["shard-1a".to_string(), "shard-1b".to_string()],
+            },
+            min_time: 0,
+            max_time: 0,
+        };
+
+        router.update_routing(shard);
+
+        let key = ShardKey::new(1, "cpu", 1000000000);
+        assert!(router.get_shard(&key).is_none(), "Should not route to splitting shard");
+    }
+
+    #[test]
+    fn test_rejects_stale_generation_update() {
+        let router = ShardRouter::default();
+
+        let shard_v2 = ShardMetadata {
+            shard_id: "shard-1".to_string(),
+            generation: 2,
+            key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
+            replicas: vec![],
+            state: ShardState::Active,
+            min_time: 0,
+            max_time: 0,
+        };
+        router.update_routing(shard_v2);
+
+        // Try to update with older generation
+        let shard_v1 = ShardMetadata {
+            shard_id: "shard-1".to_string(),
+            generation: 1,
+            key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
+            replicas: vec![],
+            state: ShardState::Active,
+            min_time: 0,
+            max_time: 0,
+        };
+        router.update_routing(shard_v1);
+
+        let key = ShardKey::new(1, "cpu", 1000000000);
+        let found = router.get_shard(&key).unwrap();
+        assert_eq!(found.generation, 2, "Stale generation should be rejected");
+    }
+
+    #[test]
+    fn test_generation_validation() {
+        let router = ShardRouter::default();
+
+        let shard = ShardMetadata {
+            shard_id: "shard-1".to_string(),
+            generation: 3,
+            key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
+            replicas: vec![],
+            state: ShardState::Active,
+            min_time: 0,
+            max_time: 0,
+        };
+        router.update_routing(shard);
+
+        let key = ShardKey::new(1, "cpu", 1000000000);
+        assert!(router.get_shard_if_generation(&key, 3).is_some());
+        assert!(router.get_shard_if_generation(&key, 2).is_none(), "Wrong generation should return None");
     }
 
     #[test]
