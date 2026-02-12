@@ -19,6 +19,7 @@ pub use broadcast::BroadcastChannel;
 pub use topic_broadcast::{TopicBroadcastChannel, TopicBatch, BatchMetadata, TopicFilter, FilteredReceiver};
 pub use wal::{WalConfig, WalSyncMode, WriteAheadLog, load_flushed_seq, persist_flushed_seq};
 
+use crate::clock::BoundedClock;
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
 use crate::sharding::{ShardMonitor, HotShardConfig, ShardKey};
@@ -117,6 +118,8 @@ pub struct Ingester {
     last_wal_seq: AtomicU64,
     /// Last WAL sequence number that was successfully flushed to S3
     last_flushed_seq: AtomicU64,
+    /// Bounded clock for skew-safe timestamp operations
+    clock: Arc<BoundedClock>,
 }
 
 impl Ingester {
@@ -152,6 +155,7 @@ impl Ingester {
             wal_warned: AtomicBool::new(false),
             last_wal_seq: AtomicU64::new(0),
             last_flushed_seq: AtomicU64::new(0),
+            clock: Arc::new(BoundedClock::default()),
         }
     }
 
@@ -187,6 +191,7 @@ impl Ingester {
             wal_warned: AtomicBool::new(false),
             last_wal_seq: AtomicU64::new(0),
             last_flushed_seq: AtomicU64::new(0),
+            clock: Arc::new(BoundedClock::default()),
         }
     }
 
@@ -359,7 +364,7 @@ impl Ingester {
         let parquet_size = parquet_bytes.len() as u64;
 
         // Generate path for this shard
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let uuid = uuid::Uuid::new_v4();
         let path = format!(
             "{}/data/shard={}/year={}/month={:02}/day={:02}/hour={:02}/chunk_{}.parquet",
@@ -460,10 +465,10 @@ impl Ingester {
             } else if let Some(arr) = col.as_primitive_opt::<arrow_array::types::Int64Type>() {
                 arr.value(0)
             } else {
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                self.clock.now_nanos()
             }
         } else {
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            self.clock.now_nanos()
         };
 
         // Create shard key and convert to shard ID
@@ -625,7 +630,7 @@ impl Ingester {
 
     /// Generate a unique path for the Parquet file
     fn generate_path(&self) -> String {
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let uuid = uuid::Uuid::new_v4();
 
         format!(
