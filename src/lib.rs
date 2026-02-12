@@ -30,6 +30,7 @@ pub mod metadata;
 pub mod api;
 pub mod config;
 pub mod cluster;
+pub mod clock;
 
 mod error;
 
