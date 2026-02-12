@@ -14,7 +14,7 @@ mod router;
 pub use engine::QueryEngine;
 pub use cache::{TieredCache, CacheConfig};
 pub use cached_store::CachedObjectStore;
-pub use streaming::{StreamingQuery, StreamingQueryExecutor, QueryFilter, Predicate, PredicateOp, PredicateValue};
+pub use streaming::{StreamingQuery, StreamingQueryExecutor, QueryFilter};
 pub use router::QueryRouter;
 
 use crate::ingester::FilteredReceiver;
