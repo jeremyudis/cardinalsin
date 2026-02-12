@@ -746,6 +746,7 @@ async fn test_compaction_job_failed_status() {
         source_chunks: vec!["a.parquet".to_string()],
         target_level: 0,
         status: CompactionStatus::Pending,
+        created_at: None,
     };
     metadata.create_compaction_job(job).await.unwrap();
 
@@ -780,6 +781,7 @@ async fn test_multiple_compaction_jobs() {
             source_chunks: vec![format!("chunk_{}.parquet", i)],
             target_level: 0,
             status: CompactionStatus::Pending,
+            created_at: None,
         };
         metadata.create_compaction_job(job).await.unwrap();
     }

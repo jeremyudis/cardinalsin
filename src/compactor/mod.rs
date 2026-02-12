@@ -289,6 +289,11 @@ impl Compactor {
         // Enforce retention policy
         self.enforce_retention().await?;
 
+        // Clean up completed/failed jobs older than 1 hour
+        if let Err(e) = self.metadata.cleanup_completed_jobs(3600).await {
+            warn!("Failed to clean up compaction jobs: {}", e);
+        }
+
         // Update backpressure state
         self.update_backpressure_state().await?;
 
@@ -346,6 +351,7 @@ impl Compactor {
                 source_chunks: group.clone(),
                 target_level: 0,
                 status: CompactionStatus::InProgress,
+                created_at: Some(chrono::Utc::now().timestamp()),
             };
             self.metadata.create_compaction_job(job.clone()).await?;
 
@@ -417,6 +423,7 @@ impl Compactor {
                 source_chunks: group.clone(),
                 target_level: level as u32,
                 status: CompactionStatus::InProgress,
+                created_at: Some(chrono::Utc::now().timestamp()),
             };
             self.metadata.create_compaction_job(job.clone()).await?;
 
