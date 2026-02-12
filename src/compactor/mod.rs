@@ -23,6 +23,7 @@ use object_store::ObjectStore;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Compactor configuration
@@ -105,6 +106,8 @@ pub struct Compactor {
     shard_monitor: Arc<ShardMonitor>,
     /// Shard splitter for executing splits
     shard_splitter: Arc<ShardSplitter>,
+    /// Cancellation token for graceful shutdown
+    shutdown: CancellationToken,
 }
 
 impl Compactor {
@@ -140,7 +143,13 @@ impl Compactor {
             backpressure_threshold,
             is_behind: AtomicBool::new(false),
             pending_deletions: std::sync::RwLock::new(Vec::new()),
+            shutdown: CancellationToken::new(),
         }
+    }
+
+    /// Get a cancellation token that can be used to trigger graceful shutdown.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     /// Get current backpressure state (for ingesters to check)
@@ -169,14 +178,21 @@ impl Compactor {
         self.active_compactions.load(Ordering::Relaxed) < self.max_concurrent_compactions
     }
 
-    /// Run the main service loop
+    /// Run the main service loop. Returns when the shutdown token is cancelled.
     pub async fn run(&self) {
         let mut interval = tokio::time::interval(self.config.check_interval);
 
         loop {
-            interval.tick().await;
-            if let Err(e) = self.run_cycle().await {
-                error!("Main service cycle failed: {}", e);
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = self.run_cycle().await {
+                        error!("Main service cycle failed: {}", e);
+                    }
+                }
+                _ = self.shutdown.cancelled() => {
+                    info!("Compactor shutting down gracefully");
+                    break;
+                }
             }
         }
     }

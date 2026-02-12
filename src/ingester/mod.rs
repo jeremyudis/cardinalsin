@@ -33,6 +33,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Initialize WAL from config, returning None if disabled.
@@ -119,6 +120,8 @@ pub struct Ingester {
     last_wal_seq: AtomicU64,
     /// Last WAL sequence number that was successfully flushed to S3
     last_flushed_seq: AtomicU64,
+    /// Cancellation token for graceful shutdown
+    shutdown: CancellationToken,
 }
 
 impl Ingester {
@@ -154,6 +157,7 @@ impl Ingester {
             wal_warned: AtomicBool::new(false),
             last_wal_seq: AtomicU64::new(0),
             last_flushed_seq: AtomicU64::new(0),
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -189,7 +193,13 @@ impl Ingester {
             wal_warned: AtomicBool::new(false),
             last_wal_seq: AtomicU64::new(0),
             last_flushed_seq: AtomicU64::new(0),
+            shutdown: CancellationToken::new(),
         }
+    }
+
+    /// Get a cancellation token that can be used to trigger graceful shutdown.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     /// Initialize WAL asynchronously and recover any unflushed entries.
@@ -593,28 +603,43 @@ impl Ingester {
         Ok(())
     }
 
-    /// Background flush timer - ensures data is flushed even during low traffic
+    /// Background flush timer - ensures data is flushed even during low traffic.
+    /// Returns when the shutdown token is cancelled, after flushing any remaining data.
     pub async fn run_flush_timer(&self) {
         let mut interval = tokio::time::interval(self.config.flush_interval);
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {
+                    let should_flush = {
+                        let buffer = self.buffer.read().await;
+                        let last_flush = self.last_flush.read().await;
+                        !buffer.is_empty() && last_flush.elapsed() >= self.config.flush_interval
+                    };
 
-            let should_flush = {
-                let buffer = self.buffer.read().await;
-                let last_flush = self.last_flush.read().await;
+                    if should_flush {
+                        let batches = {
+                            let mut buffer = self.buffer.write().await;
+                            buffer.take()
+                        };
 
-                !buffer.is_empty() && last_flush.elapsed() >= self.config.flush_interval
-            };
-
-            if should_flush {
-                let batches = {
-                    let mut buffer = self.buffer.write().await;
-                    buffer.take()
-                };
-
-                if let Err(e) = self.flush_batches(batches).await {
-                    error!("Flush timer failed: {}", e);
+                        if let Err(e) = self.flush_batches(batches).await {
+                            error!("Flush timer failed: {}", e);
+                        }
+                    }
+                }
+                _ = self.shutdown.cancelled() => {
+                    info!("Flush timer shutting down, flushing remaining data");
+                    let batches = {
+                        let mut buffer = self.buffer.write().await;
+                        buffer.take()
+                    };
+                    if !batches.is_empty() {
+                        if let Err(e) = self.flush_batches(batches).await {
+                            error!("Final flush failed during shutdown: {}", e);
+                        }
+                    }
+                    break;
                 }
             }
         }
