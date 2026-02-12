@@ -1588,4 +1588,12 @@ impl MetadataClient for S3MetadataClient {
 
         Err(Error::TooManyRetries)
     }
+
+    async fn has_active_split(&self) -> Result<bool> {
+        use crate::sharding::SplitPhase;
+        let (states, _) = self.load_split_states_with_etag().await?;
+        Ok(states.values().any(|s| {
+            matches!(s.phase, SplitPhase::DualWrite | SplitPhase::Backfill)
+        }))
+    }
 }
