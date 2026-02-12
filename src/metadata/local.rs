@@ -361,6 +361,16 @@ impl MetadataClient for LocalMetadataClient {
 
         Ok(())
     }
+
+    async fn has_active_split(&self) -> Result<bool> {
+        use crate::sharding::SplitPhase;
+        for entry in self.split_states.iter() {
+            if matches!(entry.value().phase, SplitPhase::DualWrite | SplitPhase::Backfill) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 #[cfg(test)]

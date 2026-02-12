@@ -118,4 +118,12 @@ pub trait MetadataClient: Send + Sync {
         metadata: &crate::sharding::ShardMetadata,
         expected_generation: u64,
     ) -> Result<()>;
+
+    /// Check if any shard split is currently in dual-write or backfill phase.
+    ///
+    /// Used by the query engine to enable deduplication when overlapping
+    /// data may exist in both old and new shards.
+    async fn has_active_split(&self) -> Result<bool> {
+        Ok(false) // Default: no splits active
+    }
 }
