@@ -31,6 +31,23 @@ pub enum SplitPhase {
     Cleanup,
 }
 
+/// Tracks exactly which sub-steps of cutover have completed, enabling
+/// idempotent recovery after a crash mid-cutover.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CutoverIntent {
+    /// Unique token for this cutover attempt. A new attempt must use a
+    /// new token, so stale intents are never confused with active ones.
+    pub fence_token: String,
+    /// Old shard being replaced.
+    pub old_shard: String,
+    /// New shard IDs (always length 2).
+    pub new_shards: Vec<String>,
+    /// Which sub-steps have completed.
+    pub shard_a_created: bool,
+    pub shard_b_created: bool,
+    pub old_shard_deactivated: bool,
+}
+
 /// Pending shard (not yet active)
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -331,6 +348,10 @@ impl ShardSplitter {
     }
 
     /// Perform atomic cutover to new shards (Phase 4)
+    ///
+    /// Uses a fencing token to make each sub-step idempotent. If the process
+    /// crashes mid-cutover, `resume_cutover()` can pick up where it left off
+    /// using the persisted `CutoverIntent`.
     pub async fn cutover(&self, old_shard: &str) -> Result<()> {
         use super::{ShardMetadata, ShardState};
 
@@ -366,12 +387,21 @@ impl ShardSplitter {
                 .unwrap_or([0u8; 8]),
         );
 
+        // --- Fencing: persist intent before starting sub-steps ---
+        let mut intent = CutoverIntent {
+            fence_token: uuid::Uuid::new_v4().to_string(),
+            old_shard: old_shard.to_string(),
+            new_shards: split_state.new_shards.clone(),
+            shard_a_created: false,
+            shard_b_created: false,
+            old_shard_deactivated: false,
+        };
+        self.persist_cutover_intent(&intent).await?;
+
         // Create new shard metadata for both shards
-        // Note: generation starts at 0 here, but update_shard_metadata will atomically
-        // increment it to 1 during the CAS operation (expected_generation=0 -> stored=1)
         let new_shard_a = ShardMetadata {
             shard_id: split_state.new_shards[0].clone(),
-            generation: 0, // Initial value; incremented to 1 by update_shard_metadata CAS
+            generation: 0,
             key_range: (old_metadata.key_range.0.clone(), split_state.split_point.clone()),
             replicas: old_metadata.replicas.clone(),
             state: ShardState::Active,
@@ -381,7 +411,7 @@ impl ShardSplitter {
 
         let new_shard_b = ShardMetadata {
             shard_id: split_state.new_shards[1].clone(),
-            generation: 0, // Initial value; incremented to 1 by update_shard_metadata CAS
+            generation: 0,
             key_range: (split_state.split_point.clone(), old_metadata.key_range.1.clone()),
             replicas: old_metadata.replicas.clone(),
             state: ShardState::Active,
@@ -389,16 +419,21 @@ impl ShardSplitter {
             max_time: old_metadata.max_time,
         };
 
-        // Register new shards using CAS (expected_generation = 0 for new shards)
-        // This will atomically store the shards with generation = 1
+        // Step 1: Register shard A
         self.metadata
             .update_shard_metadata(&new_shard_a.shard_id, &new_shard_a, 0)
             .await?;
+        intent.shard_a_created = true;
+        self.persist_cutover_intent(&intent).await?;
+
+        // Step 2: Register shard B
         self.metadata
             .update_shard_metadata(&new_shard_b.shard_id, &new_shard_b, 0)
             .await?;
+        intent.shard_b_created = true;
+        self.persist_cutover_intent(&intent).await?;
 
-        // Mark old shard as pending deletion using CAS
+        // Step 3: Mark old shard as pending deletion
         let mut old_updated = old_metadata.clone();
         old_updated.state = ShardState::PendingDeletion {
             delete_after: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
@@ -408,15 +443,148 @@ impl ShardSplitter {
         self.metadata
             .update_shard_metadata(old_shard, &old_updated, current_generation)
             .await?;
+        intent.old_shard_deactivated = true;
+        self.persist_cutover_intent(&intent).await?;
 
-        // Complete split in metadata (removes from split states)
+        // All steps done — complete split and remove intent
         self.metadata.complete_split(old_shard).await?;
+        self.remove_cutover_intent(old_shard).await?;
 
         info!(
-            "Cutover complete. New shards: {} (generation 1 after CAS), {} (generation 1 after CAS)",
-            new_shard_a.shard_id, new_shard_b.shard_id
+            "Cutover complete (fence={}). New shards: {}, {}",
+            intent.fence_token, new_shard_a.shard_id, new_shard_b.shard_id
         );
         Ok(())
+    }
+
+    /// Resume an incomplete cutover after a crash.
+    ///
+    /// Reads the persisted `CutoverIntent` and re-executes only the
+    /// sub-steps that haven't completed yet (idempotent).
+    pub async fn resume_cutover(&self, old_shard: &str) -> Result<bool> {
+        use super::{ShardMetadata, ShardState};
+
+        let mut intent = match self.load_cutover_intent(old_shard).await? {
+            Some(i) => i,
+            None => return Ok(false), // No incomplete cutover
+        };
+
+        info!(
+            "Resuming cutover for shard {} (fence={}): a={}, b={}, old={}",
+            old_shard, intent.fence_token,
+            intent.shard_a_created, intent.shard_b_created, intent.old_shard_deactivated
+        );
+
+        let split_state = self
+            .metadata
+            .get_split_state(old_shard)
+            .await?
+            .ok_or_else(|| crate::Error::Internal("No split state for resume".to_string()))?;
+
+        let old_metadata = self
+            .metadata
+            .get_shard_metadata(old_shard)
+            .await?
+            .ok_or_else(|| crate::Error::ShardNotFound(old_shard.to_string()))?;
+
+        let current_generation = old_metadata.generation;
+        let split_ts = i64::from_be_bytes(
+            split_state.split_point[..8]
+                .try_into()
+                .unwrap_or([0u8; 8]),
+        );
+
+        if !intent.shard_a_created {
+            let new_shard_a = ShardMetadata {
+                shard_id: split_state.new_shards[0].clone(),
+                generation: 0,
+                key_range: (old_metadata.key_range.0.clone(), split_state.split_point.clone()),
+                replicas: old_metadata.replicas.clone(),
+                state: ShardState::Active,
+                min_time: old_metadata.min_time,
+                max_time: split_ts,
+            };
+            self.metadata
+                .update_shard_metadata(&new_shard_a.shard_id, &new_shard_a, 0)
+                .await?;
+            intent.shard_a_created = true;
+            self.persist_cutover_intent(&intent).await?;
+        }
+
+        if !intent.shard_b_created {
+            let new_shard_b = ShardMetadata {
+                shard_id: split_state.new_shards[1].clone(),
+                generation: 0,
+                key_range: (split_state.split_point.clone(), old_metadata.key_range.1.clone()),
+                replicas: old_metadata.replicas.clone(),
+                state: ShardState::Active,
+                min_time: split_ts,
+                max_time: old_metadata.max_time,
+            };
+            self.metadata
+                .update_shard_metadata(&new_shard_b.shard_id, &new_shard_b, 0)
+                .await?;
+            intent.shard_b_created = true;
+            self.persist_cutover_intent(&intent).await?;
+        }
+
+        if !intent.old_shard_deactivated {
+            let mut old_updated = old_metadata.clone();
+            old_updated.state = ShardState::PendingDeletion {
+                delete_after: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                    + 300_000_000_000,
+            };
+            self.metadata
+                .update_shard_metadata(old_shard, &old_updated, current_generation)
+                .await?;
+            intent.old_shard_deactivated = true;
+            self.persist_cutover_intent(&intent).await?;
+        }
+
+        self.metadata.complete_split(old_shard).await?;
+        self.remove_cutover_intent(old_shard).await?;
+
+        info!("Cutover resumed and completed for shard {}", old_shard);
+        Ok(true)
+    }
+
+    /// Persist a cutover intent to object storage.
+    async fn persist_cutover_intent(&self, intent: &CutoverIntent) -> Result<()> {
+        let path = format!("metadata/cutover-intents/{}.json", intent.old_shard);
+        let json = serde_json::to_vec(intent)
+            .map_err(|e| crate::Error::Serialization(e.to_string()))?;
+        let obj_path: object_store::path::Path = path.as_str().into();
+        self.object_store
+            .put(&obj_path, bytes::Bytes::from(json).into())
+            .await?;
+        Ok(())
+    }
+
+    /// Load a cutover intent from object storage.
+    async fn load_cutover_intent(&self, old_shard: &str) -> Result<Option<CutoverIntent>> {
+        let path = format!("metadata/cutover-intents/{}.json", old_shard);
+        let obj_path: object_store::path::Path = path.as_str().into();
+        match self.object_store.get(&obj_path).await {
+            Ok(result) => {
+                let bytes = result.bytes().await?;
+                let intent: CutoverIntent = serde_json::from_slice(&bytes)
+                    .map_err(|e| crate::Error::Serialization(e.to_string()))?;
+                Ok(Some(intent))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Remove a cutover intent after successful completion.
+    async fn remove_cutover_intent(&self, old_shard: &str) -> Result<()> {
+        let path = format!("metadata/cutover-intents/{}.json", old_shard);
+        let obj_path: object_store::path::Path = path.as_str().into();
+        match self.object_store.delete(&obj_path).await {
+            Ok(_) => Ok(()),
+            Err(object_store::Error::NotFound { .. }) => Ok(()), // Already removed
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Clean up old shard data after split (Phase 5)
@@ -526,5 +694,56 @@ mod tests {
         // Should be roughly in the middle
         assert!(!split_point.is_empty());
         assert_eq!(split_point.len(), 8); // i64 bytes
+    }
+
+    #[tokio::test]
+    async fn test_cutover_intent_persistence() {
+        let metadata = Arc::new(LocalMetadataClient::new());
+        let object_store = Arc::new(InMemory::new());
+        let splitter = ShardSplitter::new(metadata, object_store);
+
+        let intent = CutoverIntent {
+            fence_token: "test-fence-123".to_string(),
+            old_shard: "shard-old".to_string(),
+            new_shards: vec!["shard-a".to_string(), "shard-b".to_string()],
+            shard_a_created: true,
+            shard_b_created: false,
+            old_shard_deactivated: false,
+        };
+
+        // Persist and load
+        splitter.persist_cutover_intent(&intent).await.unwrap();
+        let loaded = splitter.load_cutover_intent("shard-old").await.unwrap();
+        assert!(loaded.is_some());
+        let loaded = loaded.unwrap();
+        assert_eq!(loaded.fence_token, "test-fence-123");
+        assert!(loaded.shard_a_created);
+        assert!(!loaded.shard_b_created);
+        assert!(!loaded.old_shard_deactivated);
+
+        // Remove and verify gone
+        splitter.remove_cutover_intent("shard-old").await.unwrap();
+        let gone = splitter.load_cutover_intent("shard-old").await.unwrap();
+        assert!(gone.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_no_cutover_intent_returns_none() {
+        let metadata = Arc::new(LocalMetadataClient::new());
+        let object_store = Arc::new(InMemory::new());
+        let splitter = ShardSplitter::new(metadata, object_store);
+
+        let result = splitter.load_cutover_intent("nonexistent").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resume_cutover_no_intent_returns_false() {
+        let metadata = Arc::new(LocalMetadataClient::new());
+        let object_store = Arc::new(InMemory::new());
+        let splitter = ShardSplitter::new(metadata, object_store);
+
+        let resumed = splitter.resume_cutover("nonexistent").await.unwrap();
+        assert!(!resumed, "Should return false when no intent exists");
     }
 }

@@ -9,7 +9,7 @@ mod rebalancer;
 mod router;
 
 pub use monitor::{ShardMonitor, ShardMetrics, HotShardConfig, ShardAction};
-pub use splitter::{ShardSplitter, SplitPhase};
+pub use splitter::{ShardSplitter, SplitPhase, CutoverIntent};
 pub use rebalancer::RebalanceStrategy;
 pub use router::ShardRouter;
 
