@@ -45,37 +45,6 @@ fn create_batch(n: usize) -> RecordBatch {
     .unwrap()
 }
 
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-
-    fn unset(key: &'static str) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::remove_var(key);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(value) = &self.previous {
-            std::env::set_var(self.key, value);
-        } else {
-            std::env::remove_var(self.key);
-        }
-    }
-}
-
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 // =========================================================================
 // TimeRange boundary condition tests
 // =========================================================================
@@ -93,9 +62,18 @@ fn test_timerange_contains_exact_boundaries() {
 #[test]
 fn test_timerange_single_point() {
     let range = TimeRange::new(100, 100);
-    assert!(range.contains(100), "Single-point range should contain its value");
-    assert!(!range.contains(99), "Single-point range should not contain adjacent");
-    assert!(!range.contains(101), "Single-point range should not contain adjacent");
+    assert!(
+        range.contains(100),
+        "Single-point range should contain its value"
+    );
+    assert!(
+        !range.contains(99),
+        "Single-point range should not contain adjacent"
+    );
+    assert!(
+        !range.contains(101),
+        "Single-point range should not contain adjacent"
+    );
 }
 
 #[test]
@@ -110,7 +88,10 @@ fn test_timerange_overlaps_adjacent() {
 fn test_timerange_overlaps_disjoint() {
     let r1 = TimeRange::new(0, 99);
     let r2 = TimeRange::new(100, 200);
-    assert!(!r1.overlaps(&r2), "Non-overlapping ranges should not overlap");
+    assert!(
+        !r1.overlaps(&r2),
+        "Non-overlapping ranges should not overlap"
+    );
     assert!(!r2.overlaps(&r1), "Non-overlap should be symmetric");
 }
 
@@ -118,8 +99,14 @@ fn test_timerange_overlaps_disjoint() {
 fn test_timerange_overlaps_subset() {
     let outer = TimeRange::new(0, 1000);
     let inner = TimeRange::new(100, 200);
-    assert!(outer.overlaps(&inner), "Containing range should overlap subset");
-    assert!(inner.overlaps(&outer), "Subset should overlap containing range");
+    assert!(
+        outer.overlaps(&inner),
+        "Containing range should overlap subset"
+    );
+    assert!(
+        inner.overlaps(&outer),
+        "Subset should overlap containing range"
+    );
 }
 
 #[test]
@@ -242,7 +229,10 @@ async fn test_get_nonexistent_chunk() {
 
     // Querying for a nonexistent chunk should still return None
     let result = client.get_chunk("nonexistent.parquet").await.unwrap();
-    assert!(result.is_none(), "Getting nonexistent chunk should return None");
+    assert!(
+        result.is_none(),
+        "Getting nonexistent chunk should return None"
+    );
 }
 
 #[tokio::test]
@@ -277,7 +267,10 @@ async fn test_list_chunks_uninitialized_metadata() {
     client.delete_chunk("temp.parquet").await.unwrap();
 
     let chunks = client.list_chunks().await.unwrap();
-    assert!(chunks.is_empty(), "Should return empty after all chunks deleted");
+    assert!(
+        chunks.is_empty(),
+        "Should return empty after all chunks deleted"
+    );
 }
 
 #[tokio::test]
@@ -303,18 +296,18 @@ async fn test_get_chunks_empty_time_range() {
 
     // Query with time range that doesn't overlap
     let chunks = client.get_chunks(TimeRange::new(3000, 4000)).await.unwrap();
-    assert!(chunks.is_empty(), "Non-overlapping time range should return no chunks");
+    assert!(
+        chunks.is_empty(),
+        "Non-overlapping time range should return no chunks"
+    );
 }
 
 // =========================================================================
-// MinIO CAS fallback tests
+// MinIO CAS behavior tests
 // =========================================================================
 
 #[tokio::test]
-async fn test_metadata_cas_fallback_overwrite_when_disabled() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _flag = EnvVarGuard::unset("S3_METADATA_ALLOW_UNSAFE_OVERWRITE");
-
+async fn test_metadata_cas_fails_loudly_when_unsafe_overwrite_disabled() {
     let temp = tempdir().unwrap();
     let object_store = Arc::new(LocalFileSystem::new_with_prefix(temp.path()).unwrap());
     let config = S3MetadataConfig {
@@ -348,21 +341,36 @@ async fn test_metadata_cas_fallback_overwrite_when_disabled() {
     };
 
     let result = client.register_chunk(&second.path, &second).await;
-    assert!(result.is_err(), "CAS should fail without fallback enabled");
+    assert!(
+        result.is_err(),
+        "CAS should fail without unsafe fallback enabled"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("CAS conditional writes are required"),
+        "Error should clearly explain why write failed: {}",
+        err
+    );
+
+    let chunks = client.list_chunks().await.unwrap();
+    assert_eq!(
+        chunks.len(),
+        1,
+        "Failed update must not be silently overwritten"
+    );
+    assert_eq!(chunks[0].chunk_path, "chunk.parquet");
 }
 
 #[tokio::test]
 async fn test_metadata_cas_fallback_overwrite_when_enabled() {
-    let _lock = ENV_LOCK.lock().unwrap();
-    let _flag = EnvVarGuard::set("S3_METADATA_ALLOW_UNSAFE_OVERWRITE", "1");
-
     let temp = tempdir().unwrap();
     let object_store = Arc::new(LocalFileSystem::new_with_prefix(temp.path()).unwrap());
     let config = S3MetadataConfig {
         bucket: "test".to_string(),
         metadata_prefix: "metadata/".to_string(),
         enable_cache: false,
-        allow_unsafe_overwrite: false,
+        allow_unsafe_overwrite: true,
     };
 
     let client = S3MetadataClient::new(object_store, config);
@@ -435,7 +443,10 @@ async fn test_register_chunk_with_zero_timestamps() {
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
 
     let retrieved = client.get_chunk("zero_ts.parquet").await.unwrap();
-    assert!(retrieved.is_some(), "Should retrieve chunk with zero timestamps");
+    assert!(
+        retrieved.is_some(),
+        "Should retrieve chunk with zero timestamps"
+    );
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.min_timestamp, 0);
     assert_eq!(retrieved.max_timestamp, 0);
@@ -476,7 +487,10 @@ async fn test_register_duplicate_chunk_path() {
     let retrieved = client.get_chunk("same_path.parquet").await.unwrap();
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
-    assert_eq!(retrieved.min_timestamp, 2000, "Should be overwritten with new data");
+    assert_eq!(
+        retrieved.min_timestamp, 2000,
+        "Should be overwritten with new data"
+    );
     assert_eq!(retrieved.row_count, 200);
 }
 
@@ -600,10 +614,7 @@ async fn test_compaction_with_single_source() {
         row_count: 100,
         size_bytes: 1024,
     };
-    client
-        .register_chunk(&source.path, &source)
-        .await
-        .unwrap();
+    client.register_chunk(&source.path, &source).await.unwrap();
 
     let target = ChunkMetadata {
         path: "target.parquet".to_string(),
@@ -612,10 +623,7 @@ async fn test_compaction_with_single_source() {
         row_count: 100,
         size_bytes: 1024,
     };
-    client
-        .register_chunk(&target.path, &target)
-        .await
-        .unwrap();
+    client.register_chunk(&target.path, &target).await.unwrap();
 
     // Compact with single source
     client
@@ -625,11 +633,17 @@ async fn test_compaction_with_single_source() {
 
     // Source should be gone
     let source_check = client.get_chunk("single_source.parquet").await.unwrap();
-    assert!(source_check.is_none(), "Source should be removed after compaction");
+    assert!(
+        source_check.is_none(),
+        "Source should be removed after compaction"
+    );
 
     // Target should remain
     let target_check = client.get_chunk("target.parquet").await.unwrap();
-    assert!(target_check.is_some(), "Target should remain after compaction");
+    assert!(
+        target_check.is_some(),
+        "Target should remain after compaction"
+    );
 }
 
 #[tokio::test]
@@ -710,10 +724,7 @@ async fn test_level_candidates_nonexistent_level() {
 async fn test_split_state_nonexistent_shard() {
     let metadata = Arc::new(LocalMetadataClient::new());
 
-    let split_state = metadata
-        .get_split_state("nonexistent-shard")
-        .await
-        .unwrap();
+    let split_state = metadata.get_split_state("nonexistent-shard").await.unwrap();
     assert!(
         split_state.is_none(),
         "Non-existent shard should have no split state"
@@ -811,7 +822,10 @@ fn test_error_source_chain() {
     assert!(err.source().is_none(), "Timeout should not have a source");
 
     let err = Error::BufferFull;
-    assert!(err.source().is_none(), "BufferFull should not have a source");
+    assert!(
+        err.source().is_none(),
+        "BufferFull should not have a source"
+    );
 }
 
 // =========================================================================
@@ -820,9 +834,9 @@ fn test_error_source_chain() {
 
 #[tokio::test]
 async fn test_ingester_flush_produces_valid_parquet() {
-    use cardinalsin::schema::MetricSchema;
     use arrow_array::TimestampNanosecondArray;
     use arrow_schema::TimeUnit;
+    use cardinalsin::schema::MetricSchema;
 
     let object_store = Arc::new(InMemory::new());
     let metadata: Arc<dyn MetadataClient> = Arc::new(LocalMetadataClient::new());
@@ -877,7 +891,11 @@ async fn test_ingester_flush_produces_valid_parquet() {
 
     // Verify metadata has the registered chunk
     let chunks = metadata.list_chunks().await.unwrap();
-    assert_eq!(chunks.len(), 1, "Should have 1 chunk registered in metadata");
+    assert_eq!(
+        chunks.len(),
+        1,
+        "Should have 1 chunk registered in metadata"
+    );
     assert_eq!(chunks[0].row_count, 60, "Chunk should have 60 rows");
 
     // Verify the actual parquet file exists in object store
@@ -895,16 +913,19 @@ async fn test_ingester_flush_produces_valid_parquet() {
     let read_batches: Vec<RecordBatch> = reader
         .collect::<std::result::Result<Vec<_>, arrow::error::ArrowError>>()
         .unwrap();
-    let total_rows: usize = read_batches.iter().map(|b: &RecordBatch| b.num_rows()).sum();
+    let total_rows: usize = read_batches
+        .iter()
+        .map(|b: &RecordBatch| b.num_rows())
+        .sum();
 
     assert_eq!(total_rows, 60, "Parquet file should contain 60 rows");
 }
 
 #[tokio::test]
 async fn test_ingester_buffer_below_threshold_no_flush() {
-    use cardinalsin::schema::MetricSchema;
     use arrow_array::TimestampNanosecondArray;
     use arrow_schema::TimeUnit;
+    use cardinalsin::schema::MetricSchema;
 
     let object_store = Arc::new(InMemory::new());
     let metadata: Arc<dyn MetadataClient> = Arc::new(LocalMetadataClient::new());
@@ -916,7 +937,13 @@ async fn test_ingester_buffer_below_threshold_no_flush() {
     };
 
     let schema = MetricSchema::default_metrics();
-    let ingester = Ingester::new(config, object_store, metadata.clone(), storage_config, schema);
+    let ingester = Ingester::new(
+        config,
+        object_store,
+        metadata.clone(),
+        storage_config,
+        schema,
+    );
 
     // Create a small batch
     let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
@@ -946,7 +973,10 @@ async fn test_ingester_buffer_below_threshold_no_flush() {
 
     // Buffer should still have data (no flush)
     let stats = ingester.buffer_stats().await;
-    assert_eq!(stats.row_count, 2, "Buffer should retain rows below threshold");
+    assert_eq!(
+        stats.row_count, 2,
+        "Buffer should retain rows below threshold"
+    );
     assert_eq!(stats.batch_count, 1);
 
     // No chunks should be registered
