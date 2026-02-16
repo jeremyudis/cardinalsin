@@ -9,7 +9,9 @@
 //! - Foundation for multi-tenant isolation
 //! - Eventual consistency with atomic writes
 
-use super::{CompactionJob, CompactionStatus, MetadataClient, SplitState, TimeIndexEntry, TimeRange};
+use super::{
+    CompactionJob, CompactionStatus, MetadataClient, SplitState, TimeIndexEntry, TimeRange,
+};
 use crate::ingester::ChunkMetadata;
 use crate::sharding::SplitPhase;
 use crate::{Error, Result};
@@ -115,7 +117,7 @@ pub struct S3MetadataConfig {
     pub metadata_prefix: String,
     /// Enable caching of metadata reads
     pub enable_cache: bool,
-    /// Allow fallback to unsafe overwrite when CAS update is not supported
+    /// Allow explicit fallback to unsafe overwrite when CAS update is not supported
     pub allow_unsafe_overwrite: bool,
 }
 
@@ -158,21 +160,7 @@ impl S3MetadataClient {
         }
     }
 
-    fn allow_unsafe_overwrite(&self) -> bool {
-        if self.config.allow_unsafe_overwrite {
-            return true;
-        }
-
-        match std::env::var("S3_METADATA_ALLOW_UNSAFE_OVERWRITE") {
-            Ok(value) => {
-                let value = value.trim();
-                value == "1" || value.eq_ignore_ascii_case("true")
-            }
-            Err(_) => false,
-        }
-    }
-
-    async fn put_with_fallback(
+    async fn put_with_cas(
         &self,
         path: &Path,
         payload: PutPayload,
@@ -195,26 +183,29 @@ impl S3MetadataClient {
             }
         };
 
-        match self.object_store.put_opts(path, payload.clone(), opts).await {
+        match self
+            .object_store
+            .put_opts(path, payload.clone(), opts)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(object_store::Error::AlreadyExists { .. }) => {
                 // Another process created the file first - treat as conflict so caller retries
                 Err(Error::Conflict)
             }
             Err(object_store::Error::Precondition { .. }) => Err(Error::Conflict),
-            Err(object_store::Error::NotImplemented) | Err(object_store::Error::NotSupported { .. }) => {
-                if !self.allow_unsafe_overwrite() {
+            Err(object_store::Error::NotImplemented)
+            | Err(object_store::Error::NotSupported { .. }) => {
+                if !self.config.allow_unsafe_overwrite {
                     return Err(Error::Metadata(format!(
-                        "CAS not supported for {} (path: {})",
-                        context,
-                        path
+                        "CAS conditional writes are required for {} at {} but are not supported by the object store. Set allow_unsafe_overwrite=true only for local development with MinIO.",
+                        context, path
                     )));
                 }
 
                 warn!(
-                    "CAS not supported for {} at {} - falling back to unsafe overwrite",
-                    context,
-                    path
+                    "CAS not supported for {} at {} - explicitly opting into unsafe overwrite mode",
+                    context, path
                 );
 
                 let overwrite = PutOptions {
@@ -296,15 +287,7 @@ impl S3MetadataClient {
             }
             Err(object_store::Error::NotFound { .. }) => {
                 debug!("No chunk metadata file found, starting fresh");
-
-                if self.allow_unsafe_overwrite() {
-                    Ok(HashMap::new())
-                } else {
-                    Err(Error::Metadata(
-                        "Chunk metadata not initialized (enable S3_METADATA_ALLOW_UNSAFE_OVERWRITE to bootstrap)"
-                            .to_string(),
-                    ))
-                }
+                Ok(HashMap::new())
             }
             Err(e) => Err(Error::Metadata(format!(
                 "Failed to load chunk metadata: {}",
@@ -416,7 +399,7 @@ impl S3MetadataClient {
         let content = serde_json::to_string_pretty(metadata)?;
         let bytes = content.into_bytes();
 
-        self.put_with_fallback(
+        self.put_with_cas(
             &path,
             PutPayload::from(bytes),
             &expected_etag,
@@ -465,9 +448,8 @@ impl S3MetadataClient {
                     return Ok((BTreeMap::new(), e_tag));
                 }
 
-                let index: BTreeMap<i64, Vec<String>> =
-                    serde_json::from_str(&content)
-                        .map_err(|e| Error::Metadata(format!("Corrupt time index: {}", e)))?;
+                let index: BTreeMap<i64, Vec<String>> = serde_json::from_str(&content)
+                    .map_err(|e| Error::Metadata(format!("Corrupt time index: {}", e)))?;
 
                 debug!(
                     "Loaded time index with {} hour buckets and ETag: {}",
@@ -499,15 +481,13 @@ impl S3MetadataClient {
         let content = serde_json::to_string_pretty(index)?;
         let bytes = content.into_bytes();
 
-        self.put_with_fallback(
-            &path,
-            PutPayload::from(bytes),
-            &expected_etag,
-            "time index",
-        )
-        .await?;
+        self.put_with_cas(&path, PutPayload::from(bytes), &expected_etag, "time index")
+            .await?;
 
-        debug!("Atomically saved time index with {} hour buckets", index.len());
+        debug!(
+            "Atomically saved time index with {} hour buckets",
+            index.len()
+        );
 
         // Invalidate catalog cache on write
         {
@@ -575,10 +555,7 @@ impl S3MetadataClient {
                 // the first write will create it.
                 Ok((catalog, "none".to_string()))
             }
-            Err(e) => Err(Error::Metadata(format!(
-                "Failed to load catalog: {}",
-                e
-            ))),
+            Err(e) => Err(Error::Metadata(format!("Failed to load catalog: {}", e))),
         }
     }
 
@@ -596,20 +573,15 @@ impl S3MetadataClient {
         let content = serde_json::to_string_pretty(catalog)?;
         let bytes = content.into_bytes();
 
-        self.put_with_fallback(
-            &path,
-            PutPayload::from(bytes),
-            &expected_etag,
-            "catalog",
-        )
-        .await
-        .map(|_| {
-            debug!(
-                "Atomically saved catalog with {} chunks and {} time buckets",
-                catalog.chunks.len(),
-                catalog.time_index.len()
-            );
-        })
+        self.put_with_cas(&path, PutPayload::from(bytes), &expected_etag, "catalog")
+            .await
+            .map(|_| {
+                debug!(
+                    "Atomically saved catalog with {} chunks and {} time buckets",
+                    catalog.chunks.len(),
+                    catalog.time_index.len()
+                );
+            })
     }
 
     /// Load chunk metadata (public for testing)
@@ -715,7 +687,11 @@ impl S3MetadataClient {
             let end_bucket = Self::hour_bucket(metadata.max_timestamp);
             let mut bucket = start_bucket;
             while bucket <= end_bucket {
-                catalog.time_index.entry(bucket).or_default().push(path.to_string());
+                catalog
+                    .time_index
+                    .entry(bucket)
+                    .or_default()
+                    .push(path.to_string());
                 bucket += Self::NANOS_PER_HOUR;
             }
             catalog.version = 2;
@@ -750,15 +726,10 @@ impl S3MetadataClient {
                 let bytes = result.bytes().await?;
                 let content = String::from_utf8_lossy(&bytes);
 
-                let jobs: Vec<CompactionJob> =
-                    serde_json::from_str(&content)
-                        .map_err(|e| Error::Metadata(format!("Corrupt compaction jobs: {}", e)))?;
+                let jobs: Vec<CompactionJob> = serde_json::from_str(&content)
+                    .map_err(|e| Error::Metadata(format!("Corrupt compaction jobs: {}", e)))?;
 
-                debug!(
-                    "Loaded {} compaction jobs with ETag: {}",
-                    jobs.len(),
-                    e_tag
-                );
+                debug!("Loaded {} compaction jobs with ETag: {}", jobs.len(), e_tag);
                 Ok((jobs, e_tag))
             }
             Err(object_store::Error::NotFound { .. }) => {
@@ -783,7 +754,7 @@ impl S3MetadataClient {
         let content = serde_json::to_string_pretty(jobs)?;
         let bytes = content.into_bytes();
 
-        self.put_with_fallback(
+        self.put_with_cas(
             &path,
             PutPayload::from(bytes),
             &expected_etag,
@@ -809,15 +780,10 @@ impl S3MetadataClient {
                 let bytes = result.bytes().await?;
                 let content = String::from_utf8_lossy(&bytes);
 
-                let states: HashMap<String, SplitState> =
-                    serde_json::from_str(&content)
-                        .map_err(|e| Error::Metadata(format!("Corrupt split states: {}", e)))?;
+                let states: HashMap<String, SplitState> = serde_json::from_str(&content)
+                    .map_err(|e| Error::Metadata(format!("Corrupt split states: {}", e)))?;
 
-                debug!(
-                    "Loaded {} split states with ETag: {}",
-                    states.len(),
-                    e_tag
-                );
+                debug!("Loaded {} split states with ETag: {}", states.len(), e_tag);
                 Ok((states, e_tag))
             }
             Err(object_store::Error::NotFound { .. }) => {
@@ -842,7 +808,7 @@ impl S3MetadataClient {
         let content = serde_json::to_string_pretty(states)?;
         let bytes = content.into_bytes();
 
-        self.put_with_fallback(
+        self.put_with_cas(
             &path,
             PutPayload::from(bytes),
             &expected_etag,
@@ -901,7 +867,7 @@ impl S3MetadataClient {
         let content = serde_json::to_string_pretty(metadata)?;
         let bytes = content.into_bytes();
 
-        self.put_with_fallback(
+        self.put_with_cas(
             &path,
             PutPayload::from(bytes),
             &expected_etag,
@@ -951,16 +917,14 @@ impl MetadataClient for S3MetadataClient {
                 seen.insert(path.clone());
 
                 if let Some(extended) = catalog.chunks.get(path) {
-                    let chunk_range = TimeRange::new(
-                        extended.base.min_timestamp,
-                        extended.base.max_timestamp,
-                    );
+                    let chunk_range =
+                        TimeRange::new(extended.base.min_timestamp, extended.base.max_timestamp);
 
                     if chunk_range.overlaps(&range) {
                         // Apply column predicate filtering
-                        let satisfies_predicates = predicates.iter().all(|pred| {
-                            pred.evaluate_against_stats(&extended.column_stats)
-                        });
+                        let satisfies_predicates = predicates
+                            .iter()
+                            .all(|pred| pred.evaluate_against_stats(&extended.column_stats));
 
                         if satisfies_predicates {
                             results.push(TimeIndexEntry {
@@ -993,7 +957,10 @@ impl MetadataClient for S3MetadataClient {
 
     async fn get_chunk(&self, path: &str) -> Result<Option<ChunkMetadata>> {
         let catalog = self.load_catalog_cached().await?;
-        Ok(catalog.chunks.get(path).map(|extended| extended.base.clone()))
+        Ok(catalog
+            .chunks
+            .get(path)
+            .map(|extended| extended.base.clone()))
     }
 
     async fn delete_chunk(&self, path: &str) -> Result<()> {
@@ -1156,7 +1123,10 @@ impl MetadataClient for S3MetadataClient {
             match catalog.chunks.get_mut(target_chunk) {
                 Some(meta) => {
                     meta.level = new_level;
-                    debug!("Set compacted chunk {} to level {}", target_chunk, new_level);
+                    debug!(
+                        "Set compacted chunk {} to level {}",
+                        target_chunk, new_level
+                    );
                 }
                 None => {
                     return Err(Error::Metadata(format!(
@@ -1239,14 +1209,17 @@ impl MetadataClient for S3MetadataClient {
     ) -> Result<()> {
         cas_retry!({
             let (mut states, etag) = self.load_split_states_with_etag().await?;
-            states.insert(old_shard.to_string(), SplitState {
-                phase: SplitPhase::Preparation,
-                old_shard: old_shard.to_string(),
-                new_shards: new_shards.clone(),
-                split_point: split_point.clone(),
-                split_timestamp: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
-                backfill_progress: 0.0,
-            });
+            states.insert(
+                old_shard.to_string(),
+                SplitState {
+                    phase: SplitPhase::Preparation,
+                    old_shard: old_shard.to_string(),
+                    new_shards: new_shards.clone(),
+                    split_point: split_point.clone(),
+                    split_timestamp: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                    backfill_progress: 0.0,
+                },
+            );
             self.atomic_save_split_states(&states, etag).await?;
             info!("Started split for shard: {}", old_shard);
             Ok(())
@@ -1287,11 +1260,19 @@ impl MetadataClient for S3MetadataClient {
                 state.backfill_progress = progress;
                 state.phase = phase;
             } else {
-                warn!("No split state found for shard {} during progress update", shard_id);
+                warn!(
+                    "No split state found for shard {} during progress update",
+                    shard_id
+                );
                 return Ok(());
             }
             self.atomic_save_split_states(&states, etag).await?;
-            info!("Updated split progress for {}: {:.1}%, phase: {:?}", shard_id, progress * 100.0, phase);
+            info!(
+                "Updated split progress for {}: {:.1}%, phase: {:?}",
+                shard_id,
+                progress * 100.0,
+                phase
+            );
             Ok(())
         })
     }
@@ -1362,7 +1343,8 @@ impl MetadataClient for S3MetadataClient {
                     // New shard - no existing metadata
                     let mut new_metadata = metadata.clone();
                     new_metadata.generation = 1;
-                    self.atomic_save_shard(shard_id, &new_metadata, "none".to_string()).await?;
+                    self.atomic_save_shard(shard_id, &new_metadata, "none".to_string())
+                        .await?;
                     info!("Created new shard {} metadata (generation 0 → 1)", shard_id);
                     return Ok(());
                 }
@@ -1378,10 +1360,13 @@ impl MetadataClient for S3MetadataClient {
 
             let mut new_metadata = metadata.clone();
             new_metadata.generation = expected_generation + 1;
-            self.atomic_save_shard(shard_id, &new_metadata, etag).await?;
+            self.atomic_save_shard(shard_id, &new_metadata, etag)
+                .await?;
             info!(
                 "Updated shard {} metadata (generation {} → {})",
-                shard_id, expected_generation, expected_generation + 1
+                shard_id,
+                expected_generation,
+                expected_generation + 1
             );
             Ok(())
         })
