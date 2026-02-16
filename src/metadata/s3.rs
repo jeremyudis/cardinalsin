@@ -28,6 +28,39 @@ const MAX_CAS_RETRIES: u32 = 5;
 /// Base backoff duration in milliseconds for exponential backoff
 const BASE_BACKOFF_MS: u64 = 100;
 
+/// CAS retry loop with exponential backoff on conflict.
+///
+/// The body is an async block performing one load-modify-save cycle.
+/// Return `Ok(value)` on success, `Err(Error::Conflict)` to trigger retry,
+/// or any other `Err` to abort immediately.
+macro_rules! cas_retry {
+    ($body:block) => {{
+        let mut __cas_result = Err(Error::TooManyRetries);
+        for __cas_attempt in 0..MAX_CAS_RETRIES {
+            match (async $body).await {
+                Ok(value) => {
+                    __cas_result = Ok(value);
+                    break;
+                }
+                Err(Error::Conflict) => {
+                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(__cas_attempt);
+                    debug!(
+                        "CAS conflict on attempt {}, retrying after {}ms",
+                        __cas_attempt + 1,
+                        backoff_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                }
+                Err(e) => {
+                    __cas_result = Err(e);
+                    break;
+                }
+            }
+        }
+        __cas_result
+    }};
+}
+
 /// Chunk metadata with column statistics for predicate pushdown
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChunkMetadataExtended {
@@ -666,70 +699,41 @@ impl S3MetadataClient {
     ///
     /// Uses single-file CAS on catalog.json for atomic metadata + time index updates.
     async fn atomic_register_chunk(&self, path: &str, metadata: &ChunkMetadata) -> Result<()> {
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load unified catalog with ETag
-            let (mut catalog, catalog_etag) = self.load_catalog_with_etag().await?;
+        let extended = ChunkMetadataExtended {
+            base: metadata.clone(),
+            column_stats: HashMap::new(),
+            level: 0, // New chunks start at L0
+            version: String::new(),
+            shard_id: None,
+        };
 
-            // Create extended metadata
-            let extended = ChunkMetadataExtended {
-                base: metadata.clone(),
-                column_stats: HashMap::new(),
-                level: 0, // New chunks start at L0
-                version: String::new(),
-                shard_id: None,
-            };
-
-            // Update catalog chunks
+        let catalog = cas_retry!({
+            let (mut catalog, etag) = self.load_catalog_with_etag().await?;
             catalog.chunks.insert(path.to_string(), extended.clone());
 
-            // Update catalog time index
             let start_bucket = Self::hour_bucket(metadata.min_timestamp);
             let end_bucket = Self::hour_bucket(metadata.max_timestamp);
-
             let mut bucket = start_bucket;
             while bucket <= end_bucket {
-                catalog
-                    .time_index
-                    .entry(bucket)
-                    .or_insert_with(Vec::new)
-                    .push(path.to_string());
+                catalog.time_index.entry(bucket).or_default().push(path.to_string());
                 bucket += Self::NANOS_PER_HOUR;
             }
-
-            // Ensure version is set to 2 for new writes
             catalog.version = 2;
 
-            // Single atomic save of the entire catalog
-            match self.atomic_save_catalog(&catalog, catalog_etag).await {
-                Ok(_) => {
-                    // Update in-memory cache
-                    {
-                        let mut cache = self.catalog_cache.write().await;
-                        *cache = Some((catalog, Instant::now()));
-                    }
+            self.atomic_save_catalog(&catalog, etag).await?;
+            Ok(catalog)
+        })?;
 
-                    info!(
-                        "Atomically registered chunk: {} (time range: {} to {}) after {} retries",
-                        path, metadata.min_timestamp, metadata.max_timestamp, retry
-                    );
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    // Conflict detected, retry with exponential backoff
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "Conflict detected on attempt {}, retrying after {}ms",
-                        retry + 1,
-                        backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
+        // Update in-memory cache
+        {
+            let mut cache = self.catalog_cache.write().await;
+            *cache = Some((catalog, Instant::now()));
         }
-
-        Err(Error::TooManyRetries)
+        info!(
+            "Atomically registered chunk: {} (time range: {} to {})",
+            path, metadata.min_timestamp, metadata.max_timestamp
+        );
+        Ok(())
     }
 
     /// Load compaction jobs with ETag for atomic operations
@@ -993,51 +997,26 @@ impl MetadataClient for S3MetadataClient {
     }
 
     async fn delete_chunk(&self, path: &str) -> Result<()> {
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load unified catalog with ETag
-            let (mut catalog, catalog_etag) = self.load_catalog_with_etag().await?;
-
-            // Remove from catalog chunks
+        let catalog = cas_retry!({
+            let (mut catalog, etag) = self.load_catalog_with_etag().await?;
             catalog.chunks.remove(path);
-
-            // Remove from catalog time index (path may appear in multiple buckets)
             for chunks in catalog.time_index.values_mut() {
                 chunks.retain(|p| p != path);
             }
-            // Clean up empty buckets
             catalog.time_index.retain(|_, chunks| !chunks.is_empty());
-
-            // Ensure version is set to 2 for new writes
             catalog.version = 2;
 
-            // Single atomic save of the entire catalog
-            match self.atomic_save_catalog(&catalog, catalog_etag).await {
-                Ok(_) => {
-                    // Update in-memory cache
-                    {
-                        let mut cache = self.catalog_cache.write().await;
-                        *cache = Some((catalog, Instant::now()));
-                    }
+            self.atomic_save_catalog(&catalog, etag).await?;
+            Ok(catalog)
+        })?;
 
-                    info!("Atomically deleted chunk metadata: {} after {} retries", path, retry);
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    // Conflict detected, retry with exponential backoff
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "Conflict on delete attempt {}, retrying after {}ms",
-                        retry + 1,
-                        backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
+        // Update in-memory cache
+        {
+            let mut cache = self.catalog_cache.write().await;
+            *cache = Some((catalog, Instant::now()));
         }
-
-        Err(Error::TooManyRetries)
+        info!("Atomically deleted chunk metadata: {}", path);
+        Ok(())
     }
 
     async fn list_chunks(&self) -> Result<Vec<TimeIndexEntry>> {
@@ -1141,35 +1120,14 @@ impl MetadataClient for S3MetadataClient {
 
     async fn create_compaction_job(&self, job: CompactionJob) -> Result<()> {
         let job_id = job.id.clone();
-
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load jobs with ETag for CAS
+        cas_retry!({
             let (mut jobs, etag) = self.load_compaction_jobs_with_etag().await?;
-
-            // Add new job
             jobs.push(job.clone());
-
-            // Attempt atomic save
-            match self.atomic_save_compaction_jobs(&jobs, etag).await {
-                Ok(_) => {
-                    info!("Created compaction job: {} after {} retries", job_id, retry);
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "Conflict on create_compaction_job attempt {}, retrying after {}ms",
-                        retry + 1,
-                        backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(Error::TooManyRetries)
+            self.atomic_save_compaction_jobs(&jobs, etag).await?;
+            Ok(())
+        })?;
+        info!("Created compaction job: {}", job_id);
+        Ok(())
     }
 
     async fn complete_compaction(
@@ -1177,11 +1135,9 @@ impl MetadataClient for S3MetadataClient {
         source_chunks: &[String],
         target_chunk: &str,
     ) -> Result<()> {
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load unified catalog with ETag
-            let (mut catalog, catalog_etag) = self.load_catalog_with_etag().await?;
+        let catalog = cas_retry!({
+            let (mut catalog, etag) = self.load_catalog_with_etag().await?;
 
-            // Calculate new level: max(source_levels) + 1
             let new_level = source_chunks
                 .iter()
                 .filter_map(|p| catalog.chunks.get(p).map(|m| m.level))
@@ -1189,27 +1145,18 @@ impl MetadataClient for S3MetadataClient {
                 .unwrap_or(0)
                 + 1;
 
-            // Remove source chunks from catalog
             for path in source_chunks {
                 catalog.chunks.remove(path);
-
-                // Remove from time index
                 for chunks in catalog.time_index.values_mut() {
                     chunks.retain(|p| p != path);
                 }
             }
-
-            // Clean up empty time index buckets
             catalog.time_index.retain(|_, chunks| !chunks.is_empty());
 
-            // Update target chunk level - target must exist in catalog
             match catalog.chunks.get_mut(target_chunk) {
                 Some(meta) => {
                     meta.level = new_level;
-                    debug!(
-                        "Set compacted chunk {} to level {}",
-                        target_chunk, new_level
-                    );
+                    debug!("Set compacted chunk {} to level {}", target_chunk, new_level);
                 }
                 None => {
                     return Err(Error::Metadata(format!(
@@ -1218,86 +1165,38 @@ impl MetadataClient for S3MetadataClient {
                     )));
                 }
             }
-
-            // Ensure version is set to 2 for new writes
             catalog.version = 2;
 
-            // Single atomic save of the entire catalog
-            match self.atomic_save_catalog(&catalog, catalog_etag).await {
-                Ok(_) => {
-                    // Update in-memory cache
-                    {
-                        let mut cache = self.catalog_cache.write().await;
-                        *cache = Some((catalog, Instant::now()));
-                    }
+            self.atomic_save_catalog(&catalog, etag).await?;
+            Ok(catalog)
+        })?;
 
-                    info!(
-                        "Completed compaction: {} chunks -> {} (level {}) after {} retries",
-                        source_chunks.len(),
-                        target_chunk,
-                        new_level,
-                        retry
-                    );
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    // Conflict detected, retry with exponential backoff
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "Conflict detected on compaction attempt {}, retrying after {}ms",
-                        retry + 1,
-                        backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
+        // Update in-memory cache
+        {
+            let mut cache = self.catalog_cache.write().await;
+            *cache = Some((catalog, Instant::now()));
         }
-
-        Err(Error::TooManyRetries)
+        info!(
+            "Completed compaction: {} chunks -> {}",
+            source_chunks.len(),
+            target_chunk,
+        );
+        Ok(())
     }
 
     async fn update_compaction_status(&self, job_id: &str, status: CompactionStatus) -> Result<()> {
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load jobs with ETag for CAS
+        cas_retry!({
             let (mut jobs, etag) = self.load_compaction_jobs_with_etag().await?;
-
-            // Find and update the job
-            let job_found = if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                job.status = status.clone();
-                true
+            if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
+                job.status = status;
             } else {
-                false
-            };
-
-            if !job_found {
-                // Job not found, nothing to update
                 warn!("Compaction job {} not found for status update", job_id);
                 return Ok(());
             }
-
-            // Attempt atomic save
-            match self.atomic_save_compaction_jobs(&jobs, etag).await {
-                Ok(_) => {
-                    info!("Updated compaction job {} status to {:?} after {} retries", job_id, status, retry);
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "Conflict on update_compaction_status attempt {}, retrying after {}ms",
-                        retry + 1,
-                        backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(Error::TooManyRetries)
+            self.atomic_save_compaction_jobs(&jobs, etag).await?;
+            info!("Updated compaction job {} status to {:?}", job_id, status);
+            Ok(())
+        })
     }
 
     async fn get_pending_compaction_jobs(&self) -> Result<Vec<CompactionJob>> {
@@ -1338,43 +1237,20 @@ impl MetadataClient for S3MetadataClient {
         new_shards: Vec<String>,
         split_point: Vec<u8>,
     ) -> Result<()> {
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load split states with ETag for CAS
+        cas_retry!({
             let (mut states, etag) = self.load_split_states_with_etag().await?;
-
-            // Add new split state
-            let split_state = SplitState {
+            states.insert(old_shard.to_string(), SplitState {
                 phase: SplitPhase::Preparation,
                 old_shard: old_shard.to_string(),
                 new_shards: new_shards.clone(),
                 split_point: split_point.clone(),
                 split_timestamp: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
                 backfill_progress: 0.0,
-            };
-
-            states.insert(old_shard.to_string(), split_state);
-
-            // Attempt atomic save
-            match self.atomic_save_split_states(&states, etag).await {
-                Ok(_) => {
-                    info!("Started split for shard: {} after {} retries", old_shard, retry);
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "Conflict on start_split attempt {}, retrying after {}ms",
-                        retry + 1,
-                        backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(Error::TooManyRetries)
+            });
+            self.atomic_save_split_states(&states, etag).await?;
+            info!("Started split for shard: {}", old_shard);
+            Ok(())
+        })
     }
 
     async fn get_split_state(&self, shard_id: &str) -> Result<Option<SplitState>> {
@@ -1405,83 +1281,29 @@ impl MetadataClient for S3MetadataClient {
         progress: f64,
         phase: SplitPhase,
     ) -> Result<()> {
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load split states with ETag for CAS
+        cas_retry!({
             let (mut states, etag) = self.load_split_states_with_etag().await?;
-
-            // Update state
-            let state_found = if let Some(state) = states.get_mut(shard_id) {
+            if let Some(state) = states.get_mut(shard_id) {
                 state.backfill_progress = progress;
                 state.phase = phase;
-                true
             } else {
-                false
-            };
-
-            if !state_found {
-                // No split state found for this shard
                 warn!("No split state found for shard {} during progress update", shard_id);
                 return Ok(());
             }
-
-            // Attempt atomic save
-            match self.atomic_save_split_states(&states, etag).await {
-                Ok(_) => {
-                    info!(
-                        "Updated split progress for {}: {:.1}%, phase: {:?} after {} retries",
-                        shard_id,
-                        progress * 100.0,
-                        phase,
-                        retry
-                    );
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "Conflict on update_split_progress attempt {}, retrying after {}ms",
-                        retry + 1,
-                        backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(Error::TooManyRetries)
+            self.atomic_save_split_states(&states, etag).await?;
+            info!("Updated split progress for {}: {:.1}%, phase: {:?}", shard_id, progress * 100.0, phase);
+            Ok(())
+        })
     }
 
     async fn complete_split(&self, old_shard: &str) -> Result<()> {
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load split states with ETag for CAS
+        cas_retry!({
             let (mut states, etag) = self.load_split_states_with_etag().await?;
-
-            // Remove completed split
             states.remove(old_shard);
-
-            // Attempt atomic save
-            match self.atomic_save_split_states(&states, etag).await {
-                Ok(_) => {
-                    info!("Completed split for shard: {} after {} retries", old_shard, retry);
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "Conflict on complete_split attempt {}, retrying after {}ms",
-                        retry + 1,
-                        backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(Error::TooManyRetries)
+            self.atomic_save_split_states(&states, etag).await?;
+            info!("Completed split for shard: {}", old_shard);
+            Ok(())
+        })
     }
 
     async fn get_chunks_for_shard(&self, shard_id: &str) -> Result<Vec<TimeIndexEntry>> {
@@ -1533,22 +1355,20 @@ impl MetadataClient for S3MetadataClient {
         metadata: &crate::sharding::ShardMetadata,
         expected_generation: u64,
     ) -> Result<()> {
-        for retry in 0..MAX_CAS_RETRIES {
-            // Load current metadata with ETag
+        cas_retry!({
             let (current, etag) = match self.load_shard_with_etag(shard_id).await {
                 Ok(result) => result,
                 Err(Error::ShardNotFound(_)) if expected_generation == 0 => {
                     // New shard - no existing metadata
                     let mut new_metadata = metadata.clone();
                     new_metadata.generation = 1;
-                    return self
-                        .atomic_save_shard(shard_id, &new_metadata, "none".to_string())
-                        .await;
+                    self.atomic_save_shard(shard_id, &new_metadata, "none".to_string()).await?;
+                    info!("Created new shard {} metadata (generation 0 → 1)", shard_id);
+                    return Ok(());
                 }
                 Err(e) => return Err(e),
             };
 
-            // Verify generation matches
             if current.generation != expected_generation {
                 return Err(Error::StaleGeneration {
                     expected: expected_generation,
@@ -1556,36 +1376,14 @@ impl MetadataClient for S3MetadataClient {
                 });
             }
 
-            // Increment generation
             let mut new_metadata = metadata.clone();
             new_metadata.generation = expected_generation + 1;
-
-            // Attempt atomic save with ETag
-            match self.atomic_save_shard(shard_id, &new_metadata, etag).await {
-                Ok(_) => {
-                    info!(
-                        "Updated shard {} metadata (generation {} → {}) after {} retries",
-                        shard_id,
-                        expected_generation,
-                        expected_generation + 1,
-                        retry
-                    );
-                    return Ok(());
-                }
-                Err(Error::Conflict) => {
-                    // Another process updated concurrently, retry with standardized backoff
-                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
-                    debug!(
-                        "CAS conflict on shard {} update, retrying after {}ms",
-                        shard_id, backoff_ms
-                    );
-                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(Error::TooManyRetries)
+            self.atomic_save_shard(shard_id, &new_metadata, etag).await?;
+            info!(
+                "Updated shard {} metadata (generation {} → {})",
+                shard_id, expected_generation, expected_generation + 1
+            );
+            Ok(())
+        })
     }
 }
