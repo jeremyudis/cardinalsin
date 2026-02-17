@@ -7,6 +7,7 @@
 //! - SQL HTTP API
 //! - WebSocket/SSE for streaming queries
 
+pub mod grpc;
 pub mod ingest;
 pub mod query;
 

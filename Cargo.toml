@@ -44,7 +44,7 @@ arrow = { version = "53", features = ["prettyprint"] }
 arrow-array = "53"
 arrow-schema = "53"
 arrow-ipc = "53"
-arrow-flight = "53"
+arrow-flight = { version = "53", features = ["flight-sql-experimental"] }
 parquet = { version = "53", features = ["arrow", "zstd", "lz4", "snap"] }
 object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
 

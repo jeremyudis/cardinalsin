@@ -7,13 +7,14 @@ use cardinalsin::config::ComponentFactory;
 use cardinalsin::ingester::{Ingester, IngesterConfig};
 use cardinalsin::query::{QueryConfig, QueryNode};
 use cardinalsin::schema::MetricSchema;
-use cardinalsin::StorageConfig;
+use cardinalsin::{Error, StorageConfig};
 
 use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
+use tokio::sync::watch;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -118,18 +119,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         QueryNode::new(
             QueryConfig::default(),
             ComponentFactory::create_object_store().await?,
-            ComponentFactory::create_metadata_client(ComponentFactory::create_object_store().await?).await?,
+            ComponentFactory::create_metadata_client(
+                ComponentFactory::create_object_store().await?,
+            )
+            .await?,
             storage_config.clone(),
         )
         .await?,
     );
 
     // Build HTTP router
-    let router = api::build_http_router(ingester, query_node);
+    let router = api::build_http_router(ingester.clone(), query_node);
 
     // Start HTTP server
     let addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
+    let grpc_addr = SocketAddr::from(([0, 0, 0, 0], args.grpc_port));
     let listener = TcpListener::bind(addr).await?;
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let http_shutdown = shutdown_rx.clone();
+    let grpc_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    });
 
     info!(
         http_port = args.http_port,
@@ -137,10 +149,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Ingester ready"
     );
 
-    // Start server with graceful shutdown
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let http_server = async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(wait_for_shutdown(http_shutdown))
+            .await
+            .map_err(|e| Error::Internal(format!("HTTP server error: {e}")))
+    };
+    let grpc_server = api::grpc::run_ingester_grpc_server(grpc_addr, ingester, grpc_shutdown);
+    tokio::try_join!(http_server, grpc_server)?;
 
     info!("Ingester shutting down");
 
@@ -169,4 +185,11 @@ async fn shutdown_signal() {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
+}
+
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    if *shutdown.borrow() {
+        return;
+    }
+    let _ = shutdown.changed().await;
 }
