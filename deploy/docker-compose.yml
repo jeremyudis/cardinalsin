@@ -52,7 +52,7 @@ services:
       RUST_LOG: info
     ports:
       - "8081:8080"   # HTTP
-      - "4317:4317"   # OTLP gRPC
+      - "4317:4317"   # OTLP gRPC + Arrow Flight ingest
     depends_on:
       minio-init:
         condition: service_completed_successfully
@@ -76,7 +76,7 @@ services:
       RUST_LOG: info
     ports:
       - "8080:8080"   # HTTP (SQL, Prometheus API)
-      - "8815:8815"   # Arrow Flight SQL
+      - "8815:8815"   # Arrow Flight SQL gRPC
     depends_on:
       minio-init:
         condition: service_completed_successfully
