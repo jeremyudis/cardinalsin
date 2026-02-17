@@ -190,8 +190,12 @@ async fn test_phase4_cutover() {
     let splitter = ShardSplitter::new(metadata.clone(), object_store);
 
     let shard = create_test_shard();
+    metadata
+        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .await
+        .unwrap();
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = vec![128u8; 8];
+    let split_point = 5000i64.to_be_bytes().to_vec();
 
     // Set up split state with 100% backfill
     metadata
@@ -210,6 +214,94 @@ async fn test_phase4_cutover() {
     // Verify split is complete
     let split_state = metadata.get_split_state(&shard.shard_id).await.unwrap();
     assert!(split_state.is_none(), "Split state should be removed after cutover");
+
+    // Verify old shard is fenced from new writes and new shards are active
+    let old = metadata
+        .get_shard_metadata(&shard.shard_id)
+        .await
+        .unwrap()
+        .expect("old shard metadata should exist");
+    assert!(
+        matches!(old.state, ShardState::PendingDeletion { .. }),
+        "old shard should be marked pending deletion after cutover"
+    );
+
+    let shard_a_meta = metadata
+        .get_shard_metadata(&shard_a)
+        .await
+        .unwrap()
+        .expect("new shard A metadata should exist");
+    assert_eq!(shard_a_meta.state, ShardState::Active);
+
+    let shard_b_meta = metadata
+        .get_shard_metadata(&shard_b)
+        .await
+        .unwrap()
+        .expect("new shard B metadata should exist");
+    assert_eq!(shard_b_meta.state, ShardState::Active);
+}
+
+#[tokio::test]
+async fn test_phase4_cutover_requires_old_shard_metadata() {
+    let metadata = Arc::new(LocalMetadataClient::new());
+    let object_store = Arc::new(InMemory::new());
+    let splitter = ShardSplitter::new(metadata.clone(), object_store);
+
+    let shard = create_test_shard();
+    let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
+
+    metadata
+        .start_split(
+            &shard.shard_id,
+            vec![shard_a, shard_b],
+            5000i64.to_be_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
+    metadata
+        .update_split_progress(&shard.shard_id, 1.0, SplitPhase::Backfill)
+        .await
+        .unwrap();
+
+    let err = splitter.cutover(&shard.shard_id).await.unwrap_err();
+    assert!(
+        matches!(err, cardinalsin::Error::ShardNotFound(ref id) if id == &shard.shard_id),
+        "expected ShardNotFound when old shard metadata is missing, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_phase4_cutover_rejects_invalid_split_state_shape() {
+    let metadata = Arc::new(LocalMetadataClient::new());
+    let object_store = Arc::new(InMemory::new());
+    let splitter = ShardSplitter::new(metadata.clone(), object_store);
+
+    let shard = create_test_shard();
+    metadata
+        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .await
+        .unwrap();
+
+    metadata
+        .start_split(
+            &shard.shard_id,
+            vec!["only-one-new-shard".to_string()],
+            5000i64.to_be_bytes().to_vec(),
+        )
+        .await
+        .unwrap();
+    metadata
+        .update_split_progress(&shard.shard_id, 1.0, SplitPhase::Backfill)
+        .await
+        .unwrap();
+
+    let err = splitter.cutover(&shard.shard_id).await.unwrap_err();
+    assert!(
+        matches!(err, cardinalsin::Error::Internal(ref msg) if msg.contains("expected 2 new shards")),
+        "expected split-state shape validation error, got: {}",
+        err
+    );
 }
 
 /// Test Phase 5: Cleanup removes old data

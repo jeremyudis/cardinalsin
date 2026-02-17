@@ -340,11 +340,26 @@ impl ShardSplitter {
             .await?
             .ok_or_else(|| crate::Error::Internal("No split in progress".to_string()))?;
 
+        if split_state.old_shard != old_shard {
+            return Err(crate::Error::Internal(format!(
+                "Split state shard mismatch: expected {}, found {}",
+                old_shard, split_state.old_shard
+            )));
+        }
+
         // Verify backfill is 100% complete
         if split_state.backfill_progress < 1.0 {
             return Err(crate::Error::Internal(format!(
                 "Backfill only {:.1}% complete",
                 split_state.backfill_progress * 100.0
+            )));
+        }
+
+        if split_state.new_shards.len() != 2 {
+            return Err(crate::Error::Internal(format!(
+                "Invalid split state for {}: expected 2 new shards, found {}",
+                old_shard,
+                split_state.new_shards.len()
             )));
         }
 
@@ -360,11 +375,18 @@ impl ShardSplitter {
         let current_generation = old_metadata.generation;
 
         // Calculate split point timestamp
-        let split_ts = i64::from_be_bytes(
-            split_state.split_point[..8]
-                .try_into()
-                .unwrap_or([0u8; 8]),
-        );
+        let split_point_bytes: [u8; 8] = split_state
+            .split_point
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                crate::Error::Internal(format!(
+                    "Invalid split point for {}: expected 8 bytes, found {}",
+                    old_shard,
+                    split_state.split_point.len()
+                ))
+            })?;
+        let split_ts = i64::from_be_bytes(split_point_bytes);
 
         // Create new shard metadata for both shards
         // Note: generation starts at 0 here, but update_shard_metadata will atomically
