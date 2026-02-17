@@ -1,0 +1,66 @@
+name: Docker Publish
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'deploy/Dockerfile'
+  workflow_dispatch:
+    inputs:
+      publish_enabled:
+        description: 'Set to true to allow this manual run to publish'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DOCKER_PUBLISH_ENABLED == 'true') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish_enabled == 'true' && vars.DOCKER_PUBLISH_ENABLED == 'true')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
