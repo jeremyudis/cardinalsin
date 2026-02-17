@@ -10,7 +10,7 @@
 pub mod ingest;
 pub mod query;
 
-use axum::Router;
+use axum::{extract::State, http::StatusCode, Router};
 use std::sync::Arc;
 
 /// Combined API server configuration
@@ -94,7 +94,10 @@ async fn health_check() -> &'static str {
 }
 
 /// Readiness check endpoint
-async fn ready_check() -> &'static str {
-    // In production, check dependencies
-    "READY"
+async fn ready_check(State(state): State<ApiState>) -> (StatusCode, &'static str) {
+    if state.ingester.wal_ready() {
+        (StatusCode::OK, "READY")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "WAL_NOT_READY")
+    }
 }

@@ -247,6 +247,26 @@ impl Ingester {
         Ok(())
     }
 
+    /// Whether WAL durability is enabled by configuration.
+    pub fn wal_enabled(&self) -> bool {
+        self.config.wal.enabled
+    }
+
+    /// Whether WAL has been initialized and is actively protecting writes.
+    pub fn wal_initialized(&self) -> bool {
+        self.wal.is_some()
+    }
+
+    /// Whether the ingester is durability-ready.
+    pub fn wal_ready(&self) -> bool {
+        !self.wal_enabled() || self.wal_initialized()
+    }
+
+    /// WAL directory path from configuration.
+    pub fn wal_dir(&self) -> &std::path::Path {
+        &self.config.wal.wal_dir
+    }
+
     /// Write metrics to the buffer
     pub async fn write(&self, batch: RecordBatch) -> Result<()> {
         let start_time = std::time::Instant::now();

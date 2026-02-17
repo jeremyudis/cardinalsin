@@ -151,6 +151,35 @@ async fn test_ensure_wal_initializes_and_recovers_empty() {
 }
 
 #[tokio::test]
+async fn test_wal_ready_transitions_after_initialization() {
+    let dir = TempDir::new().unwrap();
+    let config = make_ingester_config(make_wal_config(&dir));
+    let mut ingester = make_ingester(config);
+
+    assert!(ingester.wal_enabled());
+    assert!(!ingester.wal_initialized());
+    assert!(!ingester.wal_ready());
+
+    ingester.ensure_wal().await.unwrap();
+
+    assert!(ingester.wal_initialized());
+    assert!(ingester.wal_ready());
+}
+
+#[test]
+fn test_wal_ready_when_disabled() {
+    let dir = TempDir::new().unwrap();
+    let mut wal_config = make_wal_config(&dir);
+    wal_config.enabled = false;
+    let config = make_ingester_config(wal_config);
+    let ingester = make_ingester(config);
+
+    assert!(!ingester.wal_enabled());
+    assert!(!ingester.wal_initialized());
+    assert!(ingester.wal_ready());
+}
+
+#[tokio::test]
 async fn test_wal_recovery_replays_unflushed_entries() {
     let dir = TempDir::new().unwrap();
     let wal_config = make_wal_config(&dir);

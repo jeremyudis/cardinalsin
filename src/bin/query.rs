@@ -14,8 +14,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
-use tracing::{info, Level};
+use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
+
+const WAL_ALLOW_STARTUP_WITHOUT_DURABILITY_ENV: &str = "WAL_ALLOW_STARTUP_WITHOUT_DURABILITY";
 
 /// CardinalSin Query Node
 #[derive(Parser, Debug)]
@@ -60,6 +62,15 @@ struct Args {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let value = value.trim();
+            value == "1" || value.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
 }
 
 #[tokio::main]
@@ -119,13 +130,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create a dummy ingester for the API (in production, query nodes don't ingest)
-    let ingester = Arc::new(Ingester::new(
+    let mut ingester = Ingester::new(
         IngesterConfig::default(),
         object_store,
         metadata,
         storage_config,
         MetricSchema::default_metrics(),
-    ));
+    );
+    let allow_start_without_wal = env_flag_enabled(WAL_ALLOW_STARTUP_WITHOUT_DURABILITY_ENV);
+
+    if let Err(e) = ingester.ensure_wal().await {
+        if allow_start_without_wal {
+            warn!(
+                error = %e,
+                wal_dir = %ingester.wal_dir().display(),
+                env_var = WAL_ALLOW_STARTUP_WITHOUT_DURABILITY_ENV,
+                "Embedded ingester WAL initialization failed; continuing with durability disabled by explicit opt-out"
+            );
+        } else {
+            error!(
+                error = %e,
+                wal_dir = %ingester.wal_dir().display(),
+                env_var = WAL_ALLOW_STARTUP_WITHOUT_DURABILITY_ENV,
+                "Embedded ingester WAL initialization failed; refusing to start without crash durability"
+            );
+            return Err(e.into());
+        }
+    } else if ingester.wal_enabled() {
+        info!(
+            wal_dir = %ingester.wal_dir().display(),
+            "Embedded ingester WAL initialized; write durability enabled"
+        );
+    } else {
+        warn!("Embedded ingester WAL is disabled by configuration");
+    }
+
+    let ingester = Arc::new(ingester);
 
     // Build HTTP router
     let router = api::build_http_router(ingester, query_node);

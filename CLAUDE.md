@@ -6,6 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **If an implementation is incorrect, FIX IT! Do NOT modify tests to match broken code.**
 
+## Beads Coordination Rules
+
+When working from `.beads` issues, coordinate for parallel agents:
+
+1. **First step: sync and check current ownership**
+   - Run `bd sync --import-only` if needed.
+   - Check whether the target issue is already `in_progress` before claiming it.
+2. **Do not claim issues already in progress**
+   - If an issue is `in_progress`, pick another open issue instead of taking it.
+3. **Immediately claim when starting**
+   - As the first action on a new task, set `in_progress`:
+   - `bd update <issue-id> --status in_progress`
+4. **Only one active claim per agent**
+   - Avoid claiming multiple issues at once unless explicitly requested.
+
 ## Project Overview
 
 CardinalSin is a high-cardinality time-series database built on object storage (S3/GCS/Azure) that solves the cardinality explosion problem through columnar storage instead of per-tag-combination indexing.
