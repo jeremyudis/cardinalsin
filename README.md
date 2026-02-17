@@ -102,8 +102,8 @@ docker-compose up -d
 
 This starts:
 - **MinIO** (S3-compatible storage) on ports 9000/9001
-- **Ingester** on port 8081 (HTTP) and 4317 (OTLP gRPC)
-- **Query node** on port 8080 (HTTP/SQL/Prometheus API)
+- **Ingester** on port 8081 (HTTP) and 4317 (OTLP gRPC + Arrow Flight ingest)
+- **Query node** on port 8080 (HTTP/SQL/Prometheus API) and 8815 (Arrow Flight SQL)
 - **Compactor** (background service)
 - **Grafana** on port 3000
 
@@ -133,16 +133,15 @@ cargo test
 | Protocol | Port | Transport | Format | Use Case |
 |----------|------|-----------|--------|----------|
 | **OTLP gRPC** | 4317 | HTTP/2 gRPC | Protobuf | OpenTelemetry agents, SDKs |
-| **OTLP HTTP** | 4318 | HTTP/1.1 | Protobuf/JSON | Browser, serverless |
-| **Prometheus Remote Write** | 9090 | HTTP POST | Protobuf+Snappy | Prometheus, Grafana Agent |
-| **Arrow Flight** | 8815 | gRPC | Arrow IPC | Bulk data loading |
+| **Prometheus Remote Write** | 8080 (8081 in `docker-compose`) | HTTP POST | Protobuf+Snappy | Prometheus, Grafana Agent |
+| **Arrow Flight DoPut (ingest)** | 4317 | gRPC | Arrow IPC | Bulk data loading |
 
 ### Query Protocols
 
 | Protocol | Port | Transport | Format | Use Case |
 |----------|------|-----------|--------|----------|
 | **SQL HTTP** | 8080 | HTTP REST | JSON/Arrow/CSV | Web apps, ad-hoc queries |
-| **Prometheus API** | 9090 | HTTP REST | JSON | Grafana, existing dashboards |
+| **Prometheus API** | 8080 | HTTP REST | JSON | Grafana, existing dashboards |
 | **Arrow Flight SQL** | 8815 | gRPC | Arrow IPC | Analytics tools, DuckDB |
 | **WebSocket/SSE** | 8080 | WS/HTTP | JSON | Live dashboards, alerting |
 
@@ -387,7 +386,7 @@ cardinalsin/
 │   ├── error.rs                   # Error types
 │   ├── api/
 │   │   ├── ingest/
-│   │   │   ├── otlp.rs            # OTLP gRPC + HTTP receiver
+│   │   │   ├── otlp.rs            # OTLP gRPC receiver + OTLP conversion helpers
 │   │   │   ├── prometheus.rs      # Prometheus Remote Write
 │   │   │   └── flight_ingest.rs   # Arrow Flight bulk ingest
 │   │   └── query/
