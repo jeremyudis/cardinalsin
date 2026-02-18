@@ -229,6 +229,12 @@ async fn test_phase4_cutover() {
 
     store_shard_metadata(&metadata, &shard).await;
 
+    // Cutover performs CAS updates against existing shard metadata.
+    metadata
+        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .await
+        .unwrap();
+
     // Set up split state with 100% backfill
     metadata
         .start_split(
