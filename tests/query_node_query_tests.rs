@@ -54,7 +54,9 @@ async fn ingest_and_create_query_node(object_store: Arc<dyn ObjectStore>) -> Que
         metric_schema,
     );
 
-    let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    // Keep fixture timestamps safely in the past so default query ranges
+    // (which end at "now") deterministically include both batches.
+    let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - 60_000_000_000;
     ingester
         .write(create_metric_batch("cpu", 4, now))
         .await
