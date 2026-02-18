@@ -72,7 +72,10 @@ impl ShardSplitter {
                 split_point.clone(),
             )
             .await?;
-        info!("✅ Phase 1 complete: Created shards {} and {}", new_shard_a, new_shard_b);
+        info!(
+            "✅ Phase 1 complete: Created shards {} and {}",
+            new_shard_a, new_shard_b
+        );
 
         // Phase 2: Enable dual-write (ingesters will detect and start dual-writing)
         info!("✏️  Phase 2/5: Dual-write enabled");
@@ -173,7 +176,10 @@ impl ShardSplitter {
             let bytes = match self.object_store.get(&path).await {
                 Ok(result) => result.bytes().await?,
                 Err(e) => {
-                    warn!("Failed to read chunk {}: {}, skipping", chunk_entry.chunk_path, e);
+                    warn!(
+                        "Failed to read chunk {}: {}, skipping",
+                        chunk_entry.chunk_path, e
+                    );
                     continue;
                 }
             };
@@ -227,7 +233,11 @@ impl ShardSplitter {
     }
 
     /// Split a RecordBatch into two based on timestamp split point
-    fn split_batch(&self, batch: &RecordBatch, split_point: &[u8]) -> Result<(RecordBatch, RecordBatch)> {
+    fn split_batch(
+        &self,
+        batch: &RecordBatch,
+        split_point: &[u8],
+    ) -> Result<(RecordBatch, RecordBatch)> {
         // Extract timestamp column
         let ts_column = batch
             .column_by_name("timestamp")
@@ -340,6 +350,13 @@ impl ShardSplitter {
             .await?
             .ok_or_else(|| crate::Error::Internal("No split in progress".to_string()))?;
 
+        if split_state.phase != SplitPhase::Backfill {
+            return Err(crate::Error::Internal(format!(
+                "Cutover requires Backfill phase, got {:?}",
+                split_state.phase
+            )));
+        }
+
         // Verify backfill is 100% complete
         if split_state.backfill_progress < 1.0 {
             return Err(crate::Error::Internal(format!(
@@ -347,6 +364,21 @@ impl ShardSplitter {
                 split_state.backfill_progress * 100.0
             )));
         }
+
+        if split_state.new_shards.len() != 2 {
+            return Err(crate::Error::Internal(format!(
+                "Cutover requires exactly 2 new shards, got {}",
+                split_state.new_shards.len()
+            )));
+        }
+
+        let split_ts = i64::from_be_bytes(
+            split_state
+                .split_point
+                .as_slice()
+                .try_into()
+                .map_err(|_| crate::Error::Internal("Invalid split point".to_string()))?,
+        );
 
         info!("Phase 4: Performing cutover for shard {}", old_shard);
 
@@ -359,20 +391,19 @@ impl ShardSplitter {
 
         let current_generation = old_metadata.generation;
 
-        // Calculate split point timestamp
-        let split_ts = i64::from_be_bytes(
-            split_state.split_point[..8]
-                .try_into()
-                .unwrap_or([0u8; 8]),
-        );
+        let new_shard_a_id = split_state.new_shards[0].clone();
+        let new_shard_b_id = split_state.new_shards[1].clone();
 
         // Create new shard metadata for both shards
         // Note: generation starts at 0 here, but update_shard_metadata will atomically
         // increment it to 1 during the CAS operation (expected_generation=0 -> stored=1)
         let new_shard_a = ShardMetadata {
-            shard_id: split_state.new_shards[0].clone(),
+            shard_id: new_shard_a_id,
             generation: 0, // Initial value; incremented to 1 by update_shard_metadata CAS
-            key_range: (old_metadata.key_range.0.clone(), split_state.split_point.clone()),
+            key_range: (
+                old_metadata.key_range.0.clone(),
+                split_state.split_point.clone(),
+            ),
             replicas: old_metadata.replicas.clone(),
             state: ShardState::Active,
             min_time: old_metadata.min_time,
@@ -380,9 +411,12 @@ impl ShardSplitter {
         };
 
         let new_shard_b = ShardMetadata {
-            shard_id: split_state.new_shards[1].clone(),
+            shard_id: new_shard_b_id,
             generation: 0, // Initial value; incremented to 1 by update_shard_metadata CAS
-            key_range: (split_state.split_point.clone(), old_metadata.key_range.1.clone()),
+            key_range: (
+                split_state.split_point.clone(),
+                old_metadata.key_range.1.clone(),
+            ),
             replicas: old_metadata.replicas.clone(),
             state: ShardState::Active,
             min_time: split_ts,
@@ -401,8 +435,7 @@ impl ShardSplitter {
         // Mark old shard as pending deletion using CAS
         let mut old_updated = old_metadata.clone();
         old_updated.state = ShardState::PendingDeletion {
-            delete_after: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                + 300_000_000_000, // 5 minutes
+            delete_after: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) + 300_000_000_000, // 5 minutes
         };
 
         self.metadata
@@ -448,7 +481,10 @@ impl ShardSplitter {
 
             // Remove from metadata
             if let Err(e) = self.metadata.delete_chunk(&chunk.chunk_path).await {
-                warn!("Failed to delete chunk metadata {}: {}", chunk.chunk_path, e);
+                warn!(
+                    "Failed to delete chunk metadata {}: {}",
+                    chunk.chunk_path, e
+                );
             }
         }
 
@@ -469,7 +505,6 @@ impl ShardSplitter {
         rounded.to_be_bytes().to_vec()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
