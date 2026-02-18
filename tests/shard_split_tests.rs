@@ -193,6 +193,12 @@ async fn test_phase4_cutover() {
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
     let split_point = vec![128u8; 8];
 
+    // Cutover performs CAS updates against existing shard metadata.
+    metadata
+        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .await
+        .unwrap();
+
     // Set up split state with 100% backfill
     metadata
         .start_split(&shard.shard_id, vec![shard_a.clone(), shard_b.clone()], split_point)
