@@ -6,19 +6,23 @@ use crate::metadata::TimeRange;
 use crate::{Error, Result};
 
 use arrow_array::RecordBatch;
-use datafusion::prelude::*;
-use datafusion::datasource::listing::{
-    ListingTable, ListingTableConfig, ListingTableUrl, ListingOptions,
-};
+use arrow_schema::SchemaRef;
+use datafusion::datasource::empty::EmptyTable;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{Expr, LogicalPlan, Operator};
+use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::future::Future;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Query engine powered by DataFusion
 #[derive(Clone)]
@@ -27,19 +31,17 @@ pub struct QueryEngine {
     ctx: SessionContext,
     /// Registered table paths
     registered_paths: Arc<RwLock<HashSet<String>>>,
+    /// Paths currently backing the logical "metrics" table
+    registered_metrics_paths: Arc<RwLock<BTreeSet<String>>>,
+    /// Serialize operations that mutate and query the logical `metrics` table.
+    metrics_table_query_lock: Arc<Mutex<()>>,
 }
 
 impl QueryEngine {
     /// Create a new query engine
-    pub async fn new(
-        object_store: Arc<dyn ObjectStore>,
-        cache: Arc<TieredCache>,
-    ) -> Result<Self> {
+    pub async fn new(object_store: Arc<dyn ObjectStore>, cache: Arc<TieredCache>) -> Result<Self> {
         // Wrap object store with caching layer
-        let cached_store = Arc::new(CachedObjectStore::new(
-            object_store.clone(),
-            cache.clone(),
-        ));
+        let cached_store = Arc::new(CachedObjectStore::new(object_store.clone(), cache.clone()));
 
         // Configure runtime environment
         let runtime_env = RuntimeEnvBuilder::new()
@@ -48,11 +50,9 @@ impl QueryEngine {
 
         // Register object store with DataFusion for s3:// URLs
         // DataFusion uses the URL scheme to look up the appropriate ObjectStore
-        let s3_url = url::Url::parse("s3://bucket").map_err(|e| {
-            Error::Config(format!("Failed to parse S3 URL: {}", e))
-        })?;
-        runtime_env
-            .register_object_store(&s3_url, cached_store.clone());
+        let s3_url = url::Url::parse("s3://bucket")
+            .map_err(|e| Error::Config(format!("Failed to parse S3 URL: {}", e)))?;
+        runtime_env.register_object_store(&s3_url, cached_store.clone());
 
         // Create session config with optimizations
         let session_config = SessionConfig::new()
@@ -75,7 +75,28 @@ impl QueryEngine {
         Ok(Self {
             ctx,
             registered_paths: Arc::new(RwLock::new(HashSet::new())),
+            registered_metrics_paths: Arc::new(RwLock::new(BTreeSet::new())),
+            metrics_table_query_lock: Arc::new(Mutex::new(())),
         })
+    }
+
+    /// Execute an operation while `metrics` is bound to the provided chunk paths.
+    ///
+    /// This prevents concurrent requests from racing on the shared SessionContext
+    /// table mapping.
+    pub async fn with_metrics_table<F, Fut, T>(
+        &self,
+        chunk_paths: &[String],
+        operation: F,
+    ) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let _guard = self.metrics_table_query_lock.lock().await;
+        self.register_metrics_table_for_chunks_locked(chunk_paths)
+            .await?;
+        operation().await
     }
 
     /// Register a chunk file as a table
@@ -98,13 +119,8 @@ impl QueryEngine {
             .with_file_extension(".parquet")
             .with_collect_stat(true);
 
-        // Use S3 URL directly (DataFusion recognizes s3:// scheme)
-        // Path from metadata already has format: bucket/tenant/data/year=.../chunk.parquet
-        let url = if path.starts_with("s3://") {
-            path.to_string()
-        } else {
-            format!("s3://{}", path) // Add s3:// if not present
-        };
+        // Normalize chunk paths to the object-store URL registered in QueryEngine::new.
+        let url = Self::path_to_object_store_url(path);
 
         let table_url = ListingTableUrl::parse(&url)
             .map_err(|e| Error::Config(format!("Failed to parse table URL '{}': {}", url, e)))?;
@@ -113,7 +129,9 @@ impl QueryEngine {
             .with_listing_options(listing_options)
             .infer_schema(&self.ctx.state())
             .await
-            .map_err(|e| Error::Internal(format!("Failed to infer schema for '{}': {}", path, e)))?;
+            .map_err(|e| {
+                Error::Internal(format!("Failed to infer schema for '{}': {}", path, e))
+            })?;
 
         let table = ListingTable::try_new(config)?;
         self.ctx.register_table(&table_name, Arc::new(table))?;
@@ -123,6 +141,90 @@ impl QueryEngine {
         registered.insert(path.to_string());
 
         Ok(())
+    }
+
+    /// Register the logical `metrics` table over a set of chunk paths.
+    ///
+    /// This resolves the model mismatch between SQL queries (`FROM metrics`) and
+    /// metadata-selected chunk files by mapping the selected chunks into one table.
+    pub async fn register_metrics_table_for_chunks(&self, chunk_paths: &[String]) -> Result<()> {
+        let _guard = self.metrics_table_query_lock.lock().await;
+        self.register_metrics_table_for_chunks_locked(chunk_paths)
+            .await
+    }
+
+    async fn register_metrics_table_for_chunks_locked(&self, chunk_paths: &[String]) -> Result<()> {
+        let normalized_paths: BTreeSet<String> = chunk_paths
+            .iter()
+            .map(|p| p.trim_start_matches('/').to_string())
+            .collect();
+
+        if normalized_paths.is_empty() {
+            self.register_empty_metrics_table().await?;
+            *self.registered_metrics_paths.write() = normalized_paths;
+            return Ok(());
+        }
+
+        {
+            let registered = self.registered_metrics_paths.read();
+            if *registered == normalized_paths {
+                return Ok(());
+            }
+        }
+
+        let table_urls: Result<Vec<_>> = normalized_paths
+            .iter()
+            .map(|path| {
+                let url = Self::path_to_object_store_url(path);
+                ListingTableUrl::parse(&url).map_err(|e| {
+                    Error::Config(format!(
+                        "Failed to parse metrics table URL '{}': {}",
+                        url, e
+                    ))
+                })
+            })
+            .collect();
+        let table_urls = table_urls?;
+
+        let file_format = ParquetFormat::default().with_enable_pruning(true);
+        let listing_options = ListingOptions::new(Arc::new(file_format))
+            .with_file_extension(".parquet")
+            .with_collect_stat(true);
+
+        let config = ListingTableConfig::new_with_multi_paths(table_urls)
+            .with_listing_options(listing_options)
+            .infer_schema(&self.ctx.state())
+            .await
+            .map_err(|e| {
+                Error::Internal(format!("Failed to infer schema for metrics table: {}", e))
+            })?;
+
+        let table = ListingTable::try_new(config)?;
+
+        let _ = self.ctx.deregister_table("metrics");
+        self.ctx.register_table("metrics", Arc::new(table))?;
+
+        *self.registered_metrics_paths.write() = normalized_paths;
+
+        Ok(())
+    }
+
+    async fn register_empty_metrics_table(&self) -> Result<()> {
+        let schema = self.metrics_table_schema().await;
+        let empty_table = EmptyTable::new(schema);
+
+        let _ = self.ctx.deregister_table("metrics");
+        self.ctx
+            .register_table("metrics", Arc::new(empty_table))
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    async fn metrics_table_schema(&self) -> SchemaRef {
+        match self.ctx.table("metrics").await {
+            Ok(df) => df.schema().inner().clone(),
+            Err(_) => crate::schema::MetricSchema::default_metrics().arrow_schema(),
+        }
     }
 
     /// Execute a SQL query
@@ -263,7 +365,11 @@ impl QueryEngine {
     }
 
     /// Recursively extract time bounds from a logical plan
-    fn extract_time_bounds(plan: &LogicalPlan, min_time: &mut Option<i64>, max_time: &mut Option<i64>) {
+    fn extract_time_bounds(
+        plan: &LogicalPlan,
+        min_time: &mut Option<i64>,
+        max_time: &mut Option<i64>,
+    ) {
         match plan {
             LogicalPlan::Filter(filter) => {
                 Self::extract_time_from_expr(&filter.predicate, min_time, max_time);
@@ -355,7 +461,7 @@ impl QueryEngine {
             Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) => Some(*v * 1000),
             Expr::Literal(ScalarValue::TimestampMillisecond(Some(v), _)) => Some(*v * 1_000_000),
             Expr::Literal(ScalarValue::TimestampSecond(Some(v), _)) => Some(*v * 1_000_000_000),
-            _ => None
+            _ => None,
         }
     }
 
@@ -367,8 +473,6 @@ impl QueryEngine {
         &self,
         sql: &str,
     ) -> Result<Vec<crate::metadata::predicates::ColumnPredicate>> {
-        
-
         let df = self.ctx.sql(sql).await?;
         let plan = df.logical_plan();
 
@@ -383,8 +487,6 @@ impl QueryEngine {
         plan: &LogicalPlan,
         predicates: &mut Vec<crate::metadata::predicates::ColumnPredicate>,
     ) {
-        
-
         match plan {
             LogicalPlan::Filter(filter) => {
                 if let Some(pred) = Self::convert_expr_to_predicate(&filter.predicate) {
@@ -504,7 +606,9 @@ impl QueryEngine {
     }
 
     /// Convert a DataFusion scalar expression to a PredicateValue
-    fn convert_scalar_to_predicate_value(expr: &Expr) -> Option<crate::metadata::predicates::PredicateValue> {
+    fn convert_scalar_to_predicate_value(
+        expr: &Expr,
+    ) -> Option<crate::metadata::predicates::PredicateValue> {
         use crate::metadata::predicates::PredicateValue;
 
         match expr {
@@ -552,6 +656,15 @@ impl QueryEngine {
         path.replace(['/', '.', '-'], "_")
             .trim_start_matches('_')
             .to_string()
+    }
+
+    /// Convert metadata/object-store path to the canonical URL registered in the runtime.
+    fn path_to_object_store_url(path: &str) -> String {
+        if path.starts_with("s3://") {
+            path.to_string()
+        } else {
+            format!("s3://bucket/{}", path.trim_start_matches('/'))
+        }
     }
 }
 
