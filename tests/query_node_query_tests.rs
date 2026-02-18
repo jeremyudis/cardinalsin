@@ -117,3 +117,53 @@ async fn test_query_node_query_over_flushed_chunks_filesystem_store() {
     let total_rows: usize = total.iter().map(|batch| batch.num_rows()).sum();
     assert_eq!(total_rows, 8);
 }
+
+#[tokio::test]
+async fn test_query_node_query_no_matching_chunks_returns_empty_results() {
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let query_node = ingest_and_create_query_node(object_store).await;
+
+    let no_match = query_node
+        .query("SELECT metric_name FROM metrics WHERE metric_name = 'does-not-exist'")
+        .await
+        .expect("no-match query should still be valid");
+
+    let rows: usize = no_match.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(rows, 0);
+}
+
+#[tokio::test]
+async fn test_query_node_query_concurrent_metrics_registration_is_isolated() {
+    let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let query_node = Arc::new(ingest_and_create_query_node(object_store).await);
+
+    for _ in 0..25 {
+        let cpu_node = query_node.clone();
+        let mem_node = query_node.clone();
+
+        let cpu_task = tokio::spawn(async move {
+            cpu_node
+                .query("SELECT metric_name FROM metrics WHERE metric_name = 'cpu'")
+                .await
+        });
+        let mem_task = tokio::spawn(async move {
+            mem_node
+                .query("SELECT metric_name FROM metrics WHERE metric_name = 'mem'")
+                .await
+        });
+
+        let cpu = cpu_task
+            .await
+            .expect("cpu query task should complete")
+            .expect("cpu query should succeed");
+        let mem = mem_task
+            .await
+            .expect("mem query task should complete")
+            .expect("mem query should succeed");
+
+        let cpu_rows: usize = cpu.iter().map(|batch| batch.num_rows()).sum();
+        let mem_rows: usize = mem.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(cpu_rows, 4);
+        assert_eq!(mem_rows, 4);
+    }
+}

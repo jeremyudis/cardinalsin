@@ -6,6 +6,8 @@ use crate::metadata::TimeRange;
 use crate::{Error, Result};
 
 use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
+use datafusion::datasource::empty::EmptyTable;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
@@ -18,7 +20,9 @@ use datafusion::scalar::ScalarValue;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
 use std::collections::{BTreeSet, HashSet};
+use std::future::Future;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Query engine powered by DataFusion
 #[derive(Clone)]
@@ -29,6 +33,8 @@ pub struct QueryEngine {
     registered_paths: Arc<RwLock<HashSet<String>>>,
     /// Paths currently backing the logical "metrics" table
     registered_metrics_paths: Arc<RwLock<BTreeSet<String>>>,
+    /// Serialize operations that mutate and query the logical `metrics` table.
+    metrics_table_query_lock: Arc<Mutex<()>>,
 }
 
 impl QueryEngine {
@@ -70,7 +76,27 @@ impl QueryEngine {
             ctx,
             registered_paths: Arc::new(RwLock::new(HashSet::new())),
             registered_metrics_paths: Arc::new(RwLock::new(BTreeSet::new())),
+            metrics_table_query_lock: Arc::new(Mutex::new(())),
         })
+    }
+
+    /// Execute an operation while `metrics` is bound to the provided chunk paths.
+    ///
+    /// This prevents concurrent requests from racing on the shared SessionContext
+    /// table mapping.
+    pub async fn with_metrics_table<F, Fut, T>(
+        &self,
+        chunk_paths: &[String],
+        operation: F,
+    ) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let _guard = self.metrics_table_query_lock.lock().await;
+        self.register_metrics_table_for_chunks_locked(chunk_paths)
+            .await?;
+        operation().await
     }
 
     /// Register a chunk file as a table
@@ -122,14 +148,20 @@ impl QueryEngine {
     /// This resolves the model mismatch between SQL queries (`FROM metrics`) and
     /// metadata-selected chunk files by mapping the selected chunks into one table.
     pub async fn register_metrics_table_for_chunks(&self, chunk_paths: &[String]) -> Result<()> {
+        let _guard = self.metrics_table_query_lock.lock().await;
+        self.register_metrics_table_for_chunks_locked(chunk_paths)
+            .await
+    }
+
+    async fn register_metrics_table_for_chunks_locked(&self, chunk_paths: &[String]) -> Result<()> {
         let normalized_paths: BTreeSet<String> = chunk_paths
             .iter()
             .map(|p| p.trim_start_matches('/').to_string())
             .collect();
 
         if normalized_paths.is_empty() {
-            let _ = self.ctx.deregister_table("metrics");
-            self.registered_metrics_paths.write().clear();
+            self.register_empty_metrics_table().await?;
+            *self.registered_metrics_paths.write() = normalized_paths;
             return Ok(());
         }
 
@@ -175,6 +207,24 @@ impl QueryEngine {
         *self.registered_metrics_paths.write() = normalized_paths;
 
         Ok(())
+    }
+
+    async fn register_empty_metrics_table(&self) -> Result<()> {
+        let schema = self.metrics_table_schema().await;
+        let empty_table = EmptyTable::new(schema);
+
+        let _ = self.ctx.deregister_table("metrics");
+        self.ctx
+            .register_table("metrics", Arc::new(empty_table))
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    async fn metrics_table_schema(&self) -> SchemaRef {
+        match self.ctx.table("metrics").await {
+            Ok(df) => df.schema().inner().clone(),
+            Err(_) => crate::schema::MetricSchema::default_metrics().arrow_schema(),
+        }
     }
 
     /// Execute a SQL query

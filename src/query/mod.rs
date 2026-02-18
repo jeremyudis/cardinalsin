@@ -178,18 +178,20 @@ impl QueryNode {
             .iter()
             .map(|chunk| chunk.chunk_path.clone())
             .collect();
-        self.engine
-            .register_metrics_table_for_chunks(&chunk_paths)
+        // Execute query with or without adaptive indexing while holding a stable
+        // `metrics` table binding for this request.
+        let results = self
+            .engine
+            .with_metrics_table(&chunk_paths, || async {
+                if let Some(ref controller) = self.adaptive_index_controller {
+                    self.engine
+                        .execute_with_indexes(sql, tenant_id, controller.clone())
+                        .await
+                } else {
+                    self.engine.execute(sql).await
+                }
+            })
             .await?;
-
-        // Execute query with or without adaptive indexing
-        let results = if let Some(ref controller) = self.adaptive_index_controller {
-            self.engine
-                .execute_with_indexes(sql, tenant_id, controller.clone())
-                .await?
-        } else {
-            self.engine.execute(sql).await?
-        };
 
         Ok(results)
     }

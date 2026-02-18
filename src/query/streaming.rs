@@ -112,28 +112,19 @@ impl StreamingQueryExecutor {
             .iter()
             .map(|chunk| chunk.chunk_path.clone())
             .collect();
-        self.engine
-            .register_metrics_table_for_chunks(&chunk_paths)
+        let historical_batches = self
+            .engine
+            .with_metrics_table(&chunk_paths, || async { self.engine.execute(sql).await })
             .await?;
 
-        let sql_owned = sql.to_string();
-        let engine = self.engine.clone();
         let receiver = self.receiver;
 
         // Spawn task to stream results
         tokio::spawn(async move {
             // First, stream historical data
-            match engine.execute(&sql_owned).await {
-                Ok(batches) => {
-                    for batch in batches {
-                        if tx.send(Ok(batch)).await.is_err() {
-                            return; // Receiver dropped
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                    return;
+            for batch in historical_batches {
+                if tx.send(Ok(batch)).await.is_err() {
+                    return; // Receiver dropped
                 }
             }
 
