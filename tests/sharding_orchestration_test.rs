@@ -2,7 +2,9 @@
 
 use cardinalsin::compactor::{Compactor, CompactorConfig};
 use cardinalsin::metadata::{LocalMetadataClient, MetadataClient};
-use cardinalsin::sharding::{HotShardConfig, ReplicaInfo, ShardMetadata, ShardMonitor, ShardState};
+use cardinalsin::sharding::{
+    HotShardConfig, ReplicaInfo, ShardMetadata, ShardMonitor, ShardState, SplitPhase,
+};
 use cardinalsin::StorageConfig;
 use object_store::memory::InMemory;
 use object_store::ObjectStore;
@@ -66,53 +68,66 @@ async fn setup_test_env() -> (Arc<Compactor>, Arc<dyn MetadataClient>, Arc<Shard
 async fn test_compactor_triggers_shard_split() {
     let (compactor, metadata, shard_monitor, hot_shard_id) = setup_test_env().await;
 
-    // Simulate high write traffic to the hot shard to trigger the monitor
+    // Simulate high write traffic to the hot shard.
     for _ in 0..20 {
         shard_monitor.record_write(&hot_shard_id, 500, Duration::from_millis(10));
     }
 
-    // Wait a moment for the rolling averages in the monitor to update
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Run the compactor's main service cycle, which includes the sharding cycle
+    // First cycle marks the shard as hot.
     compactor.run_cycle().await.unwrap();
 
-    // Give the spawned split task time to execute
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for the hotness detection window, then provide fresh writes and evaluate again.
+    // The second cycle is what actually emits Split(...) for sustained hotness.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    for _ in 0..20 {
+        shard_monitor.record_write(&hot_shard_id, 500, Duration::from_millis(10));
+    }
+    compactor.run_cycle().await.unwrap();
+
+    // Give the spawned split task time to start executing and persist split state.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
     // --- Assertions ---
 
-    // 1. Check that the old shard is no longer active
+    // 1. Check that the old shard still exists and is active while split orchestration runs.
+    // The background split flow includes a 10s dual-write wait, so cutover does not complete
+    // within this short test window.
     let old_shard_meta = metadata
         .get_shard_metadata(&hot_shard_id)
         .await
         .unwrap()
         .unwrap();
     assert!(
-        matches!(old_shard_meta.state, ShardState::PendingDeletion { .. }),
-        "Old shard should be marked for deletion"
+        matches!(old_shard_meta.state, ShardState::Active),
+        "Old shard should remain active while split is in progress"
     );
     assert_eq!(
-        old_shard_meta.generation, 2,
-        "Old shard generation should be incremented on state change"
+        old_shard_meta.generation, 1,
+        "Old shard generation should remain unchanged before cutover"
     );
 
-    // 2. Check that a split state was created and then removed
+    // 2. Check that split orchestration was initiated and persisted.
     let split_state = metadata.get_split_state(&hot_shard_id).await.unwrap();
     assert!(
-        split_state.is_none(),
-        "Split state should be cleaned up after completion"
+        split_state.is_some(),
+        "Split state should exist once orchestration has been triggered"
+    );
+    let split_state = split_state.unwrap();
+    assert_eq!(
+        split_state.phase,
+        SplitPhase::DualWrite,
+        "Split should be in dual-write phase shortly after orchestration starts"
+    );
+    assert_eq!(
+        split_state.new_shards.len(),
+        2,
+        "Split orchestration should allocate two new shards"
     );
 
-    // 3. Find the new shards
-    // A real implementation would have a way to list shards, but for this test,
-    // we can infer the new shards by finding active shards that are not the original.
-    // Since the LocalMetadataClient doesn't have a list_shards method, we'll have to
-    // assume the split was successful if the old shard is marked for deletion.
-    // In a real scenario, we would list all shards and find the two new active ones.
-    // This assertion confirms the most critical part: the state of the original shard changed as expected.
+    // 3. We do not wait for full completion here because the split flow includes deliberate
+    // phase delays and cleanup grace periods.
     println!(
-        "Successfully verified that shard '{}' was split and is now in state: {:?}",
-        hot_shard_id, old_shard_meta.state
+        "Successfully verified that shard '{}' split orchestration started (phase: {:?})",
+        hot_shard_id, split_state.phase
     );
 }
