@@ -229,12 +229,6 @@ async fn test_phase4_cutover() {
 
     store_shard_metadata(&metadata, &shard).await;
 
-    // Cutover performs CAS updates against existing shard metadata.
-    metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
-        .await
-        .unwrap();
-
     // Set up split state with 100% backfill
     metadata
         .start_split(
@@ -317,7 +311,7 @@ async fn test_phase4_cutover_requires_old_shard_metadata() {
         .await
         .expect_err("Cutover should fail when old shard metadata is missing");
     assert!(
-        matches!(err, cardinalsin::Error::ShardNotFound(id) if id == shard.shard_id),
+        matches!(err, cardinalsin::Error::ShardNotFound(ref id) if id == &shard.shard_id),
         "Expected ShardNotFound, got: {}",
         err
     );
@@ -356,7 +350,7 @@ async fn test_phase4_cutover_requires_two_new_shards() {
         .await
         .expect_err("Cutover should reject invalid split topology");
     assert!(
-        matches!(err, cardinalsin::Error::Internal(message) if message.contains("exactly 2 new shards")),
+        matches!(err, cardinalsin::Error::Internal(ref message) if message.contains("exactly 2 new shards")),
         "Expected invariant error for invalid split topology, got: {}",
         err
     );
