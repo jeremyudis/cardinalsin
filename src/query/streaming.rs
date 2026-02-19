@@ -2,12 +2,13 @@
 
 use super::QueryEngine;
 use crate::ingester::FilteredReceiver;
+use crate::metadata::predicates::{ColumnPredicate, PredicateValue};
 use crate::metadata::MetadataClient;
 use crate::Result;
 
 use arrow::compute::filter_record_batch;
 use arrow_array::cast::AsArray;
-use arrow_array::{BooleanArray, RecordBatch};
+use arrow_array::{Array, BooleanArray, RecordBatch};
 use sqlparser::ast::{BinaryOperator, Expr, SetExpr, Statement, Value};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -187,40 +188,19 @@ impl StreamingQueryExecutor {
     }
 }
 
-/// Filter for live data based on query predicates
+/// Filter for live data based on query predicates.
+///
+/// Uses `ColumnPredicate` from the metadata predicates module (unified type system).
 #[derive(Clone, Debug)]
 pub struct QueryFilter {
     /// Parsed predicates from SQL
-    pub predicates: Vec<Predicate>,
-}
-
-/// A single predicate condition
-#[derive(Clone, Debug)]
-pub struct Predicate {
-    pub column: String,
-    pub op: PredicateOp,
-    pub value: PredicateValue,
-}
-
-#[derive(Clone, Debug)]
-pub enum PredicateOp {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-#[derive(Clone, Debug)]
-pub enum PredicateValue {
-    String(String),
-    Int(i64),
-    Float(f64),
+    pub predicates: Vec<ColumnPredicate>,
 }
 
 impl QueryFilter {
-    /// Parse SQL to extract predicates using proper AST parsing
+    /// Parse SQL to extract predicates using proper AST parsing.
+    ///
+    /// Produces `ColumnPredicate` values from the unified predicate type system.
     pub fn from_sql(sql: &str) -> Self {
         let mut predicates = Vec::new();
 
@@ -228,7 +208,6 @@ impl QueryFilter {
         let ast = match Parser::parse_sql(&dialect, sql) {
             Ok(stmts) => stmts,
             Err(_) => {
-                // Fall back to empty filter on parse failure
                 return Self { predicates: vec![] };
             }
         };
@@ -243,7 +222,7 @@ impl QueryFilter {
     }
 
     /// Extract predicates from a SetExpr (SELECT body)
-    fn extract_predicates_from_set_expr(body: &SetExpr, predicates: &mut Vec<Predicate>) {
+    fn extract_predicates_from_set_expr(body: &SetExpr, predicates: &mut Vec<ColumnPredicate>) {
         if let SetExpr::Select(select) = body {
             if let Some(selection) = &select.selection {
                 Self::extract_predicates_from_expr(selection, predicates);
@@ -252,15 +231,12 @@ impl QueryFilter {
     }
 
     /// Extract predicates from an expression recursively
-    fn extract_predicates_from_expr(expr: &Expr, predicates: &mut Vec<Predicate>) {
+    fn extract_predicates_from_expr(expr: &Expr, predicates: &mut Vec<ColumnPredicate>) {
         match expr {
             Expr::BinaryOp { left, op, right } => {
-                // Handle comparison operators
                 if let Some(pred) = Self::try_extract_comparison(left, op, right) {
                     predicates.push(pred);
                 }
-
-                // Recurse into AND/OR expressions
                 if matches!(op, BinaryOperator::And | BinaryOperator::Or) {
                     Self::extract_predicates_from_expr(left, predicates);
                     Self::extract_predicates_from_expr(right, predicates);
@@ -273,77 +249,80 @@ impl QueryFilter {
         }
     }
 
-    /// Try to extract a predicate from a binary comparison
-    fn try_extract_comparison(left: &Expr, op: &BinaryOperator, right: &Expr) -> Option<Predicate> {
-        let pred_op = match op {
-            BinaryOperator::Eq => PredicateOp::Eq,
-            BinaryOperator::NotEq => PredicateOp::Ne,
-            BinaryOperator::Lt => PredicateOp::Lt,
-            BinaryOperator::LtEq => PredicateOp::Le,
-            BinaryOperator::Gt => PredicateOp::Gt,
-            BinaryOperator::GtEq => PredicateOp::Ge,
-            _ => return None,
+    /// Try to extract a ColumnPredicate from a binary comparison
+    fn try_extract_comparison(left: &Expr, op: &BinaryOperator, right: &Expr) -> Option<ColumnPredicate> {
+        // Try column op value
+        if let Some(pred) = Self::try_column_op_value(left, op, right) {
+            return Some(pred);
+        }
+        // Try value op column (reversed)
+        let reversed_op = match op {
+            BinaryOperator::Lt => Some(BinaryOperator::Gt),
+            BinaryOperator::LtEq => Some(BinaryOperator::GtEq),
+            BinaryOperator::Gt => Some(BinaryOperator::Lt),
+            BinaryOperator::GtEq => Some(BinaryOperator::LtEq),
+            other => Some(other.clone()),
         };
-
-        // Try column = value pattern
-        if let Some(pred) = Self::try_column_value(left, &pred_op, right) {
-            return Some(pred);
+        if let Some(rev) = reversed_op {
+            if let Some(pred) = Self::try_column_op_value(right, &rev, left) {
+                return Some(pred);
+            }
         }
-
-        // Try value = column pattern (reversed)
-        if let Some(pred) = Self::try_column_value(right, &pred_op, left) {
-            return Some(pred);
-        }
-
         None
     }
 
-    /// Try to extract column name and value from a comparison
-    fn try_column_value(col_expr: &Expr, op: &PredicateOp, val_expr: &Expr) -> Option<Predicate> {
+    /// Try to extract column name and value, producing a ColumnPredicate
+    fn try_column_op_value(col_expr: &Expr, op: &BinaryOperator, val_expr: &Expr) -> Option<ColumnPredicate> {
         let column = match col_expr {
             Expr::Identifier(ident) => ident.value.to_lowercase(),
-            Expr::CompoundIdentifier(idents) => {
-                // Handle table.column patterns - use the last identifier
-                idents.last()?.value.to_lowercase()
-            }
+            Expr::CompoundIdentifier(idents) => idents.last()?.value.to_lowercase(),
             _ => return None,
         };
 
-        let value = match val_expr {
-            Expr::Value(v) => match v {
-                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                    PredicateValue::String(s.to_string())
-                }
-                Value::Number(n, _) => {
-                    // Try to parse as integer first, then float
-                    if let Ok(i) = n.parse::<i64>() {
-                        PredicateValue::Int(i)
-                    } else if let Ok(f) = n.parse::<f64>() {
-                        PredicateValue::Float(f)
-                    } else {
-                        return None;
-                    }
-                }
-                _ => return None,
-            },
-            _ => return None,
-        };
+        let value = Self::parse_sql_value(val_expr)?;
 
-        Some(Predicate {
-            column,
-            op: op.clone(),
-            value,
-        })
+        match op {
+            BinaryOperator::Eq => Some(ColumnPredicate::Eq(column, value)),
+            BinaryOperator::NotEq => Some(ColumnPredicate::NotEq(column, value)),
+            BinaryOperator::Lt => Some(ColumnPredicate::Lt(column, value)),
+            BinaryOperator::LtEq => Some(ColumnPredicate::LtEq(column, value)),
+            BinaryOperator::Gt => Some(ColumnPredicate::Gt(column, value)),
+            BinaryOperator::GtEq => Some(ColumnPredicate::GtEq(column, value)),
+            _ => None,
+        }
     }
 
-    /// Apply filter to batch, returning only matching rows
-    /// Returns None if no rows match
+    /// Parse a SQL AST value expression into a PredicateValue
+    fn parse_sql_value(val_expr: &Expr) -> Option<PredicateValue> {
+        match val_expr {
+            Expr::Value(v) => match v {
+                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
+                    Some(PredicateValue::String(s.to_string()))
+                }
+                Value::Number(n, _) => {
+                    if let Ok(i) = n.parse::<i64>() {
+                        Some(PredicateValue::Int64(i))
+                    } else if let Ok(f) = n.parse::<f64>() {
+                        Some(PredicateValue::Float64(f))
+                    } else {
+                        None
+                    }
+                }
+                Value::Boolean(b) => Some(PredicateValue::Boolean(*b)),
+                Value::Null => Some(PredicateValue::Null),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Apply filter to batch, returning only matching rows.
+    /// Returns None if no rows match.
     pub fn apply(&self, batch: &RecordBatch, merge_timestamp: i64) -> Result<Option<RecordBatch>> {
         if batch.num_rows() == 0 {
             return Ok(None);
         }
 
-        // Start with all rows selected
         let mut mask = vec![true; batch.num_rows()];
 
         // Apply timestamp filter - only include rows after merge point
@@ -371,75 +350,15 @@ impl QueryFilter {
             }
         }
 
-        // Apply predicate filters
+        // Apply predicate filters using the unified ColumnPredicate type
         for pred in &self.predicates {
-            if let Some(col) = batch.column_by_name(&pred.column) {
-                match &pred.value {
-                    PredicateValue::String(expected) => {
-                        if let Some(string_array) = col.as_string_opt::<i32>() {
-                            for (i, val) in string_array.iter().enumerate() {
-                                if mask[i] {
-                                    match (&pred.op, val) {
-                                        (PredicateOp::Eq, Some(v)) => mask[i] = v == expected,
-                                        (PredicateOp::Ne, Some(v)) => mask[i] = v != expected,
-                                        _ => mask[i] = false,
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    PredicateValue::Int(expected) => {
-                        if let Some(int_array) =
-                            col.as_primitive_opt::<arrow_array::types::Int64Type>()
-                        {
-                            for (i, val) in int_array.iter().enumerate() {
-                                if mask[i] {
-                                    match (&pred.op, val) {
-                                        (PredicateOp::Eq, Some(v)) => mask[i] = v == *expected,
-                                        (PredicateOp::Ne, Some(v)) => mask[i] = v != *expected,
-                                        (PredicateOp::Lt, Some(v)) => mask[i] = v < *expected,
-                                        (PredicateOp::Le, Some(v)) => mask[i] = v <= *expected,
-                                        (PredicateOp::Gt, Some(v)) => mask[i] = v > *expected,
-                                        (PredicateOp::Ge, Some(v)) => mask[i] = v >= *expected,
-                                        _ => mask[i] = false,
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    PredicateValue::Float(expected) => {
-                        if let Some(float_array) =
-                            col.as_primitive_opt::<arrow_array::types::Float64Type>()
-                        {
-                            for (i, val) in float_array.iter().enumerate() {
-                                if mask[i] {
-                                    match (&pred.op, val) {
-                                        (PredicateOp::Eq, Some(v)) => {
-                                            mask[i] = (v - expected).abs() < f64::EPSILON
-                                        }
-                                        (PredicateOp::Ne, Some(v)) => {
-                                            mask[i] = (v - expected).abs() >= f64::EPSILON
-                                        }
-                                        (PredicateOp::Lt, Some(v)) => mask[i] = v < *expected,
-                                        (PredicateOp::Le, Some(v)) => mask[i] = v <= *expected,
-                                        (PredicateOp::Gt, Some(v)) => mask[i] = v > *expected,
-                                        (PredicateOp::Ge, Some(v)) => mask[i] = v >= *expected,
-                                        _ => mask[i] = false,
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            Self::apply_predicate_to_mask(pred, batch, &mut mask);
         }
 
-        // Check if any rows match
         if !mask.iter().any(|&m| m) {
             return Ok(None);
         }
 
-        // Apply the filter mask to the batch
         let bool_array = BooleanArray::from(mask);
         let filtered = filter_record_batch(batch, &bool_array)?;
 
@@ -447,6 +366,199 @@ impl QueryFilter {
             Ok(None)
         } else {
             Ok(Some(filtered))
+        }
+    }
+
+    /// Apply a single ColumnPredicate to a row mask
+    fn apply_predicate_to_mask(pred: &ColumnPredicate, batch: &RecordBatch, mask: &mut [bool]) {
+        match pred {
+            ColumnPredicate::Eq(col, val) | ColumnPredicate::NotEq(col, val)
+            | ColumnPredicate::Lt(col, val) | ColumnPredicate::LtEq(col, val)
+            | ColumnPredicate::Gt(col, val) | ColumnPredicate::GtEq(col, val) => {
+                if let Some(column) = batch.column_by_name(col) {
+                    Self::apply_comparison(pred, column, val, mask);
+                }
+            }
+            ColumnPredicate::And(left, right) => {
+                Self::apply_predicate_to_mask(left, batch, mask);
+                Self::apply_predicate_to_mask(right, batch, mask);
+            }
+            ColumnPredicate::Or(left, right) => {
+                let mut left_mask = mask.to_vec();
+                let mut right_mask = mask.to_vec();
+                Self::apply_predicate_to_mask(left, batch, &mut left_mask);
+                Self::apply_predicate_to_mask(right, batch, &mut right_mask);
+                for i in 0..mask.len() {
+                    mask[i] = left_mask[i] || right_mask[i];
+                }
+            }
+            ColumnPredicate::Not(inner) => {
+                let mut inner_mask = vec![true; mask.len()];
+                Self::apply_predicate_to_mask(inner, batch, &mut inner_mask);
+                for i in 0..mask.len() {
+                    if mask[i] {
+                        mask[i] = !inner_mask[i];
+                    }
+                }
+            }
+            ColumnPredicate::In(col, values) => {
+                if let Some(column) = batch.column_by_name(col) {
+                    for i in 0..mask.len() {
+                        if mask[i] {
+                            mask[i] = values.iter().any(|v| Self::row_matches_value(column, i, v));
+                        }
+                    }
+                }
+            }
+            ColumnPredicate::NotIn(col, values) => {
+                if let Some(column) = batch.column_by_name(col) {
+                    for i in 0..mask.len() {
+                        if mask[i] {
+                            mask[i] = !values.iter().any(|v| Self::row_matches_value(column, i, v));
+                        }
+                    }
+                }
+            }
+            ColumnPredicate::Between(col, low, high) => {
+                if let Some(column) = batch.column_by_name(col) {
+                    for i in 0..mask.len() {
+                        if mask[i] {
+                            mask[i] = Self::row_gte_value(column, i, low)
+                                && Self::row_lte_value(column, i, high);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Apply a comparison predicate to a column
+    fn apply_comparison(
+        pred: &ColumnPredicate,
+        column: &dyn arrow_array::Array,
+        val: &PredicateValue,
+        mask: &mut [bool],
+    ) {
+        match val {
+            PredicateValue::String(expected) => {
+                if let Some(arr) = column.as_string_opt::<i32>() {
+                    for i in 0..mask.len() {
+                        if mask[i] {
+                            mask[i] = match (pred, arr.is_null(i)) {
+                                (_, true) => false,
+                                (ColumnPredicate::Eq(..), _) => arr.value(i) == expected.as_str(),
+                                (ColumnPredicate::NotEq(..), _) => arr.value(i) != expected.as_str(),
+                                (ColumnPredicate::Lt(..), _) => arr.value(i) < expected.as_str(),
+                                (ColumnPredicate::LtEq(..), _) => arr.value(i) <= expected.as_str(),
+                                (ColumnPredicate::Gt(..), _) => arr.value(i) > expected.as_str(),
+                                (ColumnPredicate::GtEq(..), _) => arr.value(i) >= expected.as_str(),
+                                _ => false,
+                            };
+                        }
+                    }
+                }
+            }
+            PredicateValue::Int64(expected) => {
+                if let Some(arr) = column.as_primitive_opt::<arrow_array::types::Int64Type>() {
+                    for (i, val_opt) in arr.iter().enumerate() {
+                        if mask[i] {
+                            mask[i] = match (pred, val_opt) {
+                                (ColumnPredicate::Eq(..), Some(v)) => v == *expected,
+                                (ColumnPredicate::NotEq(..), Some(v)) => v != *expected,
+                                (ColumnPredicate::Lt(..), Some(v)) => v < *expected,
+                                (ColumnPredicate::LtEq(..), Some(v)) => v <= *expected,
+                                (ColumnPredicate::Gt(..), Some(v)) => v > *expected,
+                                (ColumnPredicate::GtEq(..), Some(v)) => v >= *expected,
+                                _ => false,
+                            };
+                        }
+                    }
+                }
+            }
+            PredicateValue::Float64(expected) => {
+                if let Some(arr) = column.as_primitive_opt::<arrow_array::types::Float64Type>() {
+                    for (i, val_opt) in arr.iter().enumerate() {
+                        if mask[i] {
+                            mask[i] = match (pred, val_opt) {
+                                (ColumnPredicate::Eq(..), Some(v)) => (v - expected).abs() < f64::EPSILON,
+                                (ColumnPredicate::NotEq(..), Some(v)) => (v - expected).abs() >= f64::EPSILON,
+                                (ColumnPredicate::Lt(..), Some(v)) => v < *expected,
+                                (ColumnPredicate::LtEq(..), Some(v)) => v <= *expected,
+                                (ColumnPredicate::Gt(..), Some(v)) => v > *expected,
+                                (ColumnPredicate::GtEq(..), Some(v)) => v >= *expected,
+                                _ => false,
+                            };
+                        }
+                    }
+                }
+            }
+            _ => {} // Boolean/Null: no-op for streaming filters
+        }
+    }
+
+    /// Check if a row's value matches a PredicateValue (for IN/NOT IN)
+    fn row_matches_value(column: &dyn arrow_array::Array, row: usize, val: &PredicateValue) -> bool {
+        match val {
+            PredicateValue::String(expected) => {
+                column.as_string_opt::<i32>()
+                    .map(|arr| !arr.is_null(row) && arr.value(row) == expected.as_str())
+                    .unwrap_or(false)
+            }
+            PredicateValue::Int64(expected) => {
+                column.as_primitive_opt::<arrow_array::types::Int64Type>()
+                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v == *expected).unwrap_or(false))
+                    .unwrap_or(false)
+            }
+            PredicateValue::Float64(expected) => {
+                column.as_primitive_opt::<arrow_array::types::Float64Type>()
+                    .map(|arr| arr.iter().nth(row).flatten().map(|v| (v - expected).abs() < f64::EPSILON).unwrap_or(false))
+                    .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if row value >= predicate value (for BETWEEN)
+    fn row_gte_value(column: &dyn arrow_array::Array, row: usize, val: &PredicateValue) -> bool {
+        match val {
+            PredicateValue::Int64(expected) => {
+                column.as_primitive_opt::<arrow_array::types::Int64Type>()
+                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v >= *expected).unwrap_or(false))
+                    .unwrap_or(false)
+            }
+            PredicateValue::Float64(expected) => {
+                column.as_primitive_opt::<arrow_array::types::Float64Type>()
+                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v >= *expected).unwrap_or(false))
+                    .unwrap_or(false)
+            }
+            PredicateValue::String(expected) => {
+                column.as_string_opt::<i32>()
+                    .map(|arr| !arr.is_null(row) && arr.value(row) >= expected.as_str())
+                    .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if row value <= predicate value (for BETWEEN)
+    fn row_lte_value(column: &dyn arrow_array::Array, row: usize, val: &PredicateValue) -> bool {
+        match val {
+            PredicateValue::Int64(expected) => {
+                column.as_primitive_opt::<arrow_array::types::Int64Type>()
+                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v <= *expected).unwrap_or(false))
+                    .unwrap_or(false)
+            }
+            PredicateValue::Float64(expected) => {
+                column.as_primitive_opt::<arrow_array::types::Float64Type>()
+                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v <= *expected).unwrap_or(false))
+                    .unwrap_or(false)
+            }
+            PredicateValue::String(expected) => {
+                column.as_string_opt::<i32>()
+                    .map(|arr| !arr.is_null(row) && arr.value(row) <= expected.as_str())
+                    .unwrap_or(false)
+            }
+            _ => false,
         }
     }
 }
@@ -459,7 +571,13 @@ mod tests {
     fn test_query_filter_parsing() {
         let filter = QueryFilter::from_sql("SELECT * FROM metrics WHERE service = 'api'");
         assert!(!filter.predicates.is_empty());
-        assert_eq!(filter.predicates[0].column, "service");
+        match &filter.predicates[0] {
+            ColumnPredicate::Eq(col, PredicateValue::String(val)) => {
+                assert_eq!(col, "service");
+                assert_eq!(val, "api");
+            }
+            other => panic!("Expected Eq predicate, got {:?}", other),
+        }
     }
 
     #[test]

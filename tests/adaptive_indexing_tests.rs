@@ -25,6 +25,7 @@ async fn test_extract_filter_columns_simple() {
 #[tokio::test]
 async fn test_query_filter_parsing() {
     use cardinalsin::query::QueryFilter;
+    use cardinalsin::metadata::predicates::{ColumnPredicate, PredicateValue};
 
     // Test simple equality with string
     let filter = QueryFilter::from_sql("SELECT * FROM metrics WHERE service = 'api'");
@@ -32,7 +33,13 @@ async fn test_query_filter_parsing() {
         !filter.predicates.is_empty(),
         "Should parse string equality"
     );
-    assert_eq!(filter.predicates[0].column, "service");
+    match &filter.predicates[0] {
+        ColumnPredicate::Eq(col, PredicateValue::String(val)) => {
+            assert_eq!(col, "service");
+            assert_eq!(val, "api");
+        }
+        other => panic!("Expected Eq(service, String(api)), got {:?}", other),
+    }
 
     // Test numeric equality
     let filter2 = QueryFilter::from_sql("SELECT * FROM metrics WHERE status_code = 200");
@@ -40,7 +47,12 @@ async fn test_query_filter_parsing() {
         !filter2.predicates.is_empty(),
         "Should parse numeric equality"
     );
-    assert_eq!(filter2.predicates[0].column, "status_code");
+    match &filter2.predicates[0] {
+        ColumnPredicate::Eq(col, PredicateValue::Int64(200)) => {
+            assert_eq!(col, "status_code");
+        }
+        other => panic!("Expected Eq(status_code, Int64(200)), got {:?}", other),
+    }
 
     // Test compound WHERE clause with AND
     let filter3 = QueryFilter::from_sql(
