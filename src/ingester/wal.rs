@@ -477,6 +477,9 @@ mod tests {
             .await
             .unwrap();
         wal.append(&batch).await.unwrap();
+        wal.file.flush().await.unwrap();
+        wal.file.sync_all().await.unwrap();
+        drop(wal);
 
         let segment = list_segments(dir.path()).unwrap().pop().unwrap();
         let mut file = StdFile::open(segment.path).unwrap();
