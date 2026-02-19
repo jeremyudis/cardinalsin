@@ -520,7 +520,11 @@ mod tests {
     async fn test_corruption_detection() {
         let dir = TempDir::new().unwrap();
         let batch = make_batch();
-        let mut wal = WriteAheadLog::open(make_config(&dir, 1024 * 1024))
+        let mut config = make_config(&dir, 1024 * 1024);
+        // Ensure the appended entry is visible to a second file handle before
+        // we intentionally corrupt payload bytes.
+        config.sync_mode = WalSyncMode::EveryWrite;
+        let mut wal = WriteAheadLog::open(config)
             .await
             .unwrap();
         wal.append(&batch).await.unwrap();
