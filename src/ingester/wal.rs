@@ -536,6 +536,9 @@ mod tests {
             .await
             .unwrap();
         wal.append(&batch).await.unwrap();
+        wal.file.flush().await.unwrap();
+        wal.file.sync_all().await.unwrap();
+        drop(wal);
 
         let segment = list_segments(dir.path()).unwrap().pop().unwrap();
         let mut file = StdFile::options()
@@ -549,10 +552,14 @@ mod tests {
         file.seek(SeekFrom::Start(HEADER_LEN as u64)).unwrap();
         byte[0] ^= 0xFF;
         file.write_all(&byte).unwrap();
+        file.sync_all().unwrap();
 
         // After crash-tolerant recovery, a corrupt trailing entry is discarded
         // (logged as warning) and entries before it are returned.
         // Since there's only one entry and it's corrupt, we get an empty vec.
+        let wal = WriteAheadLog::open(make_config(&dir, 1024 * 1024))
+            .await
+            .unwrap();
         let entries = wal.read_entries().unwrap();
         assert!(
             entries.is_empty(),
