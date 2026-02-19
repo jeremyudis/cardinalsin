@@ -81,14 +81,23 @@ fn benchmark_cache_hit(c: &mut Criterion) {
     });
 
     group.bench_function("l1_hit", |b| {
-        b.to_async(&rt).iter(|| async {
-            let result = cache.get_or_fetch("test_key", || async {
-                panic!("Should not fetch - cache should be populated");
-            }).await.unwrap();
+        b.iter(|| {
+            let result = rt.block_on(async {
+                cache
+                    .get_or_fetch("test_key", || async {
+                        panic!("Should not fetch - cache should be populated");
+                    })
+                    .await
+                    .unwrap()
+            });
             black_box(result);
         });
     });
 
+    // Shutdown L2 background workers before dropping the runtime.
+    rt.block_on(async {
+        cache.clear().await;
+    });
     group.finish();
 }
 
@@ -98,28 +107,30 @@ fn benchmark_cache_miss(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache_miss");
     group.throughput(Throughput::Elements(1));
 
+    let (config, _dir) = create_cache_config();
+    let cache = rt.block_on(async { TieredCache::new(config).await.unwrap() });
     let data = create_parquet_bytes(10_000);
 
     group.bench_function("fetch_and_cache", |b| {
-        b.to_async(&rt).iter_batched(
-            || {
-                let (config, dir) = create_cache_config();
-                let cache = rt.block_on(async {
-                    TieredCache::new(config).await.unwrap()
-                });
-                let data_clone = data.clone();
-                (cache, data_clone, dir)
-            },
-            |(cache, data_clone, _dir)| async move {
-                let result = cache.get_or_fetch("test_key", || async move {
-                    Ok(data_clone)
-                }).await.unwrap();
-                black_box(result);
-            },
-            criterion::BatchSize::SmallInput,
-        );
+        let mut key_idx = 0u64;
+        b.iter(|| {
+            // Force a miss by using a fresh key each iteration.
+            let key = format!("test_key_{}", key_idx);
+            key_idx += 1;
+            let data_clone = data.clone();
+            let result = rt.block_on(async {
+                cache
+                    .get_or_fetch(&key, || async move { Ok(data_clone) })
+                    .await
+                    .unwrap()
+            });
+            black_box(result);
+        });
     });
 
+    rt.block_on(async {
+        cache.clear().await;
+    });
     group.finish();
 }
 
