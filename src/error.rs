@@ -78,6 +78,9 @@ pub enum Error {
     /// Shard not found
     #[error("Shard not found: {0}")]
     ShardNotFound(String),
+    /// Chunks are already leased by another compactor
+    #[error("Chunks already leased: {0:?}")]
+    ChunksAlreadyLeased(Vec<String>),
 }
 
 /// Shard-specific errors

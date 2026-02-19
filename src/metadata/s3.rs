@@ -10,7 +10,8 @@
 //! - Eventual consistency with atomic writes
 
 use super::{
-    CompactionJob, CompactionStatus, MetadataClient, SplitState, TimeIndexEntry, TimeRange,
+    CompactionJob, CompactionLease, CompactionLeases, CompactionStatus, LeaseStatus,
+    MetadataClient, SplitState, TimeIndexEntry, TimeRange,
 };
 use crate::ingester::ChunkMetadata;
 use crate::sharding::SplitPhase;
@@ -248,6 +249,11 @@ impl S3MetadataClient {
     /// Get the S3 path for compaction jobs
     fn compaction_jobs_path(&self) -> Path {
         Path::from_iter([&self.config.metadata_prefix, "compaction-jobs.json"])
+    }
+
+    /// Get the S3 path for compaction leases
+    fn compaction_leases_path(&self) -> Path {
+        Path::from_iter([&self.config.metadata_prefix, "compaction-leases.json"])
     }
 
     /// Get the S3 path for shard split states
@@ -878,6 +884,67 @@ impl S3MetadataClient {
             debug!("Atomically saved shard metadata for {}", shard_id);
         })
     }
+
+    /// Load compaction leases with ETag for atomic operations
+    async fn load_leases_with_etag(&self) -> Result<(CompactionLeases, String)> {
+        let path = self.compaction_leases_path();
+
+        match self.object_store.get(&path).await {
+            Ok(result) => {
+                let e_tag = result
+                    .meta
+                    .e_tag
+                    .clone()
+                    .unwrap_or_else(|| "no-etag".to_string());
+                let bytes = result.bytes().await?;
+                let content = String::from_utf8_lossy(&bytes);
+
+                let leases: CompactionLeases = serde_json::from_str(&content)
+                    .map_err(|e| {
+                        warn!("Corrupt compaction leases file, treating as empty: {}", e);
+                        Error::Metadata(format!("Corrupt compaction leases: {}", e))
+                    })?;
+
+                debug!(
+                    "Loaded {} compaction leases with ETag: {}",
+                    leases.leases.len(),
+                    e_tag
+                );
+                Ok((leases, e_tag))
+            }
+            Err(object_store::Error::NotFound { .. }) => {
+                debug!("No compaction leases file found, starting fresh");
+                Ok((CompactionLeases::default(), "none".to_string()))
+            }
+            Err(e) => Err(Error::Metadata(format!(
+                "Failed to load compaction leases: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Atomically save compaction leases using ETag-based CAS
+    async fn atomic_save_leases(
+        &self,
+        leases: &CompactionLeases,
+        expected_etag: String,
+    ) -> Result<()> {
+        let path = self.compaction_leases_path();
+
+        let content = serde_json::to_string_pretty(leases)?;
+        let bytes = content.into_bytes();
+
+        self.put_with_fallback(
+            &path,
+            PutPayload::from(bytes),
+            &expected_etag,
+            "compaction leases",
+        )
+        .await
+        .map(|_| {
+            debug!("Atomically saved {} compaction leases", leases.leases.len());
+        })
+    }
 }
 
 #[async_trait]
@@ -1367,5 +1434,218 @@ impl MetadataClient for S3MetadataClient {
             );
             Ok(())
         })
+    }
+
+    async fn acquire_lease(
+        &self,
+        node_id: &str,
+        chunks: &[String],
+        level: u32,
+    ) -> Result<CompactionLease> {
+        let lease_ttl = std::time::Duration::from_secs(300); // 5 minutes
+
+        for retry in 0..MAX_CAS_RETRIES {
+            let (mut leases, etag) = self.load_leases_with_etag().await?;
+
+            let now = chrono::Utc::now();
+
+            // Scavenge expired active leases
+            leases.leases.retain(|_, lease| {
+                !(lease.status == LeaseStatus::Active && lease.expires_at <= now)
+            });
+
+            // Check if any requested chunks are already leased
+            let leased_chunks: std::collections::HashSet<&str> = leases
+                .leases
+                .values()
+                .filter(|l| l.status == LeaseStatus::Active && l.expires_at > now)
+                .flat_map(|l| l.chunks.iter().map(|c| c.as_str()))
+                .collect();
+
+            let conflicts: Vec<String> = chunks
+                .iter()
+                .filter(|c| leased_chunks.contains(c.as_str()))
+                .cloned()
+                .collect();
+
+            if !conflicts.is_empty() {
+                debug!("Chunks already leased: {:?}, skipping", conflicts);
+                return Err(Error::ChunksAlreadyLeased(conflicts));
+            }
+
+            // Create new lease
+            let lease = CompactionLease {
+                lease_id: uuid::Uuid::new_v4().to_string(),
+                holder_id: node_id.to_string(),
+                chunks: chunks.to_vec(),
+                acquired_at: now,
+                expires_at: now + chrono::Duration::from_std(lease_ttl).unwrap(),
+                level,
+                status: LeaseStatus::Active,
+            };
+
+            leases.leases.insert(lease.lease_id.clone(), lease.clone());
+
+            match self.atomic_save_leases(&leases, etag).await {
+                Ok(_) => {
+                    info!(
+                        "Acquired lease {} for {} chunks at level {} after {} retries",
+                        lease.lease_id,
+                        chunks.len(),
+                        level,
+                        retry
+                    );
+                    return Ok(lease);
+                }
+                Err(Error::Conflict) => {
+                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
+                    debug!(
+                        "Conflict on acquire_lease attempt {}, retrying after {}ms",
+                        retry + 1,
+                        backoff_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::TooManyRetries)
+    }
+
+    async fn complete_lease(&self, lease_id: &str) -> Result<()> {
+        for retry in 0..MAX_CAS_RETRIES {
+            let (mut leases, etag) = self.load_leases_with_etag().await?;
+
+            if let Some(lease) = leases.leases.get_mut(lease_id) {
+                lease.status = LeaseStatus::Completed;
+            } else {
+                warn!("Lease {} not found during completion -- may have expired", lease_id);
+                return Ok(());
+            }
+
+            match self.atomic_save_leases(&leases, etag).await {
+                Ok(_) => {
+                    info!("Completed lease {} after {} retries", lease_id, retry);
+                    return Ok(());
+                }
+                Err(Error::Conflict) => {
+                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::TooManyRetries)
+    }
+
+    async fn fail_lease(&self, lease_id: &str) -> Result<()> {
+        for retry in 0..MAX_CAS_RETRIES {
+            let (mut leases, etag) = self.load_leases_with_etag().await?;
+
+            if let Some(lease) = leases.leases.get_mut(lease_id) {
+                lease.status = LeaseStatus::Failed;
+            } else {
+                warn!("Lease {} not found during failure marking -- may have expired", lease_id);
+                return Ok(());
+            }
+
+            match self.atomic_save_leases(&leases, etag).await {
+                Ok(_) => {
+                    info!("Marked lease {} as failed after {} retries", lease_id, retry);
+                    return Ok(());
+                }
+                Err(Error::Conflict) => {
+                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::TooManyRetries)
+    }
+
+    async fn renew_lease(&self, lease_id: &str) -> Result<()> {
+        let extension = std::time::Duration::from_secs(300); // Extend by 5 minutes
+
+        for retry in 0..MAX_CAS_RETRIES {
+            let (mut leases, etag) = self.load_leases_with_etag().await?;
+
+            if let Some(lease) = leases.leases.get_mut(lease_id) {
+                if lease.status != LeaseStatus::Active {
+                    return Err(Error::Internal(format!(
+                        "Cannot renew non-active lease {}",
+                        lease_id
+                    )));
+                }
+                lease.expires_at = chrono::Utc::now()
+                    + chrono::Duration::from_std(extension).unwrap();
+            } else {
+                return Err(Error::Internal(format!("Lease {} not found", lease_id)));
+            }
+
+            match self.atomic_save_leases(&leases, etag).await {
+                Ok(_) => {
+                    debug!("Renewed lease {} after {} retries", lease_id, retry);
+                    return Ok(());
+                }
+                Err(Error::Conflict) => {
+                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::TooManyRetries)
+    }
+
+    async fn load_leases(&self) -> Result<CompactionLeases> {
+        let (leases, _) = self.load_leases_with_etag().await?;
+        Ok(leases)
+    }
+
+    async fn scavenge_leases(&self) -> Result<usize> {
+        for retry in 0..MAX_CAS_RETRIES {
+            let (mut leases, etag) = self.load_leases_with_etag().await?;
+            let original_count = leases.leases.len();
+            let now = chrono::Utc::now();
+
+            // Remove expired active leases and terminal (Completed/Failed) leases
+            leases.leases.retain(|_, lease| {
+                if lease.status == LeaseStatus::Active {
+                    lease.expires_at > now
+                } else {
+                    // Keep nothing in terminal state -- they've served their purpose
+                    false
+                }
+            });
+
+            let removed = original_count - leases.leases.len();
+            if removed == 0 {
+                return Ok(0);
+            }
+
+            match self.atomic_save_leases(&leases, etag).await {
+                Ok(_) => {
+                    info!("Scavenged {} compaction leases", removed);
+                    return Ok(removed);
+                }
+                Err(Error::Conflict) => {
+                    let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::TooManyRetries)
     }
 }

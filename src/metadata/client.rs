@@ -1,6 +1,6 @@
 //! Metadata client trait
 
-use super::{CompactionJob, CompactionStatus, TimeIndexEntry, TimeRange};
+use super::{CompactionJob, CompactionLease, CompactionLeases, CompactionStatus, LeaseStatus, TimeIndexEntry, TimeRange};
 use crate::ingester::ChunkMetadata;
 use crate::sharding::SplitPhase;
 use crate::Result;
@@ -118,4 +118,53 @@ pub trait MetadataClient: Send + Sync {
         metadata: &crate::sharding::ShardMetadata,
         expected_generation: u64,
     ) -> Result<()>;
+
+    // Compaction lease methods for mutual exclusion
+
+    /// Acquire a lease on chunks before compacting them.
+    /// Returns `Error::ChunksAlreadyLeased` if any chunk is already leased.
+    async fn acquire_lease(
+        &self,
+        _node_id: &str,
+        _chunks: &[String],
+        _level: u32,
+    ) -> Result<CompactionLease> {
+        // Default no-op: returns a dummy lease (single-node mode)
+        let now = chrono::Utc::now();
+        Ok(CompactionLease {
+            lease_id: uuid::Uuid::new_v4().to_string(),
+            holder_id: _node_id.to_string(),
+            chunks: _chunks.to_vec(),
+            acquired_at: now,
+            expires_at: now + chrono::Duration::seconds(300),
+            level: _level,
+            status: LeaseStatus::Active,
+        })
+    }
+
+    /// Mark a lease as completed after successful compaction.
+    async fn complete_lease(&self, _lease_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Mark a lease as failed after compaction error.
+    async fn fail_lease(&self, _lease_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Renew an active lease to extend its TTL.
+    async fn renew_lease(&self, _lease_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Load all current leases (for filtering and scavenging).
+    async fn load_leases(&self) -> Result<CompactionLeases> {
+        Ok(CompactionLeases::default())
+    }
+
+    /// Scavenge expired and terminal leases.
+    /// Returns the number of leases removed.
+    async fn scavenge_leases(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
