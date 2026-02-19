@@ -72,10 +72,10 @@ impl WalEntry {
     /// Decode payload into record batches.
     pub fn batches(&self) -> Result<Vec<RecordBatch>> {
         let cursor = io::Cursor::new(self.payload.clone());
-        let mut reader = StreamReader::try_new(cursor, None)
+        let reader = StreamReader::try_new(cursor, None)
             .map_err(|err| Error::Serialization(err.to_string()))?;
         let mut batches = Vec::new();
-        while let Some(batch) = reader.next() {
+        for batch in reader {
             batches.push(batch.map_err(|err| Error::Serialization(err.to_string()))?);
         }
         Ok(batches)
@@ -96,7 +96,9 @@ pub struct WriteAheadLog {
 impl WriteAheadLog {
     /// Open or create a WAL at the configured directory.
     pub async fn open(config: WalConfig) -> Result<Self> {
-        fs::create_dir_all(&config.wal_dir).await.map_err(map_io_error)?;
+        fs::create_dir_all(&config.wal_dir)
+            .await
+            .map_err(map_io_error)?;
         let segments = list_segments(&config.wal_dir)?;
         let (segment_id, segment_path) = if let Some(last) = segments.last() {
             (last.id, last.path.clone())
@@ -269,7 +271,9 @@ fn decode_header(header: &[u8; HEADER_LEN]) -> Result<(u64, u8, usize, u32)> {
     }
     let flags = header[5];
     if flags & FLAG_COMPRESSED != 0 {
-        return Err(Error::Serialization("WAL compression not supported".to_string()));
+        return Err(Error::Serialization(
+            "WAL compression not supported".to_string(),
+        ));
     }
     let seq = u64::from_le_bytes(header[6..14].try_into().unwrap());
     let len = u32::from_le_bytes(header[14..18].try_into().unwrap()) as usize;
@@ -330,7 +334,11 @@ fn read_entries_from_path(path: &Path) -> Result<Vec<WalEntry>> {
             );
             break;
         }
-        entries.push(WalEntry { seq, flags, payload });
+        entries.push(WalEntry {
+            seq,
+            flags,
+            payload,
+        });
     }
     Ok(entries)
 }
@@ -414,9 +422,7 @@ pub fn persist_flushed_seq(wal_dir: &Path, seq: u64) -> Result<()> {
 pub fn load_flushed_seq(wal_dir: &Path) -> Result<u64> {
     let path = wal_dir.join(FLUSHED_SEQ_FILE);
     match std::fs::read(&path) {
-        Ok(bytes) if bytes.len() == 8 => {
-            Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
-        }
+        Ok(bytes) if bytes.len() == 8 => Ok(u64::from_le_bytes(bytes.try_into().unwrap())),
         Ok(_) => {
             warn!("Corrupt flushed_seq file, resetting to 0");
             Ok(0)
@@ -427,9 +433,8 @@ pub fn load_flushed_seq(wal_dir: &Path) -> Result<u64> {
 }
 
 fn map_io_error(error: io::Error) -> Error {
-    if error.kind() == io::ErrorKind::StorageFull
-        || matches!(error.raw_os_error(), Some(28))
-    {
+    // ENOSPC (28) on Unix and ERROR_DISK_FULL (112) on Windows.
+    if matches!(error.raw_os_error(), Some(28) | Some(112)) {
         return Error::WalFull;
     }
     Error::Io(error)
@@ -445,7 +450,11 @@ mod tests {
     use tempfile::TempDir;
 
     fn make_batch() -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![Field::new("value", DataType::Int64, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
         let array = Int64Array::from(vec![1, 2, 3]);
         RecordBatch::try_new(schema, vec![Arc::new(array)]).unwrap()
     }
@@ -468,6 +477,9 @@ mod tests {
             .await
             .unwrap();
         wal.append(&batch).await.unwrap();
+        wal.file.flush().await.unwrap();
+        wal.file.sync_all().await.unwrap();
+        drop(wal);
 
         let segment = list_segments(dir.path()).unwrap().pop().unwrap();
         let mut file = StdFile::open(segment.path).unwrap();
@@ -524,6 +536,9 @@ mod tests {
             .await
             .unwrap();
         wal.append(&batch).await.unwrap();
+        wal.file.flush().await.unwrap();
+        wal.file.sync_all().await.unwrap();
+        drop(wal);
 
         let segment = list_segments(dir.path()).unwrap().pop().unwrap();
         let mut file = StdFile::options()
@@ -537,11 +552,18 @@ mod tests {
         file.seek(SeekFrom::Start(HEADER_LEN as u64)).unwrap();
         byte[0] ^= 0xFF;
         file.write_all(&byte).unwrap();
+        file.sync_all().unwrap();
 
         // After crash-tolerant recovery, a corrupt trailing entry is discarded
         // (logged as warning) and entries before it are returned.
         // Since there's only one entry and it's corrupt, we get an empty vec.
+        let wal = WriteAheadLog::open(make_config(&dir, 1024 * 1024))
+            .await
+            .unwrap();
         let entries = wal.read_entries().unwrap();
-        assert!(entries.is_empty(), "corrupt entry should be discarded during recovery");
+        assert!(
+            entries.is_empty(),
+            "corrupt entry should be discarded during recovery"
+        );
     }
 }

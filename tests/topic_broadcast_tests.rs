@@ -2,9 +2,11 @@
 //!
 //! Tests that streaming queries only receive relevant data, eliminating 90% bandwidth waste.
 
-use cardinalsin::ingester::{BatchMetadata, FilteredReceiver, TopicBatch, TopicBroadcastChannel, TopicFilter};
 use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use cardinalsin::ingester::{
+    BatchMetadata, FilteredReceiver, TopicBatch, TopicBroadcastChannel, TopicFilter,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +38,9 @@ async fn test_topic_filter_reduces_bandwidth() {
     let channel = TopicBroadcastChannel::new(100);
 
     // Subscribe to only 'cpu' metrics
-    let mut rx_cpu = channel.subscribe(TopicFilter::for_metrics(vec!["cpu".to_string()])).await;
+    let mut rx_cpu = channel
+        .subscribe(TopicFilter::for_metrics(vec!["cpu".to_string()]))
+        .await;
 
     // Subscribe to all metrics
     let mut rx_all = channel.subscribe(TopicFilter::All).await;
@@ -68,7 +72,10 @@ async fn test_topic_filter_reduces_bandwidth() {
 
     // Next receive should timeout (no more CPU batches)
     let result = tokio::time::timeout(Duration::from_millis(50), rx_cpu.recv()).await;
-    assert!(result.is_err(), "Should timeout waiting for more CPU batches");
+    assert!(
+        result.is_err(),
+        "Should timeout waiting for more CPU batches"
+    );
 
     // All subscriber should receive all 10 batches
     let mut all_count = 0;
@@ -94,10 +101,12 @@ async fn test_multiple_metric_subscription() {
     let channel = TopicBroadcastChannel::new(100);
 
     // Subscribe to cpu and memory
-    let mut rx_filtered = channel.subscribe(TopicFilter::for_metrics(vec![
-        "cpu".to_string(),
-        "memory".to_string(),
-    ])).await;
+    let mut rx_filtered = channel
+        .subscribe(TopicFilter::for_metrics(vec![
+            "cpu".to_string(),
+            "memory".to_string(),
+        ]))
+        .await;
 
     // Send batches for cpu, memory, disk, network
     let metrics = ["cpu", "memory", "disk", "network"];
@@ -126,7 +135,10 @@ async fn test_multiple_metric_subscription() {
 
     // Next receive should timeout
     let result = tokio::time::timeout(Duration::from_millis(50), rx_filtered.recv()).await;
-    assert!(result.is_err(), "Should timeout after receiving filtered batches");
+    assert!(
+        result.is_err(),
+        "Should timeout after receiving filtered batches"
+    );
 }
 
 #[tokio::test]
@@ -134,7 +146,9 @@ async fn test_shard_based_filtering() {
     let channel = TopicBroadcastChannel::new(100);
 
     // Subscribe to shard-1
-    let mut rx_shard1 = channel.subscribe(TopicFilter::for_shard("shard-1".to_string())).await;
+    let mut rx_shard1 = channel
+        .subscribe(TopicFilter::for_shard("shard-1".to_string()))
+        .await;
 
     // Send batches to different shards
     for i in 0..6 {
@@ -173,9 +187,9 @@ async fn test_combined_filters_with_and() {
 
     // Send various combinations
     let test_cases = vec![
-        ("shard-1", "cpu", true),   // Should match
+        ("shard-1", "cpu", true),     // Should match
         ("shard-1", "memory", false), // Wrong metric
-        ("shard-2", "cpu", false),   // Wrong shard
+        ("shard-2", "cpu", false),    // Wrong shard
         ("shard-2", "memory", false), // Both wrong
     ];
 
@@ -204,7 +218,10 @@ async fn test_combined_filters_with_and() {
 
     // Next receive should timeout
     let result = tokio::time::timeout(Duration::from_millis(50), rx_filtered.recv()).await;
-    assert!(result.is_err(), "Should timeout after receiving matched batch");
+    assert!(
+        result.is_err(),
+        "Should timeout after receiving matched batch"
+    );
 }
 
 #[tokio::test]
@@ -213,13 +230,25 @@ async fn test_bandwidth_savings_at_scale() {
 
     // Simulate 10 subscribers, each watching a different metric
     let metrics = [
-        "cpu", "memory", "disk", "network", "latency", "errors", "requests", "responses",
-        "connections", "threads",
+        "cpu",
+        "memory",
+        "disk",
+        "network",
+        "latency",
+        "errors",
+        "requests",
+        "responses",
+        "connections",
+        "threads",
     ];
 
     let mut receivers: Vec<FilteredReceiver> = Vec::new();
     for m in &metrics {
-        receivers.push(channel.subscribe(TopicFilter::for_metrics(vec![m.to_string()])).await);
+        receivers.push(
+            channel
+                .subscribe(TopicFilter::for_metrics(vec![m.to_string()]))
+                .await,
+        );
     }
 
     // Send 1000 batches, evenly distributed across metrics
@@ -276,13 +305,17 @@ async fn test_bandwidth_savings_at_scale() {
 
         // Allow for some variance due to timing
         assert!(
-            delivered >= 95 && delivered <= 105,
+            (95..=105).contains(&delivered),
             "Subscriber {} should receive ~100 batches, got {}",
-            i, delivered
+            i,
+            delivered
         );
     }
 
-    println!("Total delivered: {}, total filtered: {}", total_delivered, total_filtered);
+    println!(
+        "Total delivered: {}, total filtered: {}",
+        total_delivered, total_filtered
+    );
 
     // Calculate total bandwidth savings
     // Without filtering: 10 subscribers × ~1000 batches = ~10,000 transmissions
@@ -296,7 +329,7 @@ async fn test_bandwidth_savings_at_scale() {
     };
     println!("Total bandwidth reduction: {}%", bandwidth_reduction);
     assert!(
-        bandwidth_reduction >= 85 && bandwidth_reduction <= 95,
+        (85..=95).contains(&bandwidth_reduction),
         "Should achieve ~90% bandwidth reduction, got {}%",
         bandwidth_reduction
     );
@@ -340,12 +373,18 @@ async fn test_subscription_stats_tracking() {
     let channel = TopicBroadcastChannel::new(100);
 
     // Subscribe to cpu and memory
-    let _rx1 = channel.subscribe(TopicFilter::for_metrics(vec!["cpu".to_string()])).await;
-    let _rx2 = channel.subscribe(TopicFilter::for_metrics(vec!["memory".to_string()])).await;
-    let _rx3 = channel.subscribe(TopicFilter::for_metrics(vec![
-        "cpu".to_string(),
-        "memory".to_string(),
-    ])).await;
+    let _rx1 = channel
+        .subscribe(TopicFilter::for_metrics(vec!["cpu".to_string()]))
+        .await;
+    let _rx2 = channel
+        .subscribe(TopicFilter::for_metrics(vec!["memory".to_string()]))
+        .await;
+    let _rx3 = channel
+        .subscribe(TopicFilter::for_metrics(vec![
+            "cpu".to_string(),
+            "memory".to_string(),
+        ]))
+        .await;
 
     // Check subscription stats
     let stats = channel.subscription_stats().await;
@@ -368,7 +407,9 @@ async fn test_mixed_batch_filtering() {
     let channel = TopicBroadcastChannel::new(100);
 
     // Subscribe to cpu
-    let mut rx_cpu = channel.subscribe(TopicFilter::for_metrics(vec!["cpu".to_string()])).await;
+    let mut rx_cpu = channel
+        .subscribe(TopicFilter::for_metrics(vec!["cpu".to_string()]))
+        .await;
 
     // Send batch with multiple metrics (simulating aggregated data)
     let batch = create_batch(vec!["cpu", "memory", "cpu"], vec![1.0, 2.0, 3.0]);
@@ -384,10 +425,7 @@ async fn test_mixed_batch_filtering() {
 
     // Should receive the batch because it contains cpu
     let result = tokio::time::timeout(Duration::from_millis(100), rx_cpu.recv()).await;
-    assert!(
-        result.is_ok(),
-        "Should receive batch containing cpu metric"
-    );
+    assert!(result.is_ok(), "Should receive batch containing cpu metric");
 }
 
 #[tokio::test]

@@ -3,8 +3,8 @@
 //! Routes write requests to the appropriate ingester node based on shard assignment.
 //! Enables horizontal scaling of ingestion throughput.
 
-use super::shard_assignment::ShardAssignment;
 use super::node_registry::{NodeInfo, NodeRegistry};
+use super::shard_assignment::ShardAssignment;
 use crate::Result;
 use arrow_array::RecordBatch;
 use std::sync::Arc;
@@ -21,10 +21,7 @@ pub struct DistributedWriteRouter {
 impl DistributedWriteRouter {
     /// Create a new distributed write router
     pub fn new(assignments: Arc<ShardAssignment>, nodes: Arc<NodeRegistry>) -> Self {
-        Self {
-            assignments,
-            nodes,
-        }
+        Self { assignments, nodes }
     }
 
     /// Route a write to the appropriate ingester node
@@ -41,7 +38,10 @@ impl DistributedWriteRouter {
                 debug!("Routing write for shard {} to node {}", shard_id, node_id);
                 return Ok(Some(node));
             } else {
-                warn!("Assigned node {} cannot accept writes, reassigning", node_id);
+                warn!(
+                    "Assigned node {} cannot accept writes, reassigning",
+                    node_id
+                );
                 self.assignments.unassign_shard(shard_id).await;
                 // Retry assignment (boxed to avoid infinite recursion)
                 return Box::pin(self.route_write(shard_id)).await;
@@ -70,7 +70,10 @@ impl DistributedWriteRouter {
         let url = format!("http://{}/api/v1/write", target_node.addr);
 
         // Placeholder implementation
-        debug!("Forwarding write to node {} at {} (TODO: implement HTTP forwarding)", target_node.id, url);
+        debug!(
+            "Forwarding write to node {} at {} (TODO: implement HTTP forwarding)",
+            target_node.id, url
+        );
 
         Ok(())
     }
@@ -125,7 +128,10 @@ mod tests {
     #[tokio::test]
     async fn test_write_routing() {
         let nodes = Arc::new(NodeRegistry::new(30));
-        let assignments = Arc::new(ShardAssignment::new(nodes.clone(), AssignmentStrategy::ConsistentHash));
+        let assignments = Arc::new(ShardAssignment::new(
+            nodes.clone(),
+            AssignmentStrategy::ConsistentHash,
+        ));
 
         // Register a node
         let node = NodeInfo::new(

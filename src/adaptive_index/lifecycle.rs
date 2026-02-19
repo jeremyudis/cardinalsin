@@ -50,8 +50,9 @@ impl IndexLifecycleManager {
         self.create_invisible_index(
             rec.tenant_id.clone(),
             rec.column_name.clone(),
-            rec.index_type.clone(),
-        ).await
+            rec.index_type,
+        )
+        .await
     }
 
     /// Create an invisible index with explicit parameters
@@ -83,7 +84,8 @@ impl IndexLifecycleManager {
 
     /// Check all invisible indexes for visibility promotion
     pub async fn check_visibility(&self) {
-        let invisible_ids: Vec<String> = self.indexes
+        let invisible_ids: Vec<String> = self
+            .indexes
             .iter()
             .filter(|e| e.visibility == IndexVisibility::Invisible)
             .map(|e| e.id.clone())
@@ -154,13 +156,13 @@ impl IndexLifecycleManager {
     /// Check for indexes to deprecate
     pub async fn retirement_check(&self) -> Vec<String> {
         let mut to_deprecate = Vec::new();
-        let threshold = std::time::Duration::from_secs(
-            self.config.unused_days_threshold as u64 * 24 * 3600
-        );
+        let threshold =
+            std::time::Duration::from_secs(self.config.unused_days_threshold as u64 * 24 * 3600);
 
         for entry in self.indexes.iter() {
             if entry.visibility == IndexVisibility::Visible {
-                let unused_duration = entry.last_used
+                let unused_duration = entry
+                    .last_used
                     .map(|t| t.elapsed())
                     .unwrap_or(entry.created_at.elapsed());
 
@@ -215,8 +217,8 @@ impl IndexLifecycleManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::IndexType;
+    use super::*;
 
     #[tokio::test]
     async fn test_create_invisible_index() {

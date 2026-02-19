@@ -1,6 +1,6 @@
 //! Index recommendation engine
 
-use super::{AdaptiveIndexConfig, TenantId, ColumnStats};
+use super::{AdaptiveIndexConfig, ColumnStats, TenantId};
 
 /// Index recommendation
 #[derive(Debug, Clone)]
@@ -101,7 +101,9 @@ impl IndexRecommendationEngine {
 
         // Sort by score descending
         recommendations.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Take top N recommendations
@@ -111,11 +113,7 @@ impl IndexRecommendationEngine {
     }
 
     /// Score a candidate column for indexing
-    fn score_candidate(
-        &self,
-        stats: &ColumnStats,
-        tenant_config: &TenantIndexConfig,
-    ) -> f64 {
+    fn score_candidate(&self, stats: &ColumnStats, tenant_config: &TenantIndexConfig) -> f64 {
         // Cost-benefit formula
         let query_benefit = stats.filter_count as f64
             * (1.0 - stats.selectivity_p50) // Higher benefit for selective filters
@@ -195,21 +193,18 @@ mod tests {
         column_stats.insert(
             "service".to_string(),
             ColumnStats::new_for_test(
-                100,                          // filter_count
-                0.1,                          // selectivity_p50
-                0.2,                          // selectivity_p99
-                Duration::from_secs(10),      // query_time_saved_est
-                100,                          // cardinality_estimate
+                100,                     // filter_count
+                0.1,                     // selectivity_p50
+                0.2,                     // selectivity_p99
+                Duration::from_secs(10), // query_time_saved_est
+                100,                     // cardinality_estimate
             ),
         );
 
         let tenant_config = TenantIndexConfig::default();
 
-        let recommendations = engine.recommend(
-            "tenant1".to_string(),
-            &column_stats,
-            &tenant_config,
-        );
+        let recommendations =
+            engine.recommend("tenant1".to_string(), &column_stats, &tenant_config);
 
         assert_eq!(recommendations.len(), 1);
         assert_eq!(recommendations[0].column_name, "service");

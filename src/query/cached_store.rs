@@ -9,9 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use object_store::{
-    path::Path, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
-    ObjectMeta, ObjectStore, PutMultipartOpts, PutOptions, PutPayload, PutResult,
-    Result as ObjectStoreResult,
+    path::Path, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectMeta,
+    ObjectStore, PutMultipartOpts, PutOptions, PutPayload, PutResult, Result as ObjectStoreResult,
 };
 use std::fmt;
 use std::ops::Range;
@@ -96,9 +95,9 @@ impl ObjectStore for CachedObjectStore {
         let size = cached_data.bytes.len();
 
         Ok(GetResult {
-            payload: GetResultPayload::Stream(Box::pin(futures::stream::once(
-                async move { Ok(bytes_clone) },
-            ))),
+            payload: GetResultPayload::Stream(Box::pin(futures::stream::once(async move {
+                Ok(bytes_clone)
+            }))),
             meta: ObjectMeta {
                 location: location.clone(),
                 last_modified: chrono::Utc::now(),

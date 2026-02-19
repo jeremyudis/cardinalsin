@@ -110,10 +110,7 @@ impl ColumnDefinition {
     /// Convert to Arrow field
     pub fn to_field(&self) -> Field {
         let data_type = match self.cardinality.dictionary_key_type() {
-            Some(key_type) => DataType::Dictionary(
-                Box::new(key_type),
-                Box::new(DataType::Utf8),
-            ),
+            Some(key_type) => DataType::Dictionary(Box::new(key_type), Box::new(DataType::Utf8)),
             None => DataType::Utf8,
         };
 
@@ -171,20 +168,32 @@ impl MetricSchema {
     /// Get the default schema for metrics
     pub fn default_metrics() -> Self {
         Self::builder()
-            .with_label(ColumnDefinition::new("host", LabelCardinality::Medium)
-                .description("Host name or IP"))
-            .with_label(ColumnDefinition::new("service", LabelCardinality::Low)
-                .description("Service name"))
-            .with_label(ColumnDefinition::new("env", LabelCardinality::Low)
-                .description("Environment (prod, staging, dev)"))
-            .with_label(ColumnDefinition::new("region", LabelCardinality::Low)
-                .description("Cloud region"))
-            .with_label(ColumnDefinition::new("instance", LabelCardinality::Medium)
-                .description("Instance ID"))
-            .with_label(ColumnDefinition::new("pod", LabelCardinality::High)
-                .description("Kubernetes pod ID"))
-            .with_label(ColumnDefinition::new("trace_id", LabelCardinality::High)
-                .description("Distributed trace ID"))
+            .with_label(
+                ColumnDefinition::new("host", LabelCardinality::Medium)
+                    .description("Host name or IP"),
+            )
+            .with_label(
+                ColumnDefinition::new("service", LabelCardinality::Low).description("Service name"),
+            )
+            .with_label(
+                ColumnDefinition::new("env", LabelCardinality::Low)
+                    .description("Environment (prod, staging, dev)"),
+            )
+            .with_label(
+                ColumnDefinition::new("region", LabelCardinality::Low).description("Cloud region"),
+            )
+            .with_label(
+                ColumnDefinition::new("instance", LabelCardinality::Medium)
+                    .description("Instance ID"),
+            )
+            .with_label(
+                ColumnDefinition::new("pod", LabelCardinality::High)
+                    .description("Kubernetes pod ID"),
+            )
+            .with_label(
+                ColumnDefinition::new("trace_id", LabelCardinality::High)
+                    .description("Distributed trace ID"),
+            )
             .build()
     }
 }
@@ -228,10 +237,7 @@ impl MetricSchemaBuilder {
         // Metric name field (dictionary encoded, low cardinality)
         fields.push(Field::new(
             METRIC_NAME_FIELD,
-            DataType::Dictionary(
-                Box::new(DataType::UInt16),
-                Box::new(DataType::Utf8),
-            ),
+            DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8)),
             false,
         ));
 
@@ -286,7 +292,10 @@ mod tests {
         assert_eq!(LabelCardinality::from_count(100), LabelCardinality::Low);
         assert_eq!(LabelCardinality::from_count(1000), LabelCardinality::Low);
         assert_eq!(LabelCardinality::from_count(1001), LabelCardinality::Medium);
-        assert_eq!(LabelCardinality::from_count(50000), LabelCardinality::Medium);
+        assert_eq!(
+            LabelCardinality::from_count(50000),
+            LabelCardinality::Medium
+        );
         assert_eq!(LabelCardinality::from_count(100001), LabelCardinality::High);
     }
 
@@ -304,7 +313,10 @@ mod tests {
     #[test]
     fn test_custom_schema() {
         let schema = MetricSchema::builder()
-            .with_label(ColumnDefinition::new("custom_label", LabelCardinality::Medium))
+            .with_label(ColumnDefinition::new(
+                "custom_label",
+                LabelCardinality::Medium,
+            ))
             .multi_value(true)
             .build();
 

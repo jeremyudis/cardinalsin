@@ -34,20 +34,21 @@ pub async fn websocket_handler(
 async fn handle_connection(mut socket: WebSocket, state: ApiState) {
     // Receive query request
     let request: StreamRequest = match socket.recv().await {
-        Some(Ok(Message::Text(text))) => {
-            match serde_json::from_str(&text) {
-                Ok(req) => req,
-                Err(e) => {
-                    let _ = socket.send(Message::Text(
+        Some(Ok(Message::Text(text))) => match serde_json::from_str(&text) {
+            Ok(req) => req,
+            Err(e) => {
+                let _ = socket
+                    .send(Message::Text(
                         serde_json::to_string(&StreamMessage {
                             msg_type: "error".to_string(),
                             data: serde_json::json!({ "error": e.to_string() }),
-                        }).unwrap()
-                    )).await;
-                    return;
-                }
+                        })
+                        .unwrap(),
+                    ))
+                    .await;
+                return;
             }
-        }
+        },
         _ => return,
     };
 
@@ -61,18 +62,25 @@ async fn handle_connection(mut socket: WebSocket, state: ApiState) {
                     data: json,
                 };
 
-                if socket.send(Message::Text(serde_json::to_string(&msg).unwrap())).await.is_err() {
+                if socket
+                    .send(Message::Text(serde_json::to_string(&msg).unwrap()))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
         }
         Err(e) => {
-            let _ = socket.send(Message::Text(
-                serde_json::to_string(&StreamMessage {
-                    msg_type: "error".to_string(),
-                    data: serde_json::json!({ "error": e.to_string() }),
-                }).unwrap()
-            )).await;
+            let _ = socket
+                .send(Message::Text(
+                    serde_json::to_string(&StreamMessage {
+                        msg_type: "error".to_string(),
+                        data: serde_json::json!({ "error": e.to_string() }),
+                    })
+                    .unwrap(),
+                ))
+                .await;
             return;
         }
     }
@@ -116,12 +124,15 @@ async fn handle_connection(mut socket: WebSocket, state: ApiState) {
     }
 
     // Send end message
-    let _ = socket.send(Message::Text(
-        serde_json::to_string(&StreamMessage {
-            msg_type: "end".to_string(),
-            data: serde_json::json!({}),
-        }).unwrap()
-    )).await;
+    let _ = socket
+        .send(Message::Text(
+            serde_json::to_string(&StreamMessage {
+                msg_type: "end".to_string(),
+                data: serde_json::json!({}),
+            })
+            .unwrap(),
+        ))
+        .await;
 }
 
 /// Convert RecordBatch to JSON
@@ -142,28 +153,23 @@ fn batch_to_json(batch: &arrow_array::RecordBatch) -> serde_json::Value {
                 serde_json::Value::Null
             } else {
                 match array.data_type() {
-                    DataType::Int64 => {
-                        serde_json::Value::Number(
-                            array.as_primitive::<Int64Type>().value(row_idx).into()
-                        )
-                    }
-                    DataType::Float64 => {
-                        serde_json::Number::from_f64(
-                            array.as_primitive::<Float64Type>().value(row_idx)
-                        )
-                        .map(serde_json::Value::Number)
-                        .unwrap_or(serde_json::Value::Null)
-                    }
-                    DataType::Utf8 => {
-                        serde_json::Value::String(
-                            array.as_string::<i32>().value(row_idx).to_string()
-                        )
-                    }
-                    DataType::Timestamp(_, _) => {
-                        serde_json::Value::Number(
-                            array.as_primitive::<TimestampNanosecondType>().value(row_idx).into()
-                        )
-                    }
+                    DataType::Int64 => serde_json::Value::Number(
+                        array.as_primitive::<Int64Type>().value(row_idx).into(),
+                    ),
+                    DataType::Float64 => serde_json::Number::from_f64(
+                        array.as_primitive::<Float64Type>().value(row_idx),
+                    )
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::Null),
+                    DataType::Utf8 => serde_json::Value::String(
+                        array.as_string::<i32>().value(row_idx).to_string(),
+                    ),
+                    DataType::Timestamp(_, _) => serde_json::Value::Number(
+                        array
+                            .as_primitive::<TimestampNanosecondType>()
+                            .value(row_idx)
+                            .into(),
+                    ),
                     _ => serde_json::Value::String(format!("{:?}", array.data_type())),
                 }
             };

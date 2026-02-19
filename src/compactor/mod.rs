@@ -8,20 +8,20 @@
 //! - Backpressure signaling to ingesters
 //! - **Orchestrating hot shard splits**
 
-mod merge;
 mod levels;
+mod merge;
 
-pub use merge::ChunkMerger;
 pub use levels::Level;
+pub use merge::ChunkMerger;
 
 use crate::ingester::ParquetWriter;
-use crate::metadata::{MetadataClient, CompactionJob, CompactionStatus, TimeRange};
+use crate::metadata::{CompactionJob, CompactionStatus, MetadataClient, TimeRange};
 use crate::sharding::{ShardAction, ShardMonitor, ShardSplitter};
 use crate::{Result, StorageConfig};
 
 use object_store::ObjectStore;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -55,10 +55,10 @@ pub struct CompactorConfig {
 impl Default for CompactorConfig {
     fn default() -> Self {
         Self {
-            l0_merge_threshold: 15,                     // 15 files (~75 minutes of data)
-            l0_target_size: 250 * 1024 * 1024,          // 250 MB
-            l1_target_size: 2 * 1024 * 1024 * 1024,     // 2 GB
-            l2_target_size: 10 * 1024 * 1024 * 1024,    // 10 GB
+            l0_merge_threshold: 15,                  // 15 files (~75 minutes of data)
+            l0_target_size: 250 * 1024 * 1024,       // 250 MB
+            l1_target_size: 2 * 1024 * 1024 * 1024,  // 2 GB
+            l2_target_size: 10 * 1024 * 1024 * 1024, // 10 GB
             max_levels: 4,
             retention_days: 90,
             downsample_after_days: 7,
@@ -191,7 +191,7 @@ impl Compactor {
 
         Ok(())
     }
-    
+
     /// Run a single sharding cycle
     async fn run_sharding_cycle(&self) -> Result<()> {
         info!("Starting sharding cycle: evaluating hot shards");
@@ -204,48 +204,66 @@ impl Compactor {
         for action in actions {
             match action {
                 ShardAction::Split(shard_id) => {
-                    info!("Hot shard detected: {}. Attempting to initiate split.", shard_id);
+                    info!(
+                        "Hot shard detected: {}. Attempting to initiate split.",
+                        shard_id
+                    );
                     let metadata_client = Arc::clone(&self.metadata);
                     let splitter = Arc::clone(&self.shard_splitter);
 
                     // Spawn the split process in the background so it doesn't block the main loop
                     tokio::spawn(async move {
-                        let shard_metadata = match metadata_client.get_shard_metadata(&shard_id).await {
-                            Ok(Some(meta)) => meta,
-                            Ok(None) => {
-                                error!("Cannot split shard {}: metadata not found.", shard_id);
-                                return;
-                            }
-                            Err(e) => {
-                                error!("Cannot split shard {}: failed to get metadata: {}", shard_id, e);
-                                return;
-                            }
-                        };
+                        let shard_metadata =
+                            match metadata_client.get_shard_metadata(&shard_id).await {
+                                Ok(Some(meta)) => meta,
+                                Ok(None) => {
+                                    error!("Cannot split shard {}: metadata not found.", shard_id);
+                                    return;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Cannot split shard {}: failed to get metadata: {}",
+                                        shard_id, e
+                                    );
+                                    return;
+                                }
+                            };
 
                         // Ensure we don't try to split a shard that's already splitting
                         if !shard_metadata.is_active() {
-                             info!("Skipping split for shard {}: already in non-active state ({:?}).", shard_id, shard_metadata.state);
-                             return;
+                            info!(
+                                "Skipping split for shard {}: already in non-active state ({:?}).",
+                                shard_id, shard_metadata.state
+                            );
+                            return;
                         }
 
-                        if let Err(e) = splitter.execute_split_with_monitoring(&shard_metadata).await {
+                        if let Err(e) = splitter
+                            .execute_split_with_monitoring(&shard_metadata)
+                            .await
+                        {
                             error!("Failed to execute split for shard {}: {}", shard_id, e);
                         }
                     });
                 }
                 ShardAction::TransferLease(shard_id, target_node) => {
-                    info!("Lease transfer requested for shard {} to node {}", shard_id, target_node);
+                    info!(
+                        "Lease transfer requested for shard {} to node {}",
+                        shard_id, target_node
+                    );
                     // TODO: Implement lease transfer when cluster mode is enabled
                 }
                 ShardAction::MoveReplica(shard_id, from_node, to_node) => {
-                    info!("Replica move requested for shard {} from {} to {}", shard_id, from_node, to_node);
+                    info!(
+                        "Replica move requested for shard {} from {} to {}",
+                        shard_id, from_node, to_node
+                    );
                     // TODO: Implement replica movement when cluster mode is enabled
                 }
             }
         }
         Ok(())
     }
-
 
     /// Run a single compaction cycle
     pub async fn run_compaction_cycle(&self) -> Result<()> {
@@ -281,7 +299,8 @@ impl Compactor {
     async fn update_l0_pending_count(&self) -> Result<()> {
         let candidates = self.metadata.get_l0_candidates(1).await?;
         let total_files: usize = candidates.iter().map(|g| g.len()).sum();
-        self.l0_pending_count.store(total_files as u64, Ordering::Relaxed);
+        self.l0_pending_count
+            .store(total_files as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -304,7 +323,8 @@ impl Compactor {
 
     /// Compact L0 (size-tiered compaction)
     async fn compact_l0(&self) -> Result<()> {
-        let candidates = self.metadata
+        let candidates = self
+            .metadata
             .get_l0_candidates(self.config.l0_merge_threshold)
             .await?;
 
@@ -318,10 +338,7 @@ impl Compactor {
             // Track active compaction
             self.active_compactions.fetch_add(1, Ordering::Relaxed);
 
-            info!(
-                file_count = group.len(),
-                "Starting L0 compaction"
-            );
+            info!(file_count = group.len(), "Starting L0 compaction");
 
             // Create compaction job
             let job = CompactionJob {
@@ -335,8 +352,12 @@ impl Compactor {
             // Merge chunks
             match self.merge_chunks(&group, Level::L0).await {
                 Ok(target_path) => {
-                    self.metadata.complete_compaction(&group, &target_path).await?;
-                    self.metadata.update_compaction_status(&job.id, CompactionStatus::Completed).await?;
+                    self.metadata
+                        .complete_compaction(&group, &target_path)
+                        .await?;
+                    self.metadata
+                        .update_compaction_status(&job.id, CompactionStatus::Completed)
+                        .await?;
 
                     // Schedule source chunks for deletion
                     for path in &group {
@@ -346,7 +367,9 @@ impl Compactor {
                     info!(target = %target_path, "L0 compaction completed");
                 }
                 Err(e) => {
-                    self.metadata.update_compaction_status(&job.id, CompactionStatus::Failed).await?;
+                    self.metadata
+                        .update_compaction_status(&job.id, CompactionStatus::Failed)
+                        .await?;
                     error!("L0 compaction failed: {}", e);
                 }
             }
@@ -361,7 +384,8 @@ impl Compactor {
     /// Compact a specific level (leveled compaction)
     async fn compact_level(&self, level: usize) -> Result<()> {
         let target_size = self.target_size_for_level(level);
-        let candidates = self.metadata
+        let candidates = self
+            .metadata
             .get_level_candidates(level, target_size)
             .await?;
 
@@ -372,7 +396,10 @@ impl Compactor {
 
             // Check capacity before starting compaction
             if !self.has_capacity() {
-                debug!(level = level, "Compaction at capacity, deferring remaining groups");
+                debug!(
+                    level = level,
+                    "Compaction at capacity, deferring remaining groups"
+                );
                 break;
             }
 
@@ -395,8 +422,12 @@ impl Compactor {
 
             match self.merge_chunks(&group, Level::L(level)).await {
                 Ok(target_path) => {
-                    self.metadata.complete_compaction(&group, &target_path).await?;
-                    self.metadata.update_compaction_status(&job.id, CompactionStatus::Completed).await?;
+                    self.metadata
+                        .complete_compaction(&group, &target_path)
+                        .await?;
+                    self.metadata
+                        .update_compaction_status(&job.id, CompactionStatus::Completed)
+                        .await?;
 
                     // Schedule source chunks for deletion
                     for path in &group {
@@ -406,7 +437,9 @@ impl Compactor {
                     info!(level = level, target = %target_path, "Level compaction completed");
                 }
                 Err(e) => {
-                    self.metadata.update_compaction_status(&job.id, CompactionStatus::Failed).await?;
+                    self.metadata
+                        .update_compaction_status(&job.id, CompactionStatus::Failed)
+                        .await?;
                     error!(level = level, "Level compaction failed: {}", e);
                 }
             }
@@ -501,9 +534,7 @@ impl Compactor {
         let cutoff = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - retention_nanos;
 
         // Find chunks older than retention period
-        let old_chunks = self.metadata
-            .get_chunks(TimeRange::new(0, cutoff))
-            .await?;
+        let old_chunks = self.metadata.get_chunks(TimeRange::new(0, cutoff)).await?;
 
         if old_chunks.is_empty() {
             return Ok(());

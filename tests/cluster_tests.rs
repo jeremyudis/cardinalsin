@@ -147,10 +147,7 @@ async fn test_shard_assignment_consistent_hash() {
     for shard in &shards {
         let node1 = assignments.assign_shard(shard).await.unwrap();
         let node2 = assignments.assign_shard(shard).await.unwrap();
-        assert_eq!(
-            node1, node2,
-            "Same shard should always map to same node"
-        );
+        assert_eq!(node1, node2, "Same shard should always map to same node");
     }
 }
 
@@ -182,10 +179,7 @@ async fn test_shard_assignment_load_based() {
 
     // Assign shard - should go to least loaded node
     let node_id = assignments.assign_shard("shard-1").await.unwrap();
-    assert_eq!(
-        node_id, "ingester-2",
-        "Should assign to least loaded node"
-    );
+    assert_eq!(node_id, "ingester-2", "Should assign to least loaded node");
 }
 
 #[tokio::test]
@@ -231,10 +225,7 @@ async fn test_shard_rebalancing() {
     println!("Rebalancing moved {} shards", moves.len());
 
     // Verify some shards were moved (but not all - consistent hashing stability)
-    assert!(
-        moves.len() > 0,
-        "Some shards should be moved to new node"
-    );
+    assert!(!moves.is_empty(), "Some shards should be moved to new node");
     assert!(
         moves.len() < 10,
         "Not all shards should move (consistent hashing stability)"
@@ -245,8 +236,9 @@ async fn test_shard_rebalancing() {
     let move_pct = (moves.len() * 100) / 10;
     println!("Movement percentage: {}%", move_pct);
     assert!(
-        move_pct >= 10 && move_pct <= 60,
-        "Movement should be partial with consistent hashing, got {}%", move_pct
+        (10..=60).contains(&move_pct),
+        "Movement should be partial with consistent hashing, got {}%",
+        move_pct
     );
 
     // Verify final distribution
@@ -418,10 +410,7 @@ async fn test_query_targeted_fanout() {
 
     // Query across both nodes' shards
     let nodes = router
-        .get_nodes_for_shards(&[
-            "shard-1".to_string(),
-            "shard-3".to_string(),
-        ])
+        .get_nodes_for_shards(&["shard-1".to_string(), "shard-3".to_string()])
         .await;
 
     assert_eq!(nodes.len(), 2, "Should return 2 nodes for shards 1 and 3");
@@ -582,8 +571,14 @@ async fn test_load_balancing() {
     assert_eq!(node2.load_percent, 40);
 
     // Verify load-based filtering
-    assert!(node1.can_accept_writes(), "Node at 75% should accept writes");
-    assert!(node2.can_accept_writes(), "Node at 40% should accept writes");
+    assert!(
+        node1.can_accept_writes(),
+        "Node at 75% should accept writes"
+    );
+    assert!(
+        node2.can_accept_writes(),
+        "Node at 40% should accept writes"
+    );
 
     // High load node
     registry.update_load("ingester-1", 96).await;

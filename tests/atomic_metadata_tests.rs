@@ -4,7 +4,7 @@
 //! concurrent access patterns.
 
 use cardinalsin::ingester::ChunkMetadata;
-use cardinalsin::metadata::{S3MetadataClient, S3MetadataConfig, MetadataClient};
+use cardinalsin::metadata::{MetadataClient, S3MetadataClient, S3MetadataConfig};
 use object_store::memory::InMemory;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -79,7 +79,10 @@ async fn test_atomic_retry_on_conflict() {
         row_count: 100,
         size_bytes: 1024,
     };
-    metadata_client.register_chunk(&chunk.path, &chunk).await.unwrap();
+    metadata_client
+        .register_chunk(&chunk.path, &chunk)
+        .await
+        .unwrap();
 
     // Now spawn multiple tasks trying to register different chunks concurrently
     let mut tasks = JoinSet::new();
@@ -107,12 +110,19 @@ async fn test_atomic_retry_on_conflict() {
 
     // Verify all succeeded
     for result in results {
-        assert!(result.is_ok(), "All registrations should succeed with retries");
+        assert!(
+            result.is_ok(),
+            "All registrations should succeed with retries"
+        );
     }
 
     // Verify final state
     let chunks = metadata_client.list_chunks().await.unwrap();
-    assert_eq!(chunks.len(), 6, "Should have 6 total chunks (1 initial + 5 concurrent)");
+    assert_eq!(
+        chunks.len(),
+        6,
+        "Should have 6 total chunks (1 initial + 5 concurrent)"
+    );
 }
 
 /// Test metadata consistency under heavy concurrent load
@@ -166,14 +176,17 @@ async fn test_heavy_concurrent_load() {
     let expected = NUM_TASKS * CHUNKS_PER_TASK;
     assert_eq!(
         total_registered, expected,
-        "Should register all {} chunks", expected
+        "Should register all {} chunks",
+        expected
     );
 
     // Verify metadata consistency
     let chunks = metadata_client.list_chunks().await.unwrap();
     assert_eq!(
-        chunks.len(), expected,
-        "Metadata should contain all {} chunks", expected
+        chunks.len(),
+        expected,
+        "Metadata should contain all {} chunks",
+        expected
     );
 
     // Verify no duplicate paths
@@ -181,7 +194,8 @@ async fn test_heavy_concurrent_load() {
     for chunk in chunks {
         assert!(
             paths.insert(chunk.chunk_path.clone()),
-            "Duplicate chunk path: {}", chunk.chunk_path
+            "Duplicate chunk path: {}",
+            chunk.chunk_path
         );
     }
 }
@@ -225,7 +239,10 @@ async fn test_atomic_compaction_completion() {
         row_count: 3000,
         size_bytes: 3 * 1024 * 1024,
     };
-    metadata_client.register_chunk("compacted.parquet", &target_chunk).await.unwrap();
+    metadata_client
+        .register_chunk("compacted.parquet", &target_chunk)
+        .await
+        .unwrap();
 
     // Complete compaction atomically
     metadata_client
@@ -240,12 +257,19 @@ async fn test_atomic_compaction_completion() {
     }
 
     // Verify target chunk still exists
-    let target = metadata_client.get_chunk("compacted.parquet").await.unwrap();
+    let target = metadata_client
+        .get_chunk("compacted.parquet")
+        .await
+        .unwrap();
     assert!(target.is_some(), "Target chunk should exist");
 
     // Verify total count
     let all_chunks = metadata_client.list_chunks().await.unwrap();
-    assert_eq!(all_chunks.len(), 1, "Should have only 1 chunk after compaction");
+    assert_eq!(
+        all_chunks.len(),
+        1,
+        "Should have only 1 chunk after compaction"
+    );
 }
 
 /// Test concurrent compactions don't corrupt metadata
@@ -284,7 +308,10 @@ async fn test_concurrent_compactions() {
             row_count: 3000,
             size_bytes: 3 * 1024 * 1024,
         };
-        metadata_client.register_chunk(&target, &meta).await.unwrap();
+        metadata_client
+            .register_chunk(&target, &meta)
+            .await
+            .unwrap();
     }
 
     // Run 5 compactions concurrently
@@ -306,7 +333,7 @@ async fn test_concurrent_compactions() {
     // All should succeed
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(Ok(_)) => {},
+            Ok(Ok(_)) => {}
             Ok(Err(e)) => panic!("Compaction failed: {}", e),
             Err(e) => panic!("Task panicked: {}", e),
         }

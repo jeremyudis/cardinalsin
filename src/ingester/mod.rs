@@ -7,21 +7,23 @@
 //! - Broadcasting new data to streaming query subscribers
 //! - Tracking shard metrics for hot shard detection
 
+mod broadcast;
 mod buffer;
 mod parquet_writer;
-mod broadcast;
 mod topic_broadcast;
 mod wal;
 
+pub use broadcast::BroadcastChannel;
 pub use buffer::WriteBuffer;
 pub use parquet_writer::ParquetWriter;
-pub use broadcast::BroadcastChannel;
-pub use topic_broadcast::{TopicBroadcastChannel, TopicBatch, BatchMetadata, TopicFilter, FilteredReceiver};
-pub use wal::{WalConfig, WalSyncMode, WriteAheadLog, load_flushed_seq, persist_flushed_seq};
+pub use topic_broadcast::{
+    BatchMetadata, FilteredReceiver, TopicBatch, TopicBroadcastChannel, TopicFilter,
+};
+pub use wal::{load_flushed_seq, persist_flushed_seq, WalConfig, WalSyncMode, WriteAheadLog};
 
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
-use crate::sharding::{ShardMonitor, HotShardConfig, ShardKey};
+use crate::sharding::{HotShardConfig, ShardKey, ShardMonitor};
 use crate::{Error, Result, StorageConfig};
 
 use arrow_array::RecordBatch;
@@ -70,13 +72,13 @@ pub struct IngesterConfig {
 impl Default for IngesterConfig {
     fn default() -> Self {
         Self {
-            flush_interval: Duration::from_secs(300),        // 5 minutes
-            flush_row_count: 1_000_000,                      // 1M rows
-            flush_size_bytes: 100 * 1024 * 1024,             // 100MB
-            batch_timeout: Duration::from_millis(250),       // 250ms micro-batch
-            batch_size_bytes: 8 * 1024 * 1024,               // 8MB
+            flush_interval: Duration::from_secs(300),  // 5 minutes
+            flush_row_count: 1_000_000,                // 1M rows
+            flush_size_bytes: 100 * 1024 * 1024,       // 100MB
+            batch_timeout: Duration::from_millis(250), // 250ms micro-batch
+            batch_size_bytes: 8 * 1024 * 1024,         // 8MB
             flush_parallelism: 4,
-            max_buffer_size_bytes: 512 * 1024 * 1024,        // 512MB
+            max_buffer_size_bytes: 512 * 1024 * 1024, // 512MB
             wal: WalConfig::default(),
         }
     }
@@ -258,11 +260,11 @@ impl Ingester {
         // Check if shard is being split - if so, use dual-write
         if let Some(split_state) = self.metadata.get_split_state(&shard_id).await? {
             use crate::sharding::SplitPhase;
-            if matches!(split_state.phase, SplitPhase::DualWrite | SplitPhase::Backfill) {
-                info!(
-                    "Shard {} is splitting, enabling dual-write mode",
-                    shard_id
-                );
+            if matches!(
+                split_state.phase,
+                SplitPhase::DualWrite | SplitPhase::Backfill
+            ) {
+                info!("Shard {} is splitting, enabling dual-write mode", shard_id);
                 return self.write_with_split_awareness(batch, &shard_id).await;
             }
         }
@@ -271,9 +273,7 @@ impl Ingester {
         if let Some(wal) = self.wal.as_ref() {
             let seq = wal.lock().await.append(&batch).await?;
             self.last_wal_seq.store(seq, Ordering::Release);
-        } else if self.config.wal.enabled
-            && !self.wal_warned.swap(true, Ordering::Relaxed)
-        {
+        } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
             warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
         }
         let mut buffer = self.buffer.write().await;
@@ -287,7 +287,8 @@ impl Ingester {
 
         // Record write metrics for hot shard detection
         let write_latency = start_time.elapsed();
-        self.shard_monitor.record_write(&shard_id, batch_size, write_latency);
+        self.shard_monitor
+            .record_write(&shard_id, batch_size, write_latency);
 
         // Check if flush is needed (whichever threshold comes first)
         if self.should_flush(&buffer) {
@@ -301,11 +302,7 @@ impl Ingester {
     }
 
     /// Write with split awareness (dual-write to old and new shards)
-    async fn write_with_split_awareness(
-        &self,
-        batch: RecordBatch,
-        shard_id: &str,
-    ) -> Result<()> {
+    async fn write_with_split_awareness(&self, batch: RecordBatch, shard_id: &str) -> Result<()> {
         let split_state = self
             .metadata
             .get_split_state(shard_id)
@@ -315,9 +312,7 @@ impl Ingester {
         if let Some(wal) = self.wal.as_ref() {
             let seq = wal.lock().await.append(&batch).await?;
             self.last_wal_seq.store(seq, Ordering::Release);
-        } else if self.config.wal.enabled
-            && !self.wal_warned.swap(true, Ordering::Relaxed)
-        {
+        } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
             warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
         }
 
@@ -455,7 +450,8 @@ impl Ingester {
         // Extract timestamp for time-based sharding
         let timestamp = if let Some(col) = batch.column_by_name("timestamp") {
             use arrow_array::cast::AsArray;
-            if let Some(arr) = col.as_primitive_opt::<arrow_array::types::TimestampNanosecondType>() {
+            if let Some(arr) = col.as_primitive_opt::<arrow_array::types::TimestampNanosecondType>()
+            {
                 arr.value(0)
             } else if let Some(arr) = col.as_primitive_opt::<arrow_array::types::Int64Type>() {
                 arr.value(0)
@@ -468,7 +464,10 @@ impl Ingester {
 
         // Create shard key and convert to shard ID
         let shard_key = ShardKey::new(self.default_tenant_id, &metric_name, timestamp);
-        format!("shard-{:x}", u64::from_be_bytes(shard_key.to_bytes()[0..8].try_into().unwrap_or([0u8; 8])))
+        format!(
+            "shard-{:x}",
+            u64::from_be_bytes(shard_key.to_bytes()[0..8].try_into().unwrap_or([0u8; 8]))
+        )
     }
 
     /// Extract all unique metric names from a batch for topic routing
@@ -530,10 +529,7 @@ impl Ingester {
         );
 
         // Concatenate batches
-        let combined = arrow::compute::concat_batches(
-            &batches[0].schema(),
-            batches.iter(),
-        )?;
+        let combined = arrow::compute::concat_batches(&batches[0].schema(), batches.iter())?;
 
         // Convert to Parquet
         let parquet_bytes = self.parquet_writer.write_batch(&combined)?;
@@ -584,7 +580,8 @@ impl Ingester {
             if let Some(wal) = self.wal.as_ref() {
                 wal.lock().await.truncate_before(flushed_up_to).await?;
             }
-            self.last_flushed_seq.store(flushed_up_to, Ordering::Release);
+            self.last_flushed_seq
+                .store(flushed_up_to, Ordering::Release);
             if let Err(e) = persist_flushed_seq(&self.config.wal.wal_dir, flushed_up_to) {
                 warn!(error = %e, "Failed to persist flushed WAL sequence number");
             }

@@ -153,16 +153,62 @@ impl DataGenerator {
     fn new(num_metrics: usize, num_hosts: usize, num_regions: usize) -> Self {
         // Create metric definitions with various patterns
         let metric_templates = [
-            ("cpu_usage", ValuePattern::Sine { min: 10.0, max: 95.0, period: 300.0 }),
-            ("memory_used_bytes", ValuePattern::RandomWalk { min: 1e9, max: 8e9, step: 1e7 }),
+            (
+                "cpu_usage",
+                ValuePattern::Sine {
+                    min: 10.0,
+                    max: 95.0,
+                    period: 300.0,
+                },
+            ),
+            (
+                "memory_used_bytes",
+                ValuePattern::RandomWalk {
+                    min: 1e9,
+                    max: 8e9,
+                    step: 1e7,
+                },
+            ),
             ("disk_read_bytes_total", ValuePattern::Counter { rate: 1e6 }),
-            ("disk_write_bytes_total", ValuePattern::Counter { rate: 5e5 }),
-            ("network_rx_bytes_total", ValuePattern::Counter { rate: 2e6 }),
-            ("network_tx_bytes_total", ValuePattern::Counter { rate: 1.5e6 }),
-            ("http_requests_total", ValuePattern::Counter { rate: 1000.0 }),
-            ("http_request_duration_seconds", ValuePattern::Sine { min: 0.01, max: 0.5, period: 120.0 }),
-            ("gc_pause_seconds", ValuePattern::Constant { base: 0.05, jitter: 0.02 }),
-            ("active_connections", ValuePattern::Sine { min: 10.0, max: 500.0, period: 600.0 }),
+            (
+                "disk_write_bytes_total",
+                ValuePattern::Counter { rate: 5e5 },
+            ),
+            (
+                "network_rx_bytes_total",
+                ValuePattern::Counter { rate: 2e6 },
+            ),
+            (
+                "network_tx_bytes_total",
+                ValuePattern::Counter { rate: 1.5e6 },
+            ),
+            (
+                "http_requests_total",
+                ValuePattern::Counter { rate: 1000.0 },
+            ),
+            (
+                "http_request_duration_seconds",
+                ValuePattern::Sine {
+                    min: 0.01,
+                    max: 0.5,
+                    period: 120.0,
+                },
+            ),
+            (
+                "gc_pause_seconds",
+                ValuePattern::Constant {
+                    base: 0.05,
+                    jitter: 0.02,
+                },
+            ),
+            (
+                "active_connections",
+                ValuePattern::Sine {
+                    min: 10.0,
+                    max: 500.0,
+                    period: 600.0,
+                },
+            ),
         ];
 
         let metrics: Vec<MetricDef> = (0..num_metrics)
@@ -183,7 +229,13 @@ impl DataGenerator {
             .map(|i| format!("host-{:03}", i + 1))
             .collect();
 
-        let region_names = ["us-east-1", "us-west-2", "eu-west-1", "ap-northeast-1", "ap-southeast-1"];
+        let region_names = [
+            "us-east-1",
+            "us-west-2",
+            "eu-west-1",
+            "ap-northeast-1",
+            "ap-southeast-1",
+        ];
         let regions: Vec<String> = region_names
             .iter()
             .take(num_regions)
@@ -224,17 +276,22 @@ impl DataGenerator {
                             let value = match metric.pattern {
                                 ValuePattern::Sine { min, max, period } => {
                                     let range = max - min;
-                                    let phase = (elapsed_secs / period) * 2.0 * std::f64::consts::PI;
+                                    let phase =
+                                        (elapsed_secs / period) * 2.0 * std::f64::consts::PI;
                                     min + (range / 2.0) * (1.0 + phase.sin())
                                 }
                                 ValuePattern::RandomWalk { min, max, step } => {
-                                    let current = self.walk_values.entry(key.clone()).or_insert((min + max) / 2.0);
+                                    let current = self
+                                        .walk_values
+                                        .entry(key.clone())
+                                        .or_insert((min + max) / 2.0);
                                     let delta = (rand::random::<f64>() - 0.5) * 2.0 * step;
                                     *current = (*current + delta).clamp(min, max);
                                     *current
                                 }
                                 ValuePattern::Counter { rate } => {
-                                    let current = self.counter_values.entry(key.clone()).or_insert(0.0);
+                                    let current =
+                                        self.counter_values.entry(key.clone()).or_insert(0.0);
                                     *current += rate / 10.0 + (rand::random::<f64>() * rate / 20.0);
                                     *current
                                 }
@@ -343,7 +400,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Target rate:   {} samples/sec", args.samples_per_second);
     println!("Duration:      {:?}", *args.duration);
     println!("Batch size:    {}", args.batch_size);
-    println!("Mode:          {}", if args.burst { "burst" } else { "steady" });
+    println!(
+        "Mode:          {}",
+        if args.burst { "burst" } else { "steady" }
+    );
     println!();
 
     let client = IngesterClient::new(args.endpoint.clone());

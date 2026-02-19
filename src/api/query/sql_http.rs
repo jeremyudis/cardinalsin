@@ -65,7 +65,8 @@ async fn execute_query(state: ApiState, request: SqlRequest) -> Response {
                 Json(serde_json::json!({
                     "error": e.to_string()
                 })),
-            ).into_response();
+            )
+                .into_response();
         }
     };
 
@@ -79,7 +80,8 @@ async fn execute_query(state: ApiState, request: SqlRequest) -> Response {
         _ => (
             StatusCode::BAD_REQUEST,
             "Invalid format. Use: json, arrow, or csv",
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -93,7 +95,8 @@ fn format_json_response(batches: Vec<RecordBatch>, execution_time_ms: u64) -> Re
                 bytes_read: 0,
                 execution_time_ms,
             },
-        }).into_response();
+        })
+        .into_response();
     }
 
     let schema = batches[0].schema();
@@ -125,7 +128,8 @@ fn format_json_response(batches: Vec<RecordBatch>, execution_time_ms: u64) -> Re
             bytes_read: total_bytes,
             execution_time_ms,
         },
-    }).into_response()
+    })
+    .into_response()
 }
 
 fn format_arrow_response(batches: Vec<RecordBatch>) -> Response {
@@ -143,7 +147,8 @@ fn format_arrow_response(batches: Vec<RecordBatch>) -> Response {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to create Arrow writer: {}", e),
-                ).into_response();
+                )
+                    .into_response();
             }
         };
 
@@ -152,7 +157,8 @@ fn format_arrow_response(batches: Vec<RecordBatch>) -> Response {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to write batch: {}", e),
-                ).into_response();
+                )
+                    .into_response();
             }
         }
 
@@ -160,7 +166,8 @@ fn format_arrow_response(batches: Vec<RecordBatch>) -> Response {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to finish Arrow stream: {}", e),
-            ).into_response();
+            )
+                .into_response();
         }
     }
 
@@ -168,7 +175,8 @@ fn format_arrow_response(batches: Vec<RecordBatch>) -> Response {
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/vnd.apache.arrow.stream")],
         buffer,
-    ).into_response()
+    )
+        .into_response()
 }
 
 fn format_csv_response(batches: Vec<RecordBatch>) -> Response {
@@ -181,25 +189,20 @@ fn format_csv_response(batches: Vec<RecordBatch>) -> Response {
     let mut buffer = Vec::new();
 
     {
-        let mut writer = WriterBuilder::new()
-            .with_header(true)
-            .build(&mut buffer);
+        let mut writer = WriterBuilder::new().with_header(true).build(&mut buffer);
 
         for batch in &batches {
             if let Err(e) = writer.write(batch) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     format!("Failed to write CSV: {}", e),
-                ).into_response();
+                )
+                    .into_response();
             }
         }
     }
 
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/csv")],
-        buffer,
-    ).into_response()
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/csv")], buffer).into_response()
 }
 
 fn column_value_to_json(array: &dyn arrow_array::Array, row: usize) -> serde_json::Value {
@@ -213,9 +216,7 @@ fn column_value_to_json(array: &dyn arrow_array::Array, row: usize) -> serde_jso
 
     match array.data_type() {
         DataType::Null => serde_json::Value::Null,
-        DataType::Boolean => {
-            serde_json::Value::Bool(array.as_boolean().value(row))
-        }
+        DataType::Boolean => serde_json::Value::Bool(array.as_boolean().value(row)),
         DataType::Int8 => {
             serde_json::Value::Number(array.as_primitive::<Int8Type>().value(row).into())
         }

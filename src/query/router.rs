@@ -1,8 +1,8 @@
 //! Query routing with shard awareness
 
 use crate::metadata::TimeRange;
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 /// Shard information
 #[derive(Debug, Clone)]
@@ -47,9 +47,7 @@ impl QueryRouter {
                 continue;
             }
 
-            if key >= entry.shard.min_key.as_slice()
-                && key < entry.shard.max_key.as_slice()
-            {
+            if key >= entry.shard.min_key.as_slice() && key < entry.shard.max_key.as_slice() {
                 return Some(entry.shard.clone());
             }
         }
@@ -60,10 +58,13 @@ impl QueryRouter {
     /// Update routing cache
     pub fn update_routing(&self, shard: ShardInfo) {
         let mut cache = self.cache.write();
-        cache.insert(shard.shard_id.clone(), RoutingEntry {
-            shard,
-            cached_at: std::time::Instant::now(),
-        });
+        cache.insert(
+            shard.shard_id.clone(),
+            RoutingEntry {
+                shard,
+                cached_at: std::time::Instant::now(),
+            },
+        );
     }
 
     /// Invalidate routing for a shard

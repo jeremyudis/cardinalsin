@@ -3,11 +3,10 @@
 //! Tests that queries with column predicates correctly prune chunks at the metadata level,
 //! dramatically reducing S3 read costs.
 
-use cardinalsin::metadata::{
-    ColumnPredicate, MetadataClient, PredicateValue, S3MetadataClient, S3MetadataConfig,
-    TimeRange,
-};
 use cardinalsin::ingester::ChunkMetadata;
+use cardinalsin::metadata::{
+    ColumnPredicate, MetadataClient, PredicateValue, S3MetadataClient, S3MetadataConfig, TimeRange,
+};
 use object_store::memory::InMemory;
 use std::sync::Arc;
 
@@ -83,7 +82,11 @@ async fn test_predicate_pushdown_reduces_chunks() {
     // Query without predicates - should return all 10 chunks
     let time_range = TimeRange::new(base_time, base_time + (10 * hour));
     let all_chunks = client.get_chunks(time_range).await.unwrap();
-    assert_eq!(all_chunks.len(), 10, "Should return all chunks without predicates");
+    assert_eq!(
+        all_chunks.len(),
+        10,
+        "Should return all chunks without predicates"
+    );
 
     // Query with metric_name = 'cpu' predicate - should return only 5 chunks
     let predicates = vec![ColumnPredicate::Eq(
@@ -119,7 +122,14 @@ async fn test_predicate_pushdown_with_ranges() {
 
     // Register chunks with different value ranges
     // Chunk 1: values 0-100
-    register_chunk_with_stats(&client, "chunk_low.parquet", base_time, base_time + hour, "0").await;
+    register_chunk_with_stats(
+        &client,
+        "chunk_low.parquet",
+        base_time,
+        base_time + hour,
+        "0",
+    )
+    .await;
 
     // Chunk 2: values 100-200
     register_chunk_with_stats(
@@ -223,7 +233,14 @@ async fn test_predicate_pushdown_with_and_or() {
     let hour = 3_600_000_000_000i64;
 
     // Register chunks
-    register_chunk_with_stats(&client, "cpu_low.parquet", base_time, base_time + hour, "cpu").await;
+    register_chunk_with_stats(
+        &client,
+        "cpu_low.parquet",
+        base_time,
+        base_time + hour,
+        "cpu",
+    )
+    .await;
     register_chunk_with_stats(
         &client,
         "cpu_high.parquet",
@@ -297,11 +314,7 @@ async fn test_predicate_pushdown_with_and_or() {
         .await
         .unwrap();
 
-    assert_eq!(
-        chunks.len(),
-        1,
-        "AND predicate should return only cpu_high"
-    );
+    assert_eq!(chunks.len(), 1, "AND predicate should return only cpu_high");
     assert!(chunks[0].chunk_path.contains("cpu_high"));
 
     // Test OR: metric = 'cpu' OR metric = 'memory'
@@ -408,7 +421,14 @@ async fn test_predicate_pushdown_between() {
     let hour = 3_600_000_000_000i64;
 
     // Register chunks with different value ranges
-    register_chunk_with_stats(&client, "chunk_1.parquet", base_time, base_time + hour, "test").await;
+    register_chunk_with_stats(
+        &client,
+        "chunk_1.parquet",
+        base_time,
+        base_time + hour,
+        "test",
+    )
+    .await;
     register_chunk_with_stats(
         &client,
         "chunk_2.parquet",
@@ -460,11 +480,7 @@ async fn test_predicate_pushdown_between() {
         .await
         .unwrap();
 
-    assert_eq!(
-        chunks.len(),
-        2,
-        "BETWEEN should return overlapping chunks"
-    );
+    assert_eq!(chunks.len(), 2, "BETWEEN should return overlapping chunks");
     assert!(
         chunks
             .iter()
@@ -482,8 +498,16 @@ async fn test_cost_reduction_simulation() {
 
     // Simulate a real scenario: 100 chunks over 1 day, 10 different metrics
     let metrics = [
-        "cpu", "memory", "disk", "network", "latency", "errors", "requests", "responses",
-        "connections", "threads",
+        "cpu",
+        "memory",
+        "disk",
+        "network",
+        "latency",
+        "errors",
+        "requests",
+        "responses",
+        "connections",
+        "threads",
     ];
 
     for i in 0..100 {
@@ -523,7 +547,10 @@ async fn test_cost_reduction_simulation() {
 
     println!("Cost Reduction Analysis:");
     println!("  Total chunks: {}", all_chunks.len());
-    println!("  Chunks after predicate pushdown: {}", filtered_chunks.len());
+    println!(
+        "  Chunks after predicate pushdown: {}",
+        filtered_chunks.len()
+    );
     println!("  Chunks saved: {}", chunks_saved);
     println!("  Reduction: {}%", reduction_pct);
 

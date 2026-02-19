@@ -8,8 +8,8 @@ use bytes::Bytes;
 use foyer::{DirectFsDeviceOptions, Engine, HybridCache, HybridCacheBuilder, LruConfig};
 use moka::future::Cache;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Cache configuration
 #[derive(Debug, Clone)]
@@ -91,7 +91,7 @@ impl TieredCache {
                 .storage(Engine::Large)
                 .with_device_options(
                     DirectFsDeviceOptions::new(PathBuf::from(&l2_dir))
-                        .with_capacity(config.l2_size)
+                        .with_capacity(config.l2_size),
                 )
                 .build()
                 .await
@@ -114,11 +114,7 @@ impl TieredCache {
     }
 
     /// Get data from cache, or fetch from source
-    pub async fn get_or_fetch<F, Fut>(
-        &self,
-        key: &str,
-        fetch: F,
-    ) -> Result<Arc<CachedData>>
+    pub async fn get_or_fetch<F, Fut>(&self, key: &str, fetch: F) -> Result<Arc<CachedData>>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<Bytes>>,
@@ -132,9 +128,11 @@ impl TieredCache {
 
         // Try L2 (NVMe) if available - foyer 0.12 returns Option<HybridCacheEntry>
         if let Some(ref l2) = self.l2 {
-            if let Some(entry) = l2.get(&key.to_string()).await.map_err(|e| {
-                Error::Internal(format!("L2 cache error: {}", e))
-            })? {
+            if let Some(entry) = l2
+                .get(&key.to_string())
+                .await
+                .map_err(|e| Error::Internal(format!("L2 cache error: {}", e)))?
+            {
                 self.stats.l2_hits.fetch_add(1, Ordering::Relaxed);
                 let bytes = Bytes::from(entry.value().clone());
                 let data = Arc::new(CachedData {
@@ -215,13 +213,19 @@ mod tests {
         let cache = create_test_cache().await;
 
         // Insert data
-        let data = Arc::new(CachedData { bytes: Bytes::from("data1"), batches: None });
+        let data = Arc::new(CachedData {
+            bytes: Bytes::from("data1"),
+            batches: None,
+        });
         cache.l1.insert("key1".to_string(), data).await;
 
         // Get should hit L1
-        let result = cache.get_or_fetch("key1", || async {
-            panic!("Should not fetch");
-        }).await.unwrap();
+        let result = cache
+            .get_or_fetch("key1", || async {
+                panic!("Should not fetch");
+            })
+            .await
+            .unwrap();
 
         assert_eq!(result.bytes.as_ref(), b"data1");
 
@@ -239,9 +243,12 @@ mod tests {
             l2.insert("key2".to_string(), b"data2".to_vec());
 
             // Get should miss L1, hit L2
-            let result = cache.get_or_fetch("key2", || async {
-                panic!("Should not fetch from source");
-            }).await.unwrap();
+            let result = cache
+                .get_or_fetch("key2", || async {
+                    panic!("Should not fetch from source");
+                })
+                .await
+                .unwrap();
 
             assert_eq!(result.bytes.as_ref(), b"data2");
 
@@ -251,7 +258,12 @@ mod tests {
             assert_eq!(stats.l2_misses, 0);
 
             // Second get should now hit L1 (promoted)
-            let _ = cache.get_or_fetch("key2", || async { panic!("Should not fetch"); }).await.unwrap();
+            let _ = cache
+                .get_or_fetch("key2", || async {
+                    panic!("Should not fetch");
+                })
+                .await
+                .unwrap();
             let stats = cache.stats();
             assert_eq!(stats.l1_hits, 1);
         } else {
@@ -264,9 +276,10 @@ mod tests {
         let cache = create_test_cache().await;
 
         // Get should miss both and fetch
-        let result = cache.get_or_fetch("key3", || async {
-            Ok(Bytes::from("fetched_data"))
-        }).await.unwrap();
+        let result = cache
+            .get_or_fetch("key3", || async { Ok(Bytes::from("fetched_data")) })
+            .await
+            .unwrap();
 
         assert_eq!(result.bytes.as_ref(), b"fetched_data");
 
@@ -277,9 +290,12 @@ mod tests {
         assert_eq!(stats.l2_hits, 0);
 
         // Second get should hit L1
-        let result2 = cache.get_or_fetch("key3", || async {
-            panic!("Should not fetch");
-        }).await.unwrap();
+        let result2 = cache
+            .get_or_fetch("key3", || async {
+                panic!("Should not fetch");
+            })
+            .await
+            .unwrap();
         assert_eq!(result2.bytes.as_ref(), b"fetched_data");
 
         let stats = cache.stats();

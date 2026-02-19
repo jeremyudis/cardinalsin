@@ -5,13 +5,15 @@
 
 mod client;
 mod local;
-mod s3;
 pub mod predicates;
+mod s3;
 
 pub use client::{MetadataClient, SplitState};
 pub use local::LocalMetadataClient;
-pub use s3::{S3MetadataClient, S3MetadataConfig, ColumnStats, MetadataCatalog, ChunkMetadataExtended};
 pub use predicates::{ColumnPredicate, PredicateValue};
+pub use s3::{
+    ChunkMetadataExtended, ColumnStats, MetadataCatalog, S3MetadataClient, S3MetadataConfig,
+};
 
 use crate::ingester::ChunkMetadata;
 use std::ops::Range;

@@ -7,14 +7,6 @@
 mod metrics;
 
 pub use metrics::{
-    MetricSchema,
-    MetricSchemaBuilder,
-    MetricType,
-    LabelCardinality,
-    ColumnDefinition,
-    TIMESTAMP_FIELD,
-    METRIC_NAME_FIELD,
-    VALUE_F64_FIELD,
-    VALUE_I64_FIELD,
-    VALUE_U64_FIELD,
+    ColumnDefinition, LabelCardinality, MetricSchema, MetricSchemaBuilder, MetricType,
+    METRIC_NAME_FIELD, TIMESTAMP_FIELD, VALUE_F64_FIELD, VALUE_I64_FIELD, VALUE_U64_FIELD,
 };

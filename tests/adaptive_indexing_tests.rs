@@ -28,19 +28,28 @@ async fn test_query_filter_parsing() {
 
     // Test simple equality with string
     let filter = QueryFilter::from_sql("SELECT * FROM metrics WHERE service = 'api'");
-    assert!(!filter.predicates.is_empty(), "Should parse string equality");
+    assert!(
+        !filter.predicates.is_empty(),
+        "Should parse string equality"
+    );
     assert_eq!(filter.predicates[0].column, "service");
 
     // Test numeric equality
     let filter2 = QueryFilter::from_sql("SELECT * FROM metrics WHERE status_code = 200");
-    assert!(!filter2.predicates.is_empty(), "Should parse numeric equality");
+    assert!(
+        !filter2.predicates.is_empty(),
+        "Should parse numeric equality"
+    );
     assert_eq!(filter2.predicates[0].column, "status_code");
 
     // Test compound WHERE clause with AND
     let filter3 = QueryFilter::from_sql(
-        "SELECT * FROM metrics WHERE tenant_id = 'test' AND region = 'us-east'"
+        "SELECT * FROM metrics WHERE tenant_id = 'test' AND region = 'us-east'",
     );
-    assert!(filter3.predicates.len() >= 2, "Should parse multiple predicates");
+    assert!(
+        filter3.predicates.len() >= 2,
+        "Should parse multiple predicates"
+    );
 
     // Test comparison operators
     let filter4 = QueryFilter::from_sql("SELECT * FROM metrics WHERE value > 100");
@@ -48,15 +57,16 @@ async fn test_query_filter_parsing() {
 
     // Test empty/invalid SQL graceful handling
     let filter5 = QueryFilter::from_sql("not valid sql at all");
-    assert!(filter5.predicates.is_empty(), "Should return empty for invalid SQL");
+    assert!(
+        filter5.predicates.is_empty(),
+        "Should return empty for invalid SQL"
+    );
 }
 
 /// Test index usage tracking
 #[tokio::test]
 async fn test_index_usage_tracking() {
-    let index_controller = Arc::new(AdaptiveIndexController::new(
-        AdaptiveIndexConfig::default(),
-    ));
+    let index_controller = Arc::new(AdaptiveIndexController::new(AdaptiveIndexConfig::default()));
 
     let tenant_id = "test-tenant".to_string();
 
@@ -77,7 +87,9 @@ async fn test_index_usage_tracking() {
     }
 
     // Verify index exists and has usage count
-    let indexes = index_controller.lifecycle_manager.get_invisible_indexes(&tenant_id);
+    let indexes = index_controller
+        .lifecycle_manager
+        .get_invisible_indexes(&tenant_id);
     assert_eq!(indexes.len(), 1, "Should have 1 invisible index");
     assert_eq!(indexes[0].usage_count, 10, "Should have 10 usage records");
 }
@@ -85,8 +97,10 @@ async fn test_index_usage_tracking() {
 /// Test invisible index promotion
 #[tokio::test]
 async fn test_invisible_index_promotion() {
-    let mut config = AdaptiveIndexConfig::default();
-    config.visibility_check_delay = std::time::Duration::from_millis(100); // Short delay for testing
+    let config = AdaptiveIndexConfig {
+        visibility_check_delay: std::time::Duration::from_millis(100), // Short delay for testing
+        ..AdaptiveIndexConfig::default()
+    };
 
     let index_controller = Arc::new(AdaptiveIndexController::new(config));
 
@@ -117,7 +131,9 @@ async fn test_invisible_index_promotion() {
     index_controller.lifecycle_manager.check_visibility().await;
 
     // Verify index was promoted to visible
-    let visible_indexes = index_controller.lifecycle_manager.get_visible_indexes(&tenant_id);
+    let visible_indexes = index_controller
+        .lifecycle_manager
+        .get_visible_indexes(&tenant_id);
     assert!(
         !visible_indexes.is_empty(),
         "Index should be promoted to visible after 100 would-have-helped hits"
@@ -131,9 +147,11 @@ async fn test_invisible_index_promotion() {
 /// Test index lifecycle: invisible → visible → deprecated
 #[tokio::test]
 async fn test_full_index_lifecycle() {
-    let mut config = AdaptiveIndexConfig::default();
-    config.visibility_check_delay = std::time::Duration::from_millis(100);
-    config.unused_days_threshold = 0; // Immediate deprecation for testing
+    let config = AdaptiveIndexConfig {
+        visibility_check_delay: std::time::Duration::from_millis(100),
+        unused_days_threshold: 0, // Immediate deprecation for testing
+        ..AdaptiveIndexConfig::default()
+    };
 
     let index_controller = Arc::new(AdaptiveIndexController::new(config));
 
@@ -150,7 +168,9 @@ async fn test_full_index_lifecycle() {
         .await
         .unwrap();
 
-    let invisible = index_controller.lifecycle_manager.get_invisible_indexes(&tenant_id);
+    let invisible = index_controller
+        .lifecycle_manager
+        .get_invisible_indexes(&tenant_id);
     assert_eq!(invisible.len(), 1, "Should start as invisible");
     assert_eq!(invisible[0].visibility, IndexVisibility::Invisible);
 
@@ -176,7 +196,9 @@ async fn test_full_index_lifecycle() {
 
     // Index should be deprecated now - check visibility directly since check_unused
     // already marked it as deprecated (retirement_check won't return already-deprecated indexes)
-    let all_indexes = index_controller.lifecycle_manager.get_visible_index_metadata(&tenant_id);
+    let all_indexes = index_controller
+        .lifecycle_manager
+        .get_visible_index_metadata(&tenant_id);
     assert!(
         all_indexes.is_empty(),
         "Index should no longer be visible after deprecation"
@@ -190,9 +212,7 @@ async fn test_query_node_integration() {
     let metadata = Arc::new(LocalMetadataClient::new());
     let storage_config = StorageConfig::default();
 
-    let index_controller = Arc::new(AdaptiveIndexController::new(
-        AdaptiveIndexConfig::default(),
-    ));
+    let index_controller = Arc::new(AdaptiveIndexController::new(AdaptiveIndexConfig::default()));
 
     let _query_node = QueryNode::new(
         QueryConfig::default(),
@@ -213,9 +233,7 @@ async fn test_query_node_integration() {
 /// Test filter statistics collection
 #[tokio::test]
 async fn test_filter_statistics_collection() {
-    let index_controller = Arc::new(AdaptiveIndexController::new(
-        AdaptiveIndexConfig::default(),
-    ));
+    let index_controller = Arc::new(AdaptiveIndexController::new(AdaptiveIndexConfig::default()));
 
     let tenant_id = "test-tenant".to_string();
 
@@ -271,9 +289,7 @@ async fn test_filter_statistics_collection() {
 /// Test GROUP BY statistics collection
 #[tokio::test]
 async fn test_groupby_statistics_collection() {
-    let index_controller = Arc::new(AdaptiveIndexController::new(
-        AdaptiveIndexConfig::default(),
-    ));
+    let index_controller = Arc::new(AdaptiveIndexController::new(AdaptiveIndexConfig::default()));
 
     let tenant_id = "test-tenant".to_string();
 
@@ -314,9 +330,11 @@ async fn test_groupby_statistics_collection() {
 /// Test index recommendation generation
 #[tokio::test]
 async fn test_index_recommendation_generation() {
-    let mut config = AdaptiveIndexConfig::default();
-    config.min_filter_threshold = 5; // Low threshold for testing
-    config.score_threshold = 0.1;
+    let config = AdaptiveIndexConfig {
+        min_filter_threshold: 5, // Low threshold for testing
+        score_threshold: 0.1,
+        ..AdaptiveIndexConfig::default()
+    };
 
     let index_controller = Arc::new(AdaptiveIndexController::new(config));
 
@@ -327,7 +345,7 @@ async fn test_index_recommendation_generation() {
         index_controller.record_filter(
             &tenant_id,
             "trace_id",
-            0.01, // Very selective (1%)
+            0.01,                                  // Very selective (1%)
             std::time::Duration::from_millis(200), // Slow query
         );
     }
@@ -349,9 +367,7 @@ async fn test_index_recommendation_generation() {
 /// Test that index-aware queries record usage correctly
 #[tokio::test]
 async fn test_index_aware_query_usage() {
-    let index_controller = Arc::new(AdaptiveIndexController::new(
-        AdaptiveIndexConfig::default(),
-    ));
+    let index_controller = Arc::new(AdaptiveIndexController::new(AdaptiveIndexConfig::default()));
 
     let tenant_id = "test-tenant".to_string();
 
@@ -419,9 +435,7 @@ async fn test_graceful_degradation_without_indexes() {
 /// Test index removal
 #[tokio::test]
 async fn test_index_removal() {
-    let index_controller = Arc::new(AdaptiveIndexController::new(
-        AdaptiveIndexConfig::default(),
-    ));
+    let index_controller = Arc::new(AdaptiveIndexController::new(AdaptiveIndexConfig::default()));
 
     let tenant_id = "test-tenant".to_string();
 
@@ -437,13 +451,17 @@ async fn test_index_removal() {
         .unwrap();
 
     // Verify it exists
-    let invisible = index_controller.lifecycle_manager.get_invisible_indexes(&tenant_id);
+    let invisible = index_controller
+        .lifecycle_manager
+        .get_invisible_indexes(&tenant_id);
     assert_eq!(invisible.len(), 1, "Should have 1 index");
 
     // Remove it
     index_controller.lifecycle_manager.remove_index(&index_id);
 
     // Verify it's gone
-    let invisible_after = index_controller.lifecycle_manager.get_invisible_indexes(&tenant_id);
+    let invisible_after = index_controller
+        .lifecycle_manager
+        .get_invisible_indexes(&tenant_id);
     assert_eq!(invisible_after.len(), 0, "Index should be removed");
 }

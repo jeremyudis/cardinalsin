@@ -160,7 +160,13 @@ async fn test_sql_aggregation_query() {
         Ok(r) => {
             println!("Aggregation query returned {} metrics", r.rows.len());
             // Verify expected columns are present
-            for col in ["metric_name", "avg_value", "min_value", "max_value", "sample_count"] {
+            for col in [
+                "metric_name",
+                "avg_value",
+                "min_value",
+                "max_value",
+                "sample_count",
+            ] {
                 assert!(
                     r.columns.contains(&col.to_string()),
                     "Should have {} column",
@@ -223,9 +229,7 @@ async fn test_invalid_sql_returns_error() {
         .expect("Services should be healthy");
 
     // Invalid SQL should return an error
-    let result = harness
-        .query_sql("SELCT * FORM nonexistent_table")
-        .await;
+    let result = harness.query_sql("SELCT * FORM nonexistent_table").await;
 
     assert!(result.is_err(), "Invalid SQL should return error");
 }

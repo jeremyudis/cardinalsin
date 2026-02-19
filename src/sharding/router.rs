@@ -1,6 +1,6 @@
 //! Shard-aware query routing
 
-use super::{ShardId, ShardMetadata, ShardKey};
+use super::{ShardId, ShardKey, ShardMetadata};
 use crate::{Error, Result};
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
@@ -49,10 +49,13 @@ impl ShardRouter {
 
     /// Update routing for a shard
     pub fn update_routing(&self, shard: ShardMetadata) {
-        self.cache.insert(shard.shard_id.clone(), RoutingEntry {
-            shard,
-            cached_at: Instant::now(),
-        });
+        self.cache.insert(
+            shard.shard_id.clone(),
+            RoutingEntry {
+                shard,
+                cached_at: Instant::now(),
+            },
+        );
     }
 
     /// Invalidate routing for a shard
@@ -77,11 +80,7 @@ impl ShardRouter {
     }
 
     /// Route a query with automatic retry on shard moves
-    pub async fn route_query<F, Fut, T>(
-        &self,
-        key: &ShardKey,
-        execute: F,
-    ) -> Result<T>
+    pub async fn route_query<F, Fut, T>(&self, key: &ShardKey, execute: F) -> Result<T>
     where
         F: Fn(ShardMetadata) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
@@ -89,10 +88,9 @@ impl ShardRouter {
         const MAX_RETRIES: usize = 3;
 
         for attempt in 0..MAX_RETRIES {
-            let shard = self.get_shard(key)
-                .ok_or_else(|| Error::ShardNotFound(
-                    format!("No shard found for key: {:?}", key)
-                ))?;
+            let shard = self.get_shard(key).ok_or_else(|| {
+                Error::ShardNotFound(format!("No shard found for key: {:?}", key))
+            })?;
 
             match execute(shard.clone()).await {
                 Ok(result) => return Ok(result),
@@ -125,8 +123,8 @@ impl Default for ShardRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ShardState;
+    use super::*;
 
     #[test]
     fn test_routing() {

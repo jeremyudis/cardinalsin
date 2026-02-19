@@ -5,17 +5,19 @@
 //! - Managing tiered caching (RAM → NVMe → S3)
 //! - Handling streaming queries (historical + live)
 
-mod engine;
 mod cache;
 mod cached_store;
-mod streaming;
+mod engine;
 mod router;
+mod streaming;
 
-pub use engine::QueryEngine;
-pub use cache::{TieredCache, CacheConfig};
+pub use cache::{CacheConfig, TieredCache};
 pub use cached_store::CachedObjectStore;
-pub use streaming::{StreamingQuery, StreamingQueryExecutor, QueryFilter, Predicate, PredicateOp, PredicateValue};
+pub use engine::QueryEngine;
 pub use router::QueryRouter;
+pub use streaming::{
+    Predicate, PredicateOp, PredicateValue, QueryFilter, StreamingQuery, StreamingQueryExecutor,
+};
 
 use crate::ingester::FilteredReceiver;
 use crate::metadata::MetadataClient;
@@ -46,8 +48,8 @@ pub struct QueryConfig {
 impl Default for QueryConfig {
     fn default() -> Self {
         Self {
-            l1_cache_size: 1024 * 1024 * 1024,           // 1GB RAM cache
-            l2_cache_size: 10 * 1024 * 1024 * 1024,      // 10GB NVMe cache
+            l1_cache_size: 1024 * 1024 * 1024,      // 1GB RAM cache
+            l2_cache_size: 10 * 1024 * 1024 * 1024, // 10GB NVMe cache
             l2_cache_dir: None,
             max_concurrent_queries: 100,
             query_timeout: std::time::Duration::from_secs(300),
@@ -86,11 +88,14 @@ impl QueryNode {
         metadata: Arc<dyn MetadataClient>,
         storage_config: StorageConfig,
     ) -> Result<Self> {
-        let cache: Arc<TieredCache> = Arc::new(TieredCache::new(CacheConfig {
-            l1_size: config.l1_cache_size,
-            l2_size: config.l2_cache_size,
-            l2_dir: config.l2_cache_dir.clone(),
-        }).await?);
+        let cache: Arc<TieredCache> = Arc::new(
+            TieredCache::new(CacheConfig {
+                l1_size: config.l1_cache_size,
+                l2_size: config.l2_cache_size,
+                l2_dir: config.l2_cache_dir.clone(),
+            })
+            .await?,
+        );
 
         let engine = QueryEngine::new(object_store.clone(), cache.clone()).await?;
 
@@ -144,7 +149,10 @@ impl QueryNode {
         let predicates = self.engine.extract_column_predicates(sql).await?;
 
         // Get relevant chunks from metadata with predicate pushdown
-        let chunks = self.metadata.get_chunks_with_predicates(time_range, &predicates).await?;
+        let chunks = self
+            .metadata
+            .get_chunks_with_predicates(time_range, &predicates)
+            .await?;
 
         // Register chunks with DataFusion
         for chunk in &chunks {
@@ -172,16 +180,14 @@ impl QueryNode {
             return Err(Error::Query("Streaming queries are disabled".into()));
         }
 
-        let broadcast_rx = self.broadcast_rx
+        let broadcast_rx = self
+            .broadcast_rx
             .as_ref()
             .ok_or_else(|| Error::Query("No broadcast channel connected".into()))?
             .resubscribe();
 
-        let executor = StreamingQueryExecutor::new(
-            self.engine.clone(),
-            self.metadata.clone(),
-            broadcast_rx,
-        );
+        let executor =
+            StreamingQueryExecutor::new(self.engine.clone(), self.metadata.clone(), broadcast_rx);
 
         executor.execute(sql).await
     }
@@ -198,9 +204,14 @@ impl QueryNode {
             return Err(Error::Query("Streaming queries are disabled".into()));
         }
 
-        let filtered_rx = self.filtered_rx
+        let filtered_rx = self
+            .filtered_rx
             .as_ref()
-            .ok_or_else(|| Error::Query("No filtered channel connected. Use with_topic_filter() to connect one.".into()))?
+            .ok_or_else(|| {
+                Error::Query(
+                    "No filtered channel connected. Use with_topic_filter() to connect one.".into(),
+                )
+            })?
             .resubscribe();
 
         let executor = StreamingQueryExecutor::new_filtered(

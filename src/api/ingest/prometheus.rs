@@ -3,7 +3,7 @@
 //! Implements the Prometheus Remote Write protocol with Snappy compression.
 
 use crate::api::ApiState;
-use crate::schema::{TIMESTAMP_FIELD, METRIC_NAME_FIELD, VALUE_F64_FIELD};
+use crate::schema::{METRIC_NAME_FIELD, TIMESTAMP_FIELD, VALUE_F64_FIELD};
 use crate::Result;
 
 use arrow_array::{ArrayRef, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray};
@@ -20,10 +20,7 @@ use std::sync::Arc;
 /// POST /api/v1/write
 /// Content-Encoding: snappy
 /// Content-Type: application/x-protobuf
-pub async fn handle_remote_write(
-    State(state): State<ApiState>,
-    body: Bytes,
-) -> impl IntoResponse {
+pub async fn handle_remote_write(State(state): State<ApiState>, body: Bytes) -> impl IntoResponse {
     // 1. Decompress Snappy
     let decompressed = match snap::raw::Decoder::new().decompress_vec(&body) {
         Ok(data) => data,
@@ -321,7 +318,10 @@ fn parse_sample(data: &[u8]) -> Result<Sample> {
         }
     }
 
-    Ok(Sample { timestamp_ms, value })
+    Ok(Sample {
+        timestamp_ms,
+        value,
+    })
 }
 
 /// Read a varint from the buffer, returning (value, new_position)
@@ -377,13 +377,15 @@ fn convert_prom_to_arrow(req: &WriteRequest) -> Result<RecordBatch> {
 
     for ts in &req.timeseries {
         // Extract metric name and labels
-        let metric_name = ts.labels
+        let metric_name = ts
+            .labels
             .iter()
             .find(|l| l.name == "__name__")
             .map(|l| l.value.clone())
             .unwrap_or_default();
 
-        let ts_labels: HashMap<&str, &str> = ts.labels
+        let ts_labels: HashMap<&str, &str> = ts
+            .labels
             .iter()
             .filter(|l| l.name != "__name__")
             .map(|l| (l.name.as_str(), l.value.as_str()))
@@ -443,18 +445,28 @@ mod tests {
     #[test]
     fn test_convert_prom_to_arrow() {
         let req = WriteRequest {
-            timeseries: vec![
-                TimeSeries {
-                    labels: vec![
-                        Label { name: "__name__".to_string(), value: "cpu_usage".to_string() },
-                        Label { name: "host".to_string(), value: "server1".to_string() },
-                    ],
-                    samples: vec![
-                        Sample { timestamp_ms: 1000, value: 0.85 },
-                        Sample { timestamp_ms: 2000, value: 0.90 },
-                    ],
-                },
-            ],
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: "__name__".to_string(),
+                        value: "cpu_usage".to_string(),
+                    },
+                    Label {
+                        name: "host".to_string(),
+                        value: "server1".to_string(),
+                    },
+                ],
+                samples: vec![
+                    Sample {
+                        timestamp_ms: 1000,
+                        value: 0.85,
+                    },
+                    Sample {
+                        timestamp_ms: 2000,
+                        value: 0.90,
+                    },
+                ],
+            }],
         };
 
         let batch = convert_prom_to_arrow(&req).unwrap();

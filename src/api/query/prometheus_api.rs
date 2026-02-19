@@ -175,11 +175,10 @@ pub async fn range_query(
 /// Get all label names
 ///
 /// GET /api/v1/labels
-pub async fn labels(
-    State(state): State<ApiState>,
-) -> Json<LabelsResponse> {
+pub async fn labels(State(state): State<ApiState>) -> Json<LabelsResponse> {
     // Query for distinct label names
-    let sql = "SELECT DISTINCT column_name FROM information_schema.columns WHERE table_name = 'metrics'";
+    let sql =
+        "SELECT DISTINCT column_name FROM information_schema.columns WHERE table_name = 'metrics'";
 
     let results = match state.query_node.query(sql).await {
         Ok(results) => results,
@@ -195,8 +194,8 @@ pub async fn labels(
     let mut labels = Vec::new();
     for batch in &results {
         if let Some(col) = batch.column_by_name("column_name") {
-            use arrow_array::Array;
             use arrow_array::cast::AsArray;
+            use arrow_array::Array;
             let string_array = col.as_string::<i32>();
             for i in 0..string_array.len() {
                 if !string_array.is_null(i) {
@@ -236,8 +235,8 @@ pub async fn label_values(
     let mut values = Vec::new();
     for batch in &results {
         if batch.num_columns() > 0 {
-            use arrow_array::Array;
             use arrow_array::cast::AsArray;
+            use arrow_array::Array;
             let col = batch.column(0);
             let string_array = col.as_string::<i32>();
             for i in 0..string_array.len() {
@@ -280,10 +279,10 @@ struct LabelMatcher {
 
 #[derive(Debug, Clone)]
 enum LabelMatchOp {
-    Eq,      // =
-    Ne,      // !=
-    Re,      // =~
-    Nre,     // !~
+    Eq,  // =
+    Ne,  // !=
+    Re,  // =~
+    Nre, // !~
 }
 
 impl LabelMatchOp {
@@ -310,12 +309,16 @@ fn parse_promql(promql: &str) -> ParsedPromQL {
     };
 
     // Check for aggregation functions: sum(...), avg(...), etc.
-    let agg_re = regex::Regex::new(r"^(sum|avg|count|min|max|stddev|stdvar|topk|bottomk)\s*(?:by\s*\(([^)]+)\))?\s*\((.+)\)$").ok();
+    let agg_re = regex::Regex::new(
+        r"^(sum|avg|count|min|max|stddev|stdvar|topk|bottomk)\s*(?:by\s*\(([^)]+)\))?\s*\((.+)\)$",
+    )
+    .ok();
     if let Some(re) = &agg_re {
         if let Some(caps) = re.captures(promql) {
             result.aggregation = Some(caps.get(1).unwrap().as_str().to_string());
             if let Some(group) = caps.get(2) {
-                result.group_by = group.as_str()
+                result.group_by = group
+                    .as_str()
                     .split(',')
                     .map(|s| s.trim().to_string())
                     .collect();
@@ -332,7 +335,10 @@ fn parse_promql(promql: &str) -> ParsedPromQL {
     }
 
     // Check for rate/increase functions: rate(metric[5m])
-    let rate_re = regex::Regex::new(r"^(rate|increase|irate|delta|idelta|deriv)\s*\((.+)\[(\d+)([smhd])\]\)$").ok();
+    let rate_re = regex::Regex::new(
+        r"^(rate|increase|irate|delta|idelta|deriv)\s*\((.+)\[(\d+)([smhd])\]\)$",
+    )
+    .ok();
     if let Some(re) = &rate_re {
         if let Some(caps) = re.captures(promql) {
             result.function = Some(caps.get(1).unwrap().as_str().to_string());
@@ -411,7 +417,10 @@ fn transpile_promql_instant(promql: &str, time: Option<f64>) -> String {
         .unwrap_or_default();
 
     // Build WHERE clause
-    let mut where_clauses = vec![format!("metric_name = '{}'", parsed.metric_name.replace('\'', "''"))];
+    let mut where_clauses = vec![format!(
+        "metric_name = '{}'",
+        parsed.metric_name.replace('\'', "''")
+    )];
     for matcher in &parsed.label_matchers {
         where_clauses.push(matcher.op.to_sql(&matcher.label, &matcher.value));
     }
@@ -609,8 +618,10 @@ fn convert_to_prometheus_vector(batches: &[arrow_array::RecordBatch]) -> Vec<Pro
 
 /// Convert Arrow results to Prometheus matrix format
 fn convert_to_prometheus_matrix(batches: &[arrow_array::RecordBatch]) -> Vec<PrometheusResult> {
-    let mut series_map: HashMap<String, (HashMap<String, String>, Vec<(f64, String)>)> =
-        HashMap::new();
+    type SeriesSamples = Vec<(f64, String)>;
+    type SeriesEntry = (HashMap<String, String>, SeriesSamples);
+
+    let mut series_map: HashMap<String, SeriesEntry> = HashMap::new();
 
     for batch in batches {
         for row in 0..batch.num_rows() {

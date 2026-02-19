@@ -72,7 +72,10 @@ impl ShardSplitter {
                 split_point.clone(),
             )
             .await?;
-        info!("✅ Phase 1 complete: Created shards {} and {}", new_shard_a, new_shard_b);
+        info!(
+            "✅ Phase 1 complete: Created shards {} and {}",
+            new_shard_a, new_shard_b
+        );
 
         // Phase 2: Enable dual-write (ingesters will detect and start dual-writing)
         info!("✏️  Phase 2/5: Dual-write enabled");
@@ -124,7 +127,7 @@ impl ShardSplitter {
         let new_shard_a = ShardId::from(uuid::Uuid::new_v4().to_string());
         let new_shard_b = ShardId::from(uuid::Uuid::new_v4().to_string());
 
-        let _pending_shards = vec![
+        let _pending_shards = [
             PendingShard {
                 id: new_shard_a.clone(),
                 range: (shard.key_range.0.clone(), split_point.clone()),
@@ -173,7 +176,10 @@ impl ShardSplitter {
             let bytes = match self.object_store.get(&path).await {
                 Ok(result) => result.bytes().await?,
                 Err(e) => {
-                    warn!("Failed to read chunk {}: {}, skipping", chunk_entry.chunk_path, e);
+                    warn!(
+                        "Failed to read chunk {}: {}, skipping",
+                        chunk_entry.chunk_path, e
+                    );
                     continue;
                 }
             };
@@ -227,7 +233,11 @@ impl ShardSplitter {
     }
 
     /// Split a RecordBatch into two based on timestamp split point
-    fn split_batch(&self, batch: &RecordBatch, split_point: &[u8]) -> Result<(RecordBatch, RecordBatch)> {
+    fn split_batch(
+        &self,
+        batch: &RecordBatch,
+        split_point: &[u8],
+    ) -> Result<(RecordBatch, RecordBatch)> {
         // Extract timestamp column
         let ts_column = batch
             .column_by_name("timestamp")
@@ -375,11 +385,8 @@ impl ShardSplitter {
         let current_generation = old_metadata.generation;
 
         // Calculate split point timestamp
-        let split_point_bytes: [u8; 8] = split_state
-            .split_point
-            .as_slice()
-            .try_into()
-            .map_err(|_| {
+        let split_point_bytes: [u8; 8] =
+            split_state.split_point.as_slice().try_into().map_err(|_| {
                 crate::Error::Internal(format!(
                     "Invalid split point for {}: expected 8 bytes, found {}",
                     old_shard,
@@ -394,7 +401,10 @@ impl ShardSplitter {
         let new_shard_a = ShardMetadata {
             shard_id: split_state.new_shards[0].clone(),
             generation: 0, // Initial value; incremented to 1 by update_shard_metadata CAS
-            key_range: (old_metadata.key_range.0.clone(), split_state.split_point.clone()),
+            key_range: (
+                old_metadata.key_range.0.clone(),
+                split_state.split_point.clone(),
+            ),
             replicas: old_metadata.replicas.clone(),
             state: ShardState::Active,
             min_time: old_metadata.min_time,
@@ -404,7 +414,10 @@ impl ShardSplitter {
         let new_shard_b = ShardMetadata {
             shard_id: split_state.new_shards[1].clone(),
             generation: 0, // Initial value; incremented to 1 by update_shard_metadata CAS
-            key_range: (split_state.split_point.clone(), old_metadata.key_range.1.clone()),
+            key_range: (
+                split_state.split_point.clone(),
+                old_metadata.key_range.1.clone(),
+            ),
             replicas: old_metadata.replicas.clone(),
             state: ShardState::Active,
             min_time: split_ts,
@@ -423,8 +436,7 @@ impl ShardSplitter {
         // Mark old shard as pending deletion using CAS
         let mut old_updated = old_metadata.clone();
         old_updated.state = ShardState::PendingDeletion {
-            delete_after: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
-                + 300_000_000_000, // 5 minutes
+            delete_after: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) + 300_000_000_000, // 5 minutes
         };
 
         self.metadata
@@ -470,7 +482,10 @@ impl ShardSplitter {
 
             // Remove from metadata
             if let Err(e) = self.metadata.delete_chunk(&chunk.chunk_path).await {
-                warn!("Failed to delete chunk metadata {}: {}", chunk.chunk_path, e);
+                warn!(
+                    "Failed to delete chunk metadata {}: {}",
+                    chunk.chunk_path, e
+                );
             }
         }
 
@@ -491,7 +506,6 @@ impl ShardSplitter {
         rounded.to_be_bytes().to_vec()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

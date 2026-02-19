@@ -5,20 +5,18 @@
 //! - Topic-based streaming
 //! - Distributed routing
 
+use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use cardinalsin::cluster::{
     AssignmentStrategy, DistributedWriteRouter, NodeInfo, NodeRegistry, NodeType, ShardAssignment,
 };
-use cardinalsin::ingester::{
-    BatchMetadata, Ingester, IngesterConfig, TopicBatch, TopicFilter,
-};
+use cardinalsin::ingester::{BatchMetadata, Ingester, IngesterConfig, TopicBatch, TopicFilter};
 use cardinalsin::metadata::{
     ColumnPredicate, LocalMetadataClient, MetadataClient, PredicateValue, TimeRange,
 };
 use cardinalsin::query::{QueryConfig, QueryNode};
 use cardinalsin::schema::MetricSchema;
 use cardinalsin::StorageConfig;
-use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field, Schema};
 use object_store::memory::InMemory;
 use std::sync::Arc;
 use std::time::Duration;
@@ -135,7 +133,9 @@ async fn test_streaming_with_topic_filtering() {
     );
 
     // Subscribe to CPU metrics only
-    let mut rx_cpu = ingester.subscribe_filtered(TopicFilter::for_metrics(vec!["cpu".to_string()])).await;
+    let mut rx_cpu = ingester
+        .subscribe_filtered(TopicFilter::for_metrics(vec!["cpu".to_string()]))
+        .await;
 
     // Subscribe to all metrics
     let mut rx_all = ingester.subscribe_filtered(TopicFilter::All).await;
@@ -197,10 +197,7 @@ async fn test_streaming_with_topic_filtering() {
     }
     assert_eq!(all_count, 10, "All subscriber should receive 10 batches");
 
-    println!(
-        "Bandwidth reduction: {}%",
-        ((10 - cpu_count) * 100) / 10
-    );
+    println!("Bandwidth reduction: {}%", ((10 - cpu_count) * 100) / 10);
 }
 
 #[tokio::test]
@@ -292,7 +289,9 @@ async fn test_complete_query_pipeline() {
     ]));
 
     let timestamps: Vec<i64> = (0..20).map(|i| now + i * 1_000_000).collect();
-    let names: Vec<&str> = (0..20).map(|i| if i % 2 == 0 { "cpu" } else { "mem" }).collect();
+    let names: Vec<&str> = (0..20)
+        .map(|i| if i % 2 == 0 { "cpu" } else { "mem" })
+        .collect();
     let values: Vec<f64> = (0..20).map(|i| i as f64 * 0.5).collect();
 
     let batch = RecordBatch::try_new(
@@ -325,7 +324,11 @@ async fn test_complete_query_pipeline() {
     // Note: query_node.query() tries to register a metrics table from s3://,
     // which doesn't work with InMemory stores in tests. Use engine.execute() instead.
     let results = query_node.engine.execute("SELECT 1 AS test_col").await;
-    assert!(results.is_ok(), "Simple query should succeed: {:?}", results.err());
+    assert!(
+        results.is_ok(),
+        "Simple query should succeed: {:?}",
+        results.err()
+    );
     let batches = results.unwrap();
     assert_eq!(batches.len(), 1, "Should return 1 batch");
     assert_eq!(batches[0].num_rows(), 1, "Should return 1 row");
@@ -376,7 +379,11 @@ async fn test_complete_cluster_pipeline() {
 
     // Verify assignments
     let all_assignments = assignments.get_all_assignments().await;
-    assert_eq!(all_assignments.len(), 10, "Should have 10 shard assignments");
+    assert_eq!(
+        all_assignments.len(),
+        10,
+        "Should have 10 shard assignments"
+    );
 
     // Create routers
     let write_router = DistributedWriteRouter::new(assignments.clone(), registry.clone());
@@ -387,7 +394,10 @@ async fn test_complete_cluster_pipeline() {
     // Simulate node failure and recovery
     registry.remove_node("ingester-2").await;
     let stats = registry.get_stats().await;
-    assert_eq!(stats.healthy_nodes, 3, "Should have 3 healthy nodes after removal");
+    assert_eq!(
+        stats.healthy_nodes, 3,
+        "Should have 3 healthy nodes after removal"
+    );
 
     // Rebalance after node removal
     let moves = assignments.rebalance().await.unwrap();
@@ -402,7 +412,10 @@ async fn test_complete_cluster_pipeline() {
     registry.register_node(node).await;
 
     let stats = registry.get_stats().await;
-    assert_eq!(stats.healthy_nodes, 4, "Should have 4 healthy nodes after addition");
+    assert_eq!(
+        stats.healthy_nodes, 4,
+        "Should have 4 healthy nodes after addition"
+    );
 
     // Rebalance after node addition
     let moves = assignments.rebalance().await.unwrap();
@@ -574,10 +587,7 @@ async fn test_multi_tenant_isolation() {
 
     // Should not receive tenant 2 data
     let result = tokio::time::timeout(Duration::from_millis(50), rx_tenant1.recv()).await;
-    assert!(
-        result.is_err(),
-        "Should not receive data from other tenant"
-    );
+    assert!(result.is_err(), "Should not receive data from other tenant");
 
     println!("✅ Tenant isolation verified");
 }

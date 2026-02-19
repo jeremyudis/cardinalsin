@@ -4,7 +4,7 @@
 //! stale updates and routing conflicts during shard operations.
 
 use cardinalsin::metadata::{LocalMetadataClient, MetadataClient};
-use cardinalsin::sharding::{ShardMetadata, ShardState, ReplicaInfo};
+use cardinalsin::sharding::{ReplicaInfo, ShardMetadata, ShardState};
 use cardinalsin::Error;
 use std::sync::Arc;
 use tokio::task::JoinSet;
@@ -224,7 +224,10 @@ async fn test_cas_prevents_lost_updates() {
         .update_shard_metadata(&shard.shard_id, &updated2, 1)
         .await;
 
-    assert!(result.is_err(), "Second update should fail with stale generation");
+    assert!(
+        result.is_err(),
+        "Second update should fail with stale generation"
+    );
 
     // Verify first update was preserved
     let final_shard = metadata
@@ -287,7 +290,9 @@ async fn test_cas_with_state_transitions() {
 
     // Transition to PendingDeletion
     let mut pending = updated.clone();
-    pending.state = ShardState::PendingDeletion { delete_after: 12345 };
+    pending.state = ShardState::PendingDeletion {
+        delete_after: 12345,
+    };
 
     metadata
         .update_shard_metadata(&shard.shard_id, &pending, updated.generation)
@@ -447,10 +452,7 @@ async fn test_retry_with_backoff() {
 async fn test_nonexistent_shard() {
     let metadata = Arc::new(LocalMetadataClient::new());
 
-    let result = metadata
-        .get_shard_metadata("nonexistent")
-        .await
-        .unwrap();
+    let result = metadata.get_shard_metadata("nonexistent").await.unwrap();
 
     assert!(result.is_none(), "Non-existent shard should return None");
 

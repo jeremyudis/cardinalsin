@@ -69,18 +69,11 @@ pub trait MetadataClient: Send + Sync {
     async fn create_compaction_job(&self, job: CompactionJob) -> Result<()>;
 
     /// Complete a compaction job
-    async fn complete_compaction(
-        &self,
-        source_chunks: &[String],
-        target_chunk: &str,
-    ) -> Result<()>;
+    async fn complete_compaction(&self, source_chunks: &[String], target_chunk: &str)
+        -> Result<()>;
 
     /// Update compaction job status
-    async fn update_compaction_status(
-        &self,
-        job_id: &str,
-        status: CompactionStatus,
-    ) -> Result<()>;
+    async fn update_compaction_status(&self, job_id: &str, status: CompactionStatus) -> Result<()>;
 
     /// Get pending compaction jobs
     async fn get_pending_compaction_jobs(&self) -> Result<Vec<CompactionJob>>;

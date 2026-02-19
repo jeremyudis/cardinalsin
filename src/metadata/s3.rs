@@ -1020,10 +1020,7 @@ impl MetadataClient for S3MetadataClient {
             let nanos_per_hour = 3_600_000_000_000i64;
             let bucket = (extended.base.min_timestamp / nanos_per_hour) * nanos_per_hour;
 
-            hour_groups
-                .entry(bucket)
-                .or_insert_with(Vec::new)
-                .push(path.clone());
+            hour_groups.entry(bucket).or_default().push(path.clone());
         }
 
         // Filter groups that meet minimum count

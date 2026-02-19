@@ -23,8 +23,7 @@ impl ComponentFactory {
     /// - AWS_ACCESS_KEY_ID: AWS credentials (optional, uses IAM role if not set)
     /// - AWS_SECRET_ACCESS_KEY: AWS credentials (optional)
     pub async fn create_object_store() -> Result<Arc<dyn ObjectStore>> {
-        let backend =
-            std::env::var("STORAGE_BACKEND").unwrap_or_else(|_| "memory".to_string());
+        let backend = std::env::var("STORAGE_BACKEND").unwrap_or_else(|_| "memory".to_string());
 
         match backend.as_str() {
             "memory" => {
@@ -33,12 +32,9 @@ impl ComponentFactory {
             }
             "s3" => {
                 let bucket = std::env::var("S3_BUCKET").map_err(|_| {
-                    crate::Error::Config(
-                        "S3_BUCKET required when STORAGE_BACKEND=s3".to_string(),
-                    )
+                    crate::Error::Config("S3_BUCKET required when STORAGE_BACKEND=s3".to_string())
                 })?;
-                let region = std::env::var("S3_REGION")
-                    .unwrap_or_else(|_| "us-east-1".to_string());
+                let region = std::env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".to_string());
 
                 info!(
                     "Using S3 object store: bucket={}, region={}",
@@ -81,8 +77,7 @@ impl ComponentFactory {
     pub async fn create_metadata_client(
         object_store: Arc<dyn ObjectStore>,
     ) -> Result<Arc<dyn MetadataClient>> {
-        let backend =
-            std::env::var("METADATA_BACKEND").unwrap_or_else(|_| "local".to_string());
+        let backend = std::env::var("METADATA_BACKEND").unwrap_or_else(|_| "local".to_string());
 
         match backend.as_str() {
             "local" => {
@@ -98,8 +93,8 @@ impl ComponentFactory {
                                 .to_string(),
                         )
                     })?;
-                let prefix = std::env::var("METADATA_PREFIX")
-                    .unwrap_or_else(|_| "metadata/".to_string());
+                let prefix =
+                    std::env::var("METADATA_PREFIX").unwrap_or_else(|_| "metadata/".to_string());
 
                 info!(
                     "Using S3MetadataClient: bucket={}, prefix={}",

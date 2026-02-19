@@ -11,7 +11,12 @@ use std::time::Duration;
 
 /// Sets up a test environment with a compactor and its dependencies.
 /// Returns the compactor, metadata client, shard monitor, and the ID of an initial shard.
-async fn setup_test_env() -> (Arc<Compactor>, Arc<dyn MetadataClient>, Arc<ShardMonitor>, String) {
+async fn setup_test_env() -> (
+    Arc<Compactor>,
+    Arc<dyn MetadataClient>,
+    Arc<ShardMonitor>,
+    String,
+) {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let metadata: Arc<dyn MetadataClient> = Arc::new(LocalMetadataClient::new());
     let storage_config = StorageConfig::default();
@@ -66,28 +71,46 @@ async fn setup_test_env() -> (Arc<Compactor>, Arc<dyn MetadataClient>, Arc<Shard
 async fn test_compactor_triggers_shard_split() {
     let (compactor, metadata, shard_monitor, hot_shard_id) = setup_test_env().await;
 
-    // Simulate high write traffic to the hot shard to trigger the monitor
+    // Simulate high write traffic to the hot shard.
+    // The monitor requires one evaluation to mark hot, then another after the
+    // detection window to trigger a split action.
     for _ in 0..20 {
         shard_monitor.record_write(&hot_shard_id, 500, Duration::from_millis(10));
     }
 
-    // Wait a moment for the rolling averages in the monitor to update
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Run the compactor's main service cycle, which includes the sharding cycle
+    // First cycle marks the shard as hot (no split yet).
     compactor.run_cycle().await.unwrap();
 
-    // Give the spawned split task time to execute
+    // Keep the shard hot across the detection window, then evaluate again.
     tokio::time::sleep(Duration::from_secs(2)).await;
+    for _ in 0..20 {
+        shard_monitor.record_write(&hot_shard_id, 500, Duration::from_millis(10));
+    }
+
+    // Second cycle should now trigger split orchestration.
+    compactor.run_cycle().await.unwrap();
+
+    // The split flow includes a dual-write warmup sleep before cutover.
+    // Poll until old shard reaches PendingDeletion instead of assuming a fixed delay.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let old_shard_meta = loop {
+        let meta = metadata
+            .get_shard_metadata(&hot_shard_id)
+            .await
+            .unwrap()
+            .unwrap();
+        if matches!(meta.state, ShardState::PendingDeletion { .. }) {
+            break meta;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            panic!("Old shard did not reach PendingDeletion before timeout");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
 
     // --- Assertions ---
 
     // 1. Check that the old shard is no longer active
-    let old_shard_meta = metadata
-        .get_shard_metadata(&hot_shard_id)
-        .await
-        .unwrap()
-        .unwrap();
     assert!(
         matches!(old_shard_meta.state, ShardState::PendingDeletion { .. }),
         "Old shard should be marked for deletion"

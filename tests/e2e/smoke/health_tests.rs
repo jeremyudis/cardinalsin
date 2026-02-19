@@ -36,7 +36,10 @@ async fn test_ingester_ready() {
         .await
         .expect("Ready request should succeed");
 
-    assert!(resp.status().is_success(), "Ready endpoint should return 2xx");
+    assert!(
+        resp.status().is_success(),
+        "Ready endpoint should return 2xx"
+    );
 
     let body = resp.text().await.expect("Should have response body");
     assert_eq!(body, "READY", "Ready endpoint should return 'READY'");
@@ -61,7 +64,10 @@ async fn test_query_ready() {
         .await
         .expect("Ready request should succeed");
 
-    assert!(resp.status().is_success(), "Ready endpoint should return 2xx");
+    assert!(
+        resp.status().is_success(),
+        "Ready endpoint should return 2xx"
+    );
 
     let body = resp.text().await.expect("Should have response body");
     assert_eq!(body, "READY", "Ready endpoint should return 'READY'");
@@ -85,7 +91,10 @@ async fn test_ingester_health_returns_ok() {
         .await
         .expect("Health request should succeed");
 
-    assert!(resp.status().is_success(), "Health endpoint should return 2xx");
+    assert!(
+        resp.status().is_success(),
+        "Health endpoint should return 2xx"
+    );
 
     let body = resp.text().await.expect("Should have response body");
     assert_eq!(body, "OK", "Health endpoint should return 'OK'");
@@ -109,7 +118,10 @@ async fn test_query_health_returns_ok() {
         .await
         .expect("Health request should succeed");
 
-    assert!(resp.status().is_success(), "Health endpoint should return 2xx");
+    assert!(
+        resp.status().is_success(),
+        "Health endpoint should return 2xx"
+    );
 
     let body = resp.text().await.expect("Should have response body");
     assert_eq!(body, "OK", "Health endpoint should return 'OK'");
