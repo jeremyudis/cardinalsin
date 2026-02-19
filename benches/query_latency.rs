@@ -94,6 +94,8 @@ fn benchmark_cache_hit(c: &mut Criterion) {
     });
 
     group.finish();
+    // Ensure foyer background tasks are shut down before runtime teardown.
+    rt.block_on(cache.clear());
 }
 
 fn benchmark_cache_miss(c: &mut Criterion) {
@@ -108,16 +110,18 @@ fn benchmark_cache_miss(c: &mut Criterion) {
         b.to_async(&rt).iter_batched(
             || {
                 let (config, dir) = create_cache_config();
-                let cache = rt.block_on(async { TieredCache::new(config).await.unwrap() });
                 let data_clone = data.clone();
-                (cache, data_clone, dir)
+                (config, data_clone, dir)
             },
-            |(cache, data_clone, _dir)| async move {
+            |(config, data_clone, _dir)| async move {
+                let cache = TieredCache::new(config).await.unwrap();
                 let result = cache
                     .get_or_fetch("test_key", || async move { Ok(data_clone) })
                     .await
                     .unwrap();
                 black_box(result);
+                // Explicit close avoids task-cancel panics during teardown in CI.
+                cache.clear().await;
             },
             criterion::BatchSize::SmallInput,
         );
