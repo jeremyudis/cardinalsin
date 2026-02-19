@@ -2,8 +2,8 @@
 
 use crate::{Error, Result};
 
-use arrow_array::RecordBatch;
 use arrow::compute::{concat_batches, sort_to_indices, take};
+use arrow_array::RecordBatch;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::sync::Arc;
@@ -41,14 +41,9 @@ impl ChunkMerger {
 
     /// Read a Parquet chunk from object storage
     async fn read_chunk(&self, path: &str) -> Result<Vec<RecordBatch>> {
-        let data = self.object_store
-            .get(&path.into())
-            .await?
-            .bytes()
-            .await?;
+        let data = self.object_store.get(&path.into()).await?.bytes().await?;
 
-        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?
-            .build()?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(data)?.build()?;
 
         let batches: Vec<RecordBatch> = reader
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -71,7 +66,7 @@ impl ChunkMerger {
         let sorted_columns: Vec<Arc<dyn arrow_array::Array>> = batch
             .columns()
             .iter()
-            .map(|col| take(col.as_ref(), &indices, None).map(Arc::from))
+            .map(|col| take(col.as_ref(), &indices, None))
             .collect::<std::result::Result<_, _>>()?;
 
         let sorted = RecordBatch::try_new(batch.schema(), sorted_columns)?;
@@ -82,15 +77,19 @@ impl ChunkMerger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::{Float64Array, TimestampNanosecondArray};
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use bytes::Bytes;
     use object_store::memory::InMemory;
-    use arrow_array::{Float64Array, TimestampNanosecondArray};
-    use arrow_schema::{Schema, Field, DataType, TimeUnit};
     use parquet::arrow::ArrowWriter;
 
     async fn create_test_chunk(store: &InMemory, path: &str, timestamps: Vec<i64>) -> Result<()> {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                false,
+            ),
             Field::new("value_f64", DataType::Float64, true),
         ]));
 
@@ -120,14 +119,18 @@ mod tests {
         let store = Arc::new(InMemory::new());
 
         // Create two chunks
-        create_test_chunk(&store, "chunk1.parquet", vec![1000, 2000, 3000]).await.unwrap();
-        create_test_chunk(&store, "chunk2.parquet", vec![4000, 5000, 6000]).await.unwrap();
+        create_test_chunk(&store, "chunk1.parquet", vec![1000, 2000, 3000])
+            .await
+            .unwrap();
+        create_test_chunk(&store, "chunk2.parquet", vec![4000, 5000, 6000])
+            .await
+            .unwrap();
 
         let merger = ChunkMerger::new(store);
-        let merged = merger.merge(&[
-            "chunk1.parquet".to_string(),
-            "chunk2.parquet".to_string(),
-        ]).await.unwrap();
+        let merged = merger
+            .merge(&["chunk1.parquet".to_string(), "chunk2.parquet".to_string()])
+            .await
+            .unwrap();
 
         assert_eq!(merged.num_rows(), 6);
     }
@@ -137,7 +140,9 @@ mod tests {
         let store = Arc::new(InMemory::new());
 
         // Create chunk with unsorted timestamps
-        create_test_chunk(&store, "unsorted.parquet", vec![3000, 1000, 2000]).await.unwrap();
+        create_test_chunk(&store, "unsorted.parquet", vec![3000, 1000, 2000])
+            .await
+            .unwrap();
 
         let merger = ChunkMerger::new(store.clone());
         let batches = merger.read_chunk("unsorted.parquet").await.unwrap();

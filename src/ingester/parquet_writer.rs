@@ -1,11 +1,11 @@
 //! Parquet writer with optimal settings for time-series data
 
+use crate::Result;
 use arrow_array::RecordBatch;
 use bytes::Bytes;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
-use crate::Result;
 
 /// Parquet writer optimized for time-series metrics
 pub struct ParquetWriter {
@@ -56,11 +56,8 @@ impl ParquetWriter {
         let mut buffer = Vec::new();
 
         {
-            let mut writer = ArrowWriter::try_new(
-                &mut buffer,
-                batch.schema(),
-                Some(self.props.clone()),
-            )?;
+            let mut writer =
+                ArrowWriter::try_new(&mut buffer, batch.schema(), Some(self.props.clone()))?;
 
             writer.write(batch)?;
             writer.close()?;
@@ -78,11 +75,8 @@ impl ParquetWriter {
         let mut buffer = Vec::new();
 
         {
-            let mut writer = ArrowWriter::try_new(
-                &mut buffer,
-                batches[0].schema(),
-                Some(self.props.clone()),
-            )?;
+            let mut writer =
+                ArrowWriter::try_new(&mut buffer, batches[0].schema(), Some(self.props.clone()))?;
 
             for batch in batches {
                 writer.write(batch)?;
@@ -105,13 +99,17 @@ impl Default for ParquetWriter {
 mod tests {
     use super::*;
     use arrow_array::{Float64Array, StringArray, TimestampNanosecondArray};
-    use arrow_schema::{Schema, Field, DataType, TimeUnit};
-    use std::sync::Arc;
+    use arrow_schema::{DataType, Field, Schema, TimeUnit};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::sync::Arc;
 
     fn create_test_batch() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                false,
+            ),
             Field::new("metric_name", DataType::Utf8, false),
             Field::new("value_f64", DataType::Float64, true),
         ]));
@@ -128,7 +126,8 @@ mod tests {
                 Arc::new(StringArray::from(names)),
                 Arc::new(Float64Array::from(values)),
             ],
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -159,13 +158,19 @@ mod tests {
 
         // Parquet files have metadata overhead, but for larger batches
         // compression should provide benefits
-        println!("Logical size: {} bytes, Parquet size: {} bytes", logical_size, bytes.len());
+        println!(
+            "Logical size: {} bytes, Parquet size: {} bytes",
+            logical_size,
+            bytes.len()
+        );
 
         // For small test batches, Parquet overhead can dominate
         // Just verify the file is reasonably sized (under 2x logical size)
         assert!(
             bytes.len() < logical_size * 3,
-            "Parquet file unexpectedly large: {} vs logical {}", bytes.len(), logical_size
+            "Parquet file unexpectedly large: {} vs logical {}",
+            bytes.len(),
+            logical_size
         );
     }
 }

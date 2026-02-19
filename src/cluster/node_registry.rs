@@ -228,15 +228,13 @@ impl NodeRegistry {
                         );
                         node.status = NodeStatus::Failed;
                     }
-                } else if elapsed > self.timeout / 2 {
-                    if matches!(node.status, NodeStatus::Healthy) {
-                        warn!(
-                            "Node {} missed heartbeat ({}s), marking as suspected",
-                            node.id,
-                            elapsed.as_secs()
-                        );
-                        node.status = NodeStatus::Suspected;
-                    }
+                } else if elapsed > self.timeout / 2 && matches!(node.status, NodeStatus::Healthy) {
+                    warn!(
+                        "Node {} missed heartbeat ({}s), marking as suspected",
+                        node.id,
+                        elapsed.as_secs()
+                    );
+                    node.status = NodeStatus::Suspected;
                 }
             }
         }
@@ -247,7 +245,10 @@ impl NodeRegistry {
         let nodes = self.nodes.read().await;
 
         let total_nodes = nodes.len();
-        let healthy_nodes = nodes.values().filter(|n| matches!(n.status, NodeStatus::Healthy)).count();
+        let healthy_nodes = nodes
+            .values()
+            .filter(|n| matches!(n.status, NodeStatus::Healthy))
+            .count();
         let ingester_nodes = nodes
             .values()
             .filter(|n| matches!(n.node_type, NodeType::Ingester | NodeType::Combined))

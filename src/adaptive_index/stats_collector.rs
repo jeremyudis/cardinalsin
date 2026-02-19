@@ -100,7 +100,8 @@ impl QueryStatsCollector {
         selectivity: f64,
         query_time: Duration,
     ) {
-        let mut entry = self.stats
+        let mut entry = self
+            .stats
             .entry(tenant_id.clone())
             .or_insert_with(|| TenantQueryStats::new(tenant_id.clone()));
 
@@ -110,7 +111,8 @@ impl QueryStatsCollector {
         }
 
         // Update column stats
-        let col_stats = entry.column_filter_stats
+        let col_stats = entry
+            .column_filter_stats
             .entry(column_name.to_string())
             .or_default();
 
@@ -124,7 +126,8 @@ impl QueryStatsCollector {
 
     /// Record a GROUP BY usage
     pub fn record_groupby(&self, tenant_id: &TenantId, columns: &[String]) {
-        let mut entry = self.stats
+        let mut entry = self
+            .stats
             .entry(tenant_id.clone())
             .or_insert_with(|| TenantQueryStats::new(tenant_id.clone()));
 
@@ -134,12 +137,7 @@ impl QueryStatsCollector {
     }
 
     /// Update cardinality estimate for a column
-    pub fn update_cardinality(
-        &self,
-        tenant_id: &TenantId,
-        column_name: &str,
-        cardinality: u64,
-    ) {
+    pub fn update_cardinality(&self, tenant_id: &TenantId, column_name: &str, cardinality: u64) {
         if let Some(mut entry) = self.stats.get_mut(tenant_id) {
             if let Some(col_stats) = entry.column_filter_stats.get_mut(column_name) {
                 col_stats.cardinality_estimate = cardinality;
@@ -229,12 +227,7 @@ mod tests {
 
         // Record multiple samples
         for i in 0..100 {
-            collector.record_filter(
-                &tenant,
-                "host",
-                i as f64 / 100.0,
-                Duration::from_millis(10),
-            );
+            collector.record_filter(&tenant, "host", i as f64 / 100.0, Duration::from_millis(10));
         }
 
         let stats = collector.get_tenant_stats(&tenant).unwrap();

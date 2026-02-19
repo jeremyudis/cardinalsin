@@ -3,13 +3,13 @@
 //! These tests verify that the 5-phase shard split process works correctly
 //! with dual-write support and zero data loss.
 
-use cardinalsin::ingester::ChunkMetadata;
-use cardinalsin::metadata::{LocalMetadataClient, MetadataClient};
-use cardinalsin::sharding::{ShardSplitter, ShardMetadata, ShardState, ReplicaInfo, SplitPhase};
-use object_store::memory::InMemory;
-use object_store::ObjectStore;
 use arrow::array::{Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
+use cardinalsin::ingester::ChunkMetadata;
+use cardinalsin::metadata::{LocalMetadataClient, MetadataClient};
+use cardinalsin::sharding::{ReplicaInfo, ShardMetadata, ShardSplitter, ShardState, SplitPhase};
+use object_store::memory::InMemory;
+use object_store::ObjectStore;
 use std::sync::Arc;
 
 /// Helper to create a test shard
@@ -66,8 +66,14 @@ async fn test_phase1_preparation() {
 
     // Verify new shard IDs are generated
     assert_ne!(shard_a, shard_b, "New shards should have different IDs");
-    assert_ne!(shard_a, shard.shard_id, "New shard A should be different from original");
-    assert_ne!(shard_b, shard.shard_id, "New shard B should be different from original");
+    assert_ne!(
+        shard_a, shard.shard_id,
+        "New shard A should be different from original"
+    );
+    assert_ne!(
+        shard_b, shard.shard_id,
+        "New shard B should be different from original"
+    );
 }
 
 /// Test Phase 2: Dual-write state is recorded
@@ -83,7 +89,11 @@ async fn test_phase2_dualwrite_state() {
 
     // Start split (Phase 1-2)
     metadata
-        .start_split(&shard.shard_id, vec![shard_a.clone(), shard_b.clone()], split_point.clone())
+        .start_split(
+            &shard.shard_id,
+            vec![shard_a.clone(), shard_b.clone()],
+            split_point.clone(),
+        )
         .await
         .unwrap();
 
@@ -118,8 +128,8 @@ async fn test_phase3_backfill() {
     let batch = create_test_batch(vec![1000, 2000, 3000, 4000, 5000]);
     let parquet_bytes = {
         use parquet::arrow::ArrowWriter;
-        use parquet::file::properties::WriterProperties;
         use parquet::basic::{Compression, ZstdLevel};
+        use parquet::file::properties::WriterProperties;
 
         let mut buffer = Vec::new();
         let props = WriterProperties::builder()
@@ -147,20 +157,31 @@ async fn test_phase3_backfill() {
         row_count: 5,
         size_bytes: 1024,
     };
-    metadata.register_chunk(&chunk_path, &chunk_meta).await.unwrap();
+    metadata
+        .register_chunk(&chunk_path, &chunk_meta)
+        .await
+        .unwrap();
 
     // Start split
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
     let split_point = 3000i64.to_be_bytes().to_vec(); // Split at timestamp 3000
 
     metadata
-        .start_split(&shard.shard_id, vec![shard_a.clone(), shard_b.clone()], split_point.clone())
+        .start_split(
+            &shard.shard_id,
+            vec![shard_a.clone(), shard_b.clone()],
+            split_point.clone(),
+        )
         .await
         .unwrap();
 
     // Run backfill
     splitter
-        .run_backfill(&shard.shard_id, &[shard_a.clone(), shard_b.clone()], &split_point)
+        .run_backfill(
+            &shard.shard_id,
+            &[shard_a.clone(), shard_b.clone()],
+            &split_point,
+        )
         .await
         .unwrap();
 
@@ -171,7 +192,10 @@ async fn test_phase3_backfill() {
         .unwrap()
         .expect("Split state should exist");
 
-    assert_eq!(split_state.backfill_progress, 1.0, "Backfill should be 100% complete");
+    assert_eq!(
+        split_state.backfill_progress, 1.0,
+        "Backfill should be 100% complete"
+    );
     assert_eq!(split_state.phase, SplitPhase::Backfill);
 
     // Verify chunks were created for new shards
@@ -179,7 +203,10 @@ async fn test_phase3_backfill() {
     let chunks_b = metadata.get_chunks_for_shard(&shard_b).await.unwrap();
 
     // Both shards should have data (timestamps split at 3000)
-    assert!(!chunks_a.is_empty() || !chunks_b.is_empty(), "New shards should have chunks");
+    assert!(
+        !chunks_a.is_empty() || !chunks_b.is_empty(),
+        "New shards should have chunks"
+    );
 }
 
 /// Test Phase 4: Cutover is atomic
@@ -199,7 +226,11 @@ async fn test_phase4_cutover() {
 
     // Set up split state with 100% backfill
     metadata
-        .start_split(&shard.shard_id, vec![shard_a.clone(), shard_b.clone()], split_point)
+        .start_split(
+            &shard.shard_id,
+            vec![shard_a.clone(), shard_b.clone()],
+            split_point,
+        )
         .await
         .unwrap();
 
@@ -213,7 +244,10 @@ async fn test_phase4_cutover() {
 
     // Verify split is complete
     let split_state = metadata.get_split_state(&shard.shard_id).await.unwrap();
-    assert!(split_state.is_none(), "Split state should be removed after cutover");
+    assert!(
+        split_state.is_none(),
+        "Split state should be removed after cutover"
+    );
 
     // Verify old shard is fenced from new writes and new shards are active
     let old = metadata
@@ -327,7 +361,10 @@ async fn test_phase5_cleanup() {
         row_count: 100,
         size_bytes: 1024,
     };
-    metadata.register_chunk(&chunk_path, &chunk_meta).await.unwrap();
+    metadata
+        .register_chunk(&chunk_path, &chunk_meta)
+        .await
+        .unwrap();
 
     // Execute cleanup with short grace period
     splitter
@@ -341,7 +378,10 @@ async fn test_phase5_cleanup() {
 
     // Verify chunk is removed from object store
     let result = object_store.get(&chunk_path.as_str().into()).await;
-    assert!(result.is_err(), "Old chunk should be removed from object store");
+    assert!(
+        result.is_err(),
+        "Old chunk should be removed from object store"
+    );
 }
 
 /// Test full 5-phase split execution
@@ -363,8 +403,8 @@ async fn test_full_split_execution() {
     let batch = create_test_batch(vec![1000, 2000, 3000, 4000]);
     let parquet_bytes = {
         use parquet::arrow::ArrowWriter;
-        use parquet::file::properties::WriterProperties;
         use parquet::basic::{Compression, ZstdLevel};
+        use parquet::file::properties::WriterProperties;
 
         let mut buffer = Vec::new();
         let props = WriterProperties::builder()
@@ -390,7 +430,10 @@ async fn test_full_split_execution() {
         row_count: 4,
         size_bytes: 1024,
     };
-    metadata.register_chunk(&chunk_path, &chunk_meta).await.unwrap();
+    metadata
+        .register_chunk(&chunk_path, &chunk_meta)
+        .await
+        .unwrap();
 
     // Execute full split
     let result = splitter.execute_split_with_monitoring(&shard).await;
@@ -459,15 +502,16 @@ async fn test_backfill_progress_tracking() {
         let batch = create_test_batch(vec![i * 1000, i * 1000 + 500]);
         let parquet_bytes = {
             use parquet::arrow::ArrowWriter;
-            use parquet::file::properties::WriterProperties;
             use parquet::basic::{Compression, ZstdLevel};
+            use parquet::file::properties::WriterProperties;
 
             let mut buffer = Vec::new();
             let props = WriterProperties::builder()
                 .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
                 .build();
 
-            let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), Some(props)).unwrap();
+            let mut writer =
+                ArrowWriter::try_new(&mut buffer, batch.schema(), Some(props)).unwrap();
             writer.write(&batch).unwrap();
             writer.close().unwrap();
             buffer
@@ -486,14 +530,21 @@ async fn test_backfill_progress_tracking() {
             row_count: 2,
             size_bytes: 1024,
         };
-        metadata.register_chunk(&chunk_path, &chunk_meta).await.unwrap();
+        metadata
+            .register_chunk(&chunk_path, &chunk_meta)
+            .await
+            .unwrap();
     }
 
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
     let split_point = 3000i64.to_be_bytes().to_vec();
 
     metadata
-        .start_split(&shard.shard_id, vec![shard_a.clone(), shard_b.clone()], split_point.clone())
+        .start_split(
+            &shard.shard_id,
+            vec![shard_a.clone(), shard_b.clone()],
+            split_point.clone(),
+        )
         .await
         .unwrap();
 

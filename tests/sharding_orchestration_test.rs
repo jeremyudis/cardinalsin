@@ -11,7 +11,12 @@ use std::time::Duration;
 
 /// Sets up a test environment with a compactor and its dependencies.
 /// Returns the compactor, metadata client, shard monitor, and the ID of an initial shard.
-async fn setup_test_env() -> (Arc<Compactor>, Arc<dyn MetadataClient>, Arc<ShardMonitor>, String) {
+async fn setup_test_env() -> (
+    Arc<Compactor>,
+    Arc<dyn MetadataClient>,
+    Arc<ShardMonitor>,
+    String,
+) {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let metadata: Arc<dyn MetadataClient> = Arc::new(LocalMetadataClient::new());
     let storage_config = StorageConfig::default();

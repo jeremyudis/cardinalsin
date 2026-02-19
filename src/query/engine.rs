@@ -6,14 +6,14 @@ use crate::metadata::TimeRange;
 use crate::{Error, Result};
 
 use arrow_array::RecordBatch;
-use datafusion::prelude::*;
-use datafusion::datasource::listing::{
-    ListingTable, ListingTableConfig, ListingTableUrl, ListingOptions,
-};
 use datafusion::datasource::file_format::parquet::ParquetFormat;
+use datafusion::datasource::listing::{
+    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
+};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{Expr, LogicalPlan, Operator};
+use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
@@ -31,15 +31,9 @@ pub struct QueryEngine {
 
 impl QueryEngine {
     /// Create a new query engine
-    pub async fn new(
-        object_store: Arc<dyn ObjectStore>,
-        cache: Arc<TieredCache>,
-    ) -> Result<Self> {
+    pub async fn new(object_store: Arc<dyn ObjectStore>, cache: Arc<TieredCache>) -> Result<Self> {
         // Wrap object store with caching layer
-        let cached_store = Arc::new(CachedObjectStore::new(
-            object_store.clone(),
-            cache.clone(),
-        ));
+        let cached_store = Arc::new(CachedObjectStore::new(object_store.clone(), cache.clone()));
 
         // Configure runtime environment
         let runtime_env = RuntimeEnvBuilder::new()
@@ -48,11 +42,9 @@ impl QueryEngine {
 
         // Register object store with DataFusion for s3:// URLs
         // DataFusion uses the URL scheme to look up the appropriate ObjectStore
-        let s3_url = url::Url::parse("s3://bucket").map_err(|e| {
-            Error::Config(format!("Failed to parse S3 URL: {}", e))
-        })?;
-        runtime_env
-            .register_object_store(&s3_url, cached_store.clone());
+        let s3_url = url::Url::parse("s3://bucket")
+            .map_err(|e| Error::Config(format!("Failed to parse S3 URL: {}", e)))?;
+        runtime_env.register_object_store(&s3_url, cached_store.clone());
 
         // Create session config with optimizations
         let session_config = SessionConfig::new()
@@ -113,7 +105,9 @@ impl QueryEngine {
             .with_listing_options(listing_options)
             .infer_schema(&self.ctx.state())
             .await
-            .map_err(|e| Error::Internal(format!("Failed to infer schema for '{}': {}", path, e)))?;
+            .map_err(|e| {
+                Error::Internal(format!("Failed to infer schema for '{}': {}", path, e))
+            })?;
 
         let table = ListingTable::try_new(config)?;
         self.ctx.register_table(&table_name, Arc::new(table))?;
@@ -225,7 +219,7 @@ impl QueryEngine {
                 Self::extract_columns_from_expr(&in_list.expr, columns);
             }
             Expr::Not(not) => {
-                Self::extract_columns_from_expr(&not, columns);
+                Self::extract_columns_from_expr(not, columns);
             }
             _ => {}
         }
@@ -263,7 +257,11 @@ impl QueryEngine {
     }
 
     /// Recursively extract time bounds from a logical plan
-    fn extract_time_bounds(plan: &LogicalPlan, min_time: &mut Option<i64>, max_time: &mut Option<i64>) {
+    fn extract_time_bounds(
+        plan: &LogicalPlan,
+        min_time: &mut Option<i64>,
+        max_time: &mut Option<i64>,
+    ) {
         match plan {
             LogicalPlan::Filter(filter) => {
                 Self::extract_time_from_expr(&filter.predicate, min_time, max_time);
@@ -355,7 +353,7 @@ impl QueryEngine {
             Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) => Some(*v * 1000),
             Expr::Literal(ScalarValue::TimestampMillisecond(Some(v), _)) => Some(*v * 1_000_000),
             Expr::Literal(ScalarValue::TimestampSecond(Some(v), _)) => Some(*v * 1_000_000_000),
-            _ => None
+            _ => None,
         }
     }
 
@@ -367,8 +365,6 @@ impl QueryEngine {
         &self,
         sql: &str,
     ) -> Result<Vec<crate::metadata::predicates::ColumnPredicate>> {
-        
-
         let df = self.ctx.sql(sql).await?;
         let plan = df.logical_plan();
 
@@ -383,8 +379,6 @@ impl QueryEngine {
         plan: &LogicalPlan,
         predicates: &mut Vec<crate::metadata::predicates::ColumnPredicate>,
     ) {
-        
-
         match plan {
             LogicalPlan::Filter(filter) => {
                 if let Some(pred) = Self::convert_expr_to_predicate(&filter.predicate) {
@@ -504,7 +498,9 @@ impl QueryEngine {
     }
 
     /// Convert a DataFusion scalar expression to a PredicateValue
-    fn convert_scalar_to_predicate_value(expr: &Expr) -> Option<crate::metadata::predicates::PredicateValue> {
+    fn convert_scalar_to_predicate_value(
+        expr: &Expr,
+    ) -> Option<crate::metadata::predicates::PredicateValue> {
         use crate::metadata::predicates::PredicateValue;
 
         match expr {

@@ -169,7 +169,9 @@ impl ShardAssignment {
             let nodes = self.node_registry.get_healthy_ingesters().await;
 
             if nodes.is_empty() {
-                return Err(crate::Error::Internal("No healthy ingester nodes".to_string()));
+                return Err(crate::Error::Internal(
+                    "No healthy ingester nodes".to_string(),
+                ));
             }
 
             for node in &nodes {
@@ -186,7 +188,9 @@ impl ShardAssignment {
         let nodes = self.node_registry.get_healthy_ingesters().await;
 
         if nodes.is_empty() {
-            return Err(crate::Error::Internal("No healthy ingester nodes".to_string()));
+            return Err(crate::Error::Internal(
+                "No healthy ingester nodes".to_string(),
+            ));
         }
 
         // Simple: pick node with fewest shards
@@ -203,7 +207,9 @@ impl ShardAssignment {
         let nodes = self.node_registry.get_healthy_ingesters().await;
 
         if nodes.is_empty() {
-            return Err(crate::Error::Internal("No healthy ingester nodes".to_string()));
+            return Err(crate::Error::Internal(
+                "No healthy ingester nodes".to_string(),
+            ));
         }
 
         // Pick least-loaded node

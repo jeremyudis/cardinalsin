@@ -17,7 +17,10 @@ impl BroadcastChannel {
     }
 
     /// Send a batch to all subscribers
-    pub fn send(&self, batch: RecordBatch) -> Result<usize, broadcast::error::SendError<RecordBatch>> {
+    pub fn send(
+        &self,
+        batch: RecordBatch,
+    ) -> Result<usize, broadcast::error::SendError<RecordBatch>> {
         self.sender.send(batch)
     }
 
@@ -43,8 +46,8 @@ impl Clone for BroadcastChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Int64Array, Float64Array};
-    use arrow_schema::{Schema, Field, DataType};
+    use arrow_array::{Float64Array, Int64Array};
+    use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
     fn create_test_batch() -> RecordBatch {
@@ -59,7 +62,8 @@ mod tests {
                 Arc::new(Int64Array::from(vec![1, 2, 3])),
                 Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
             ],
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 //! Query latency benchmark
 
-use cardinalsin::query::{TieredCache, CacheConfig};
+use cardinalsin::query::{CacheConfig, TieredCache};
 
 use arrow_array::{Float64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
@@ -74,17 +74,21 @@ fn benchmark_cache_hit(c: &mut Criterion) {
         let cache = TieredCache::new(config).await.unwrap();
         let data_clone = data.clone();
         // Pre-populate cache by fetching once
-        let _ = cache.get_or_fetch("test_key", || async move {
-            Ok(data_clone)
-        }).await.unwrap();
+        let _ = cache
+            .get_or_fetch("test_key", || async move { Ok(data_clone) })
+            .await
+            .unwrap();
         cache
     });
 
     group.bench_function("l1_hit", |b| {
         b.to_async(&rt).iter(|| async {
-            let result = cache.get_or_fetch("test_key", || async {
-                panic!("Should not fetch - cache should be populated");
-            }).await.unwrap();
+            let result = cache
+                .get_or_fetch("test_key", || async {
+                    panic!("Should not fetch - cache should be populated");
+                })
+                .await
+                .unwrap();
             black_box(result);
         });
     });
@@ -104,16 +108,15 @@ fn benchmark_cache_miss(c: &mut Criterion) {
         b.to_async(&rt).iter_batched(
             || {
                 let (config, dir) = create_cache_config();
-                let cache = rt.block_on(async {
-                    TieredCache::new(config).await.unwrap()
-                });
+                let cache = rt.block_on(async { TieredCache::new(config).await.unwrap() });
                 let data_clone = data.clone();
                 (cache, data_clone, dir)
             },
             |(cache, data_clone, _dir)| async move {
-                let result = cache.get_or_fetch("test_key", || async move {
-                    Ok(data_clone)
-                }).await.unwrap();
+                let result = cache
+                    .get_or_fetch("test_key", || async move { Ok(data_clone) })
+                    .await
+                    .unwrap();
                 black_box(result);
             },
             criterion::BatchSize::SmallInput,
@@ -123,10 +126,6 @@ fn benchmark_cache_miss(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    benchmark_cache_hit,
-    benchmark_cache_miss,
-);
+criterion_group!(benches, benchmark_cache_hit, benchmark_cache_miss,);
 
 criterion_main!(benches);

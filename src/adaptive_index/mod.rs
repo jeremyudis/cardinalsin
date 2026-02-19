@@ -3,15 +3,17 @@
 //! Automatically detects tenant query patterns and promotes common dimensions
 //! to dedicated indexed columns.
 
-mod stats_collector;
-mod recommender;
-mod lifecycle;
 mod column_promoter;
+mod lifecycle;
+mod recommender;
+mod stats_collector;
 
-pub use stats_collector::{QueryStatsCollector, TenantQueryStats, ColumnStats};
-pub use recommender::{IndexRecommendationEngine, IndexRecommendation, IndexType, TenantIndexConfig};
-pub use lifecycle::{IndexLifecycleManager, IndexVisibility, IndexMetadata};
 pub use column_promoter::ColumnPromoter;
+pub use lifecycle::{IndexLifecycleManager, IndexMetadata, IndexVisibility};
+pub use recommender::{
+    IndexRecommendation, IndexRecommendationEngine, IndexType, TenantIndexConfig,
+};
+pub use stats_collector::{ColumnStats, QueryStatsCollector, TenantQueryStats};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,7 +47,7 @@ impl Default for AdaptiveIndexConfig {
             visibility_check_delay: Duration::from_secs(48 * 3600), // 48 hours
             unused_days_threshold: 30,
             removal_grace_period: Duration::from_secs(7 * 24 * 3600), // 7 days
-            stats_window: Duration::from_secs(48 * 3600), // 48 hours
+            stats_window: Duration::from_secs(48 * 3600),             // 48 hours
         }
     }
 }
@@ -165,11 +167,15 @@ impl AdaptiveIndexController {
 
         // Create indexes as invisible
         for rec in recommendations {
-            match self.lifecycle_manager.create_invisible_index(
-                rec.tenant_id.clone(),
-                rec.column_name.clone(),
-                rec.index_type.clone(),
-            ).await {
+            match self
+                .lifecycle_manager
+                .create_invisible_index(
+                    rec.tenant_id.clone(),
+                    rec.column_name.clone(),
+                    rec.index_type,
+                )
+                .await
+            {
                 Ok(index_id) => {
                     info!(
                         tenant = %rec.tenant_id,
@@ -201,7 +207,8 @@ impl AdaptiveIndexController {
         selectivity: f64,
         query_time: Duration,
     ) {
-        self.stats_collector.record_filter(tenant_id, column_name, selectivity, query_time);
+        self.stats_collector
+            .record_filter(tenant_id, column_name, selectivity, query_time);
     }
 
     /// Record a GROUP BY usage (called by query engine)

@@ -1,13 +1,13 @@
 //! Streaming query support (historical + live)
 
 use super::QueryEngine;
-use crate::metadata::MetadataClient;
 use crate::ingester::FilteredReceiver;
+use crate::metadata::MetadataClient;
 use crate::Result;
 
-use arrow_array::{RecordBatch, BooleanArray};
-use arrow_array::cast::AsArray;
 use arrow::compute::filter_record_batch;
+use arrow_array::cast::AsArray;
+use arrow_array::{BooleanArray, RecordBatch};
 use sqlparser::ast::{BinaryOperator, Expr, SetExpr, Statement, Value};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -69,10 +69,7 @@ impl StreamingQueryExecutor {
     }
 
     /// Execute a streaming query returning a channel receiver
-    pub async fn execute(
-        self,
-        sql: &str,
-    ) -> Result<mpsc::Receiver<Result<RecordBatch>>> {
+    pub async fn execute(self, sql: &str) -> Result<mpsc::Receiver<Result<RecordBatch>>> {
         let (tx, rx) = mpsc::channel(100);
 
         // Extract time range and set merge point to now
@@ -86,7 +83,10 @@ impl StreamingQueryExecutor {
         let predicates = self.engine.extract_column_predicates(sql).await?;
 
         // Get historical chunks with predicate pushdown
-        let chunks = self.metadata.get_chunks_with_predicates(time_range, &predicates).await?;
+        let chunks = self
+            .metadata
+            .get_chunks_with_predicates(time_range, &predicates)
+            .await?;
 
         // Register chunks
         for chunk in &chunks {
@@ -348,7 +348,9 @@ impl QueryFilter {
 
         // Apply timestamp filter - only include rows after merge point
         if let Some(ts_col) = batch.column_by_name("timestamp") {
-            if let Some(ts_array) = ts_col.as_primitive_opt::<arrow_array::types::TimestampNanosecondType>() {
+            if let Some(ts_array) =
+                ts_col.as_primitive_opt::<arrow_array::types::TimestampNanosecondType>()
+            {
                 for (i, val) in ts_array.iter().enumerate() {
                     if let Some(ts) = val {
                         if ts < merge_timestamp {
@@ -356,7 +358,9 @@ impl QueryFilter {
                         }
                     }
                 }
-            } else if let Some(ts_array) = ts_col.as_primitive_opt::<arrow_array::types::Int64Type>() {
+            } else if let Some(ts_array) =
+                ts_col.as_primitive_opt::<arrow_array::types::Int64Type>()
+            {
                 for (i, val) in ts_array.iter().enumerate() {
                     if let Some(ts) = val {
                         if ts < merge_timestamp {
@@ -385,7 +389,9 @@ impl QueryFilter {
                         }
                     }
                     PredicateValue::Int(expected) => {
-                        if let Some(int_array) = col.as_primitive_opt::<arrow_array::types::Int64Type>() {
+                        if let Some(int_array) =
+                            col.as_primitive_opt::<arrow_array::types::Int64Type>()
+                        {
                             for (i, val) in int_array.iter().enumerate() {
                                 if mask[i] {
                                     match (&pred.op, val) {
@@ -402,12 +408,18 @@ impl QueryFilter {
                         }
                     }
                     PredicateValue::Float(expected) => {
-                        if let Some(float_array) = col.as_primitive_opt::<arrow_array::types::Float64Type>() {
+                        if let Some(float_array) =
+                            col.as_primitive_opt::<arrow_array::types::Float64Type>()
+                        {
                             for (i, val) in float_array.iter().enumerate() {
                                 if mask[i] {
                                     match (&pred.op, val) {
-                                        (PredicateOp::Eq, Some(v)) => mask[i] = (v - expected).abs() < f64::EPSILON,
-                                        (PredicateOp::Ne, Some(v)) => mask[i] = (v - expected).abs() >= f64::EPSILON,
+                                        (PredicateOp::Eq, Some(v)) => {
+                                            mask[i] = (v - expected).abs() < f64::EPSILON
+                                        }
+                                        (PredicateOp::Ne, Some(v)) => {
+                                            mask[i] = (v - expected).abs() >= f64::EPSILON
+                                        }
                                         (PredicateOp::Lt, Some(v)) => mask[i] = v < *expected,
                                         (PredicateOp::Le, Some(v)) => mask[i] = v <= *expected,
                                         (PredicateOp::Gt, Some(v)) => mask[i] = v > *expected,

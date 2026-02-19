@@ -15,8 +15,7 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|_| std::env::var("S3_BUCKET"))
         .expect("METADATA_BUCKET or S3_BUCKET environment variable required");
 
-    let prefix = std::env::var("METADATA_PREFIX")
-        .unwrap_or_else(|_| "metadata/".to_string());
+    let prefix = std::env::var("METADATA_PREFIX").unwrap_or_else(|_| "metadata/".to_string());
 
     println!("Rebuilding time index...");
     println!("  Bucket: {}", bucket);

@@ -164,7 +164,8 @@ impl ShardMonitor {
 
     /// Record a write operation
     pub fn record_write(&self, shard_id: &ShardId, bytes: usize, latency: Duration) {
-        let mut entry = self.metrics
+        let mut entry = self
+            .metrics
             .entry(shard_id.clone())
             .or_insert_with(|| ShardMetrics::new(self.config.detection_window));
         entry.record_write(bytes, latency);
@@ -172,7 +173,8 @@ impl ShardMonitor {
 
     /// Record CPU utilization
     pub fn record_cpu(&self, shard_id: &ShardId, utilization: f64) {
-        let mut entry = self.metrics
+        let mut entry = self
+            .metrics
             .entry(shard_id.clone())
             .or_insert_with(|| ShardMetrics::new(self.config.detection_window));
         entry.record_cpu(utilization);
@@ -187,7 +189,8 @@ impl ShardMonitor {
             let metrics = entry.value_mut();
 
             // Use rate_per_second for QPS, avg for other metrics
-            let is_hot = metrics.write_qps.rate_per_second() > self.config.write_qps_threshold as f64
+            let is_hot = metrics.write_qps.rate_per_second()
+                > self.config.write_qps_threshold as f64
                 || metrics.bytes_per_sec.avg() > self.config.bytes_threshold as f64
                 || metrics.cpu_utilization.avg() > self.config.cpu_threshold
                 || metrics.p99_latency.avg() > self.config.latency_threshold.as_secs_f64();

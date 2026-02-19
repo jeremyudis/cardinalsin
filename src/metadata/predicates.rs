@@ -96,7 +96,9 @@ impl ColumnPredicate {
             ColumnPredicate::In(col, values) => {
                 if let Some(stats) = column_stats.get(col) {
                     // Include chunk if any value in the list overlaps [min, max]
-                    values.iter().any(|v| Self::value_in_range(v, &stats.min, &stats.max))
+                    values
+                        .iter()
+                        .any(|v| Self::value_in_range(v, &stats.min, &stats.max))
                 } else {
                     true
                 }
@@ -164,7 +166,7 @@ impl ColumnPredicate {
                 }
             }
             PredicateValue::Boolean(_) => true, // Can't filter booleans effectively
-            PredicateValue::Null => true,        // Conservative: include nulls
+            PredicateValue::Null => true,       // Conservative: include nulls
         }
     }
 

@@ -45,7 +45,9 @@ impl DistributedQueryRouter {
         let nodes = self.nodes.get_healthy_query_nodes().await;
 
         if nodes.is_empty() {
-            return Err(crate::Error::Internal("No healthy query nodes available".to_string()));
+            return Err(crate::Error::Internal(
+                "No healthy query nodes available".to_string(),
+            ));
         }
 
         debug!("Executing query across {} nodes", nodes.len());
@@ -69,9 +71,8 @@ impl DistributedQueryRouter {
             let tenant_id = tenant_id.to_string();
             let node = node.clone();
 
-            let handle = tokio::spawn(async move {
-                Self::execute_on_node(&node, &sql, &tenant_id).await
-            });
+            let handle =
+                tokio::spawn(async move { Self::execute_on_node(&node, &sql, &tenant_id).await });
 
             handles.push(handle);
         }
@@ -113,7 +114,10 @@ impl DistributedQueryRouter {
     ) -> Result<Vec<RecordBatch>> {
         let url = format!("http://{}/api/v1/query", node.addr);
 
-        debug!("Executing query on node {} at {} (TODO: implement HTTP query)", node.id, url);
+        debug!(
+            "Executing query on node {} at {} (TODO: implement HTTP query)",
+            node.id, url
+        );
 
         // Placeholder - in production, this would:
         // 1. Send query via HTTP POST
@@ -171,9 +175,8 @@ impl DistributedQueryRouter {
             let tenant_id = tenant_id.to_string();
             let node = node.clone();
 
-            let handle = tokio::spawn(async move {
-                Self::execute_on_node(&node, &sql, &tenant_id).await
-            });
+            let handle =
+                tokio::spawn(async move { Self::execute_on_node(&node, &sql, &tenant_id).await });
 
             handles.push(handle);
         }
@@ -269,9 +272,7 @@ mod tests {
         let router = DistributedQueryRouter::new(nodes);
 
         // Query only shard-1
-        let target_nodes = router
-            .get_nodes_for_shards(&["shard-1".to_string()])
-            .await;
+        let target_nodes = router.get_nodes_for_shards(&["shard-1".to_string()]).await;
 
         assert_eq!(target_nodes.len(), 1);
         assert_eq!(target_nodes[0].id, "query1");

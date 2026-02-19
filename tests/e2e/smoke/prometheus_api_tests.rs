@@ -60,7 +60,10 @@ async fn test_prometheus_labels_endpoint() {
         .await
         .expect("Labels request should succeed");
 
-    assert!(resp.status().is_success(), "Labels endpoint should return 2xx");
+    assert!(
+        resp.status().is_success(),
+        "Labels endpoint should return 2xx"
+    );
 
     let body: serde_json::Value = resp.json().await.expect("Should be valid JSON");
     assert_eq!(
@@ -184,7 +187,10 @@ async fn test_prometheus_sum_aggregation() {
 
     match result {
         Ok(r) => {
-            println!("Prometheus sum aggregation returned: {} results", r.data.len());
+            println!(
+                "Prometheus sum aggregation returned: {} results",
+                r.data.len()
+            );
             assert_eq!(r.status, "success");
         }
         Err(e) => {
@@ -204,9 +210,7 @@ async fn test_prometheus_sum_by_aggregation() {
         .expect("Services should be healthy");
 
     // Query with sum by host
-    let result = harness
-        .query_prom("sum by (host)(test_metric_0)")
-        .await;
+    let result = harness.query_prom("sum by (host)(test_metric_0)").await;
 
     match result {
         Ok(r) => {

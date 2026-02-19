@@ -24,8 +24,8 @@ fn create_test_batch(rows: usize) -> RecordBatch {
     let timestamps: Vec<i64> = (0..rows as i64).map(|i| now + i * 1_000_000).collect();
     let names: Vec<&str> = (0..rows).map(|_| "cpu_usage").collect();
     let values: Vec<f64> = (0..rows).map(|i| (i as f64 % 100.0) / 100.0).collect();
-    let hosts: Vec<&str> = (0..rows).map(|i| {
-        match i % 10 {
+    let hosts: Vec<&str> = (0..rows)
+        .map(|i| match i % 10 {
             0 => "server-01",
             1 => "server-02",
             2 => "server-03",
@@ -36,17 +36,17 @@ fn create_test_batch(rows: usize) -> RecordBatch {
             7 => "server-08",
             8 => "server-09",
             _ => "server-10",
-        }
-    }).collect();
-    let services: Vec<&str> = (0..rows).map(|i| {
-        match i % 5 {
+        })
+        .collect();
+    let services: Vec<&str> = (0..rows)
+        .map(|i| match i % 5 {
             0 => "api-gateway",
             1 => "auth-service",
             2 => "user-service",
             3 => "order-service",
             _ => "payment-service",
-        }
-    }).collect();
+        })
+        .collect();
 
     RecordBatch::try_new(
         schema,
@@ -114,7 +114,10 @@ fn benchmark_compression_ratio(c: &mut Criterion) {
 
         println!(
             "Rows: {}, Uncompressed: {} bytes, Compressed: {} bytes, Ratio: {:.2}x",
-            rows, uncompressed_size, compressed.len(), ratio
+            rows,
+            uncompressed_size,
+            compressed.len(),
+            ratio
         );
 
         group.bench_function(format!("{}_rows", rows), |b| {

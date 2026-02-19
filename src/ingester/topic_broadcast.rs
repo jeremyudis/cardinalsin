@@ -55,10 +55,7 @@ impl TopicFilter {
             TopicFilter::Tenant(tenant_id) => metadata.tenant_id == *tenant_id,
             TopicFilter::Metrics(filter_metrics) => {
                 // Match if any metric in the batch is in the filter
-                metadata
-                    .metrics
-                    .iter()
-                    .any(|m| filter_metrics.contains(m))
+                metadata.metrics.iter().any(|m| filter_metrics.contains(m))
             }
             TopicFilter::And(filters) => filters.iter().all(|f| f.matches(metadata)),
             TopicFilter::Or(filters) => filters.iter().any(|f| f.matches(metadata)),
@@ -114,7 +111,10 @@ impl TopicBroadcastChannel {
     }
 
     /// Send a batch to all subscribers with filtering
-    pub fn send(&self, batch: TopicBatch) -> Result<usize, broadcast::error::SendError<TopicBatch>> {
+    pub fn send(
+        &self,
+        batch: TopicBatch,
+    ) -> Result<usize, broadcast::error::SendError<TopicBatch>> {
         // Log metrics for debugging
         debug!(
             "Broadcasting batch for shard {}, tenant {}, metrics: {:?}",
@@ -292,8 +292,12 @@ mod tests {
         let channel = TopicBroadcastChannel::new(16);
 
         // Subscribe with different filters
-        let mut rx_cpu = channel.subscribe(TopicFilter::Metrics(vec!["cpu".to_string()])).await;
-        let mut rx_memory = channel.subscribe(TopicFilter::Metrics(vec!["memory".to_string()])).await;
+        let mut rx_cpu = channel
+            .subscribe(TopicFilter::Metrics(vec!["cpu".to_string()]))
+            .await;
+        let mut rx_memory = channel
+            .subscribe(TopicFilter::Metrics(vec!["memory".to_string()]))
+            .await;
         let mut rx_all = channel.subscribe(TopicFilter::All).await;
 
         // Send a CPU batch
@@ -309,27 +313,18 @@ mod tests {
         channel.send(topic_batch).unwrap();
 
         // CPU subscriber should receive it
-        let received = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx_cpu.recv(),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx_cpu.recv()).await;
         assert!(received.is_ok());
 
         // All subscriber should receive it
-        let received = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx_all.recv(),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx_all.recv()).await;
         assert!(received.is_ok());
 
         // Memory subscriber should NOT receive it (would timeout)
-        let received = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            rx_memory.recv(),
-        )
-        .await;
+        let received =
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx_memory.recv()).await;
         assert!(received.is_err()); // Timeout = no matching message
     }
 

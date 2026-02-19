@@ -152,11 +152,10 @@ mod tests {
     async fn test_promote_column() {
         let promoter = ColumnPromoter::new();
 
-        let job_id = promoter.promote_column(
-            "tenant1".to_string(),
-            "service",
-            IndexType::Dictionary,
-        ).await.unwrap();
+        let job_id = promoter
+            .promote_column("tenant1".to_string(), "service", IndexType::Dictionary)
+            .await
+            .unwrap();
 
         let job = promoter.get_job(&job_id).unwrap();
         assert_eq!(job.status, BackfillStatus::Pending);

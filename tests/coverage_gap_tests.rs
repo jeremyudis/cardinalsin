@@ -14,9 +14,7 @@
 //! - Compaction level tracking through metadata
 
 use cardinalsin::compactor::{CompactorConfig, Level};
-use cardinalsin::ingester::{
-    ChunkMetadata, Ingester, IngesterConfig, ParquetWriter, TopicFilter,
-};
+use cardinalsin::ingester::{ChunkMetadata, Ingester, IngesterConfig, ParquetWriter, TopicFilter};
 use cardinalsin::metadata::{
     CompactionJob, CompactionStatus, LocalMetadataClient, MetadataClient, S3MetadataClient,
     S3MetadataConfig, TimeRange,
@@ -62,11 +60,7 @@ fn create_ts_batch(n: usize, start_ts: i64) -> RecordBatch {
 fn create_test_ingester(
     flush_row_count: usize,
     max_buffer_size: usize,
-) -> (
-    Ingester,
-    Arc<InMemory>,
-    Arc<dyn MetadataClient>,
-) {
+) -> (Ingester, Arc<InMemory>, Arc<dyn MetadataClient>) {
     let object_store = Arc::new(InMemory::new());
     let metadata: Arc<dyn MetadataClient> = Arc::new(LocalMetadataClient::new());
     let storage_config = cardinalsin::StorageConfig::default();
@@ -102,7 +96,7 @@ async fn test_buffer_full_rejection() {
 
     // Create ingester with buffer limit that allows 1 batch but rejects a 2nd
     let (ingester, _, _) = create_test_ingester(
-        1_000_000,            // high flush threshold so no auto-flush
+        1_000_000,             // high flush threshold so no auto-flush
         single_batch_size + 1, // just barely allows one batch
     );
 
@@ -148,7 +142,10 @@ async fn test_buffer_full_after_accumulation() {
     }
 
     assert!(buffer_full, "Should eventually get BufferFull");
-    assert!(writes > 0, "Should have accepted at least some writes before full");
+    assert!(
+        writes > 0,
+        "Should have accepted at least some writes before full"
+    );
 }
 
 // =========================================================================
@@ -158,7 +155,7 @@ async fn test_buffer_full_after_accumulation() {
 #[tokio::test]
 async fn test_ingester_broadcast_on_flush() {
     let (ingester, _, _) = create_test_ingester(
-        10,        // low threshold to trigger flush
+        10, // low threshold to trigger flush
         100_000_000,
     );
 
@@ -172,10 +169,7 @@ async fn test_ingester_broadcast_on_flush() {
 
     // Subscriber should receive the flushed data
     let received = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
-    assert!(
-        received.is_ok(),
-        "Should receive broadcast within timeout"
-    );
+    assert!(received.is_ok(), "Should receive broadcast within timeout");
     let batch = received.unwrap().unwrap();
     assert_eq!(batch.num_rows(), 20, "Broadcast should contain all rows");
 }
@@ -254,7 +248,13 @@ async fn test_write_flush_verify_roundtrip() {
 
     // Verify the actual parquet file is readable
     let path = object_store::path::Path::from(chunks[0].chunk_path.as_str());
-    let data = object_store.get(&path).await.unwrap().bytes().await.unwrap();
+    let data = object_store
+        .get(&path)
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
 
     let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(data)
         .unwrap()
@@ -264,7 +264,10 @@ async fn test_write_flush_verify_roundtrip() {
     let read_batches: Vec<RecordBatch> = reader
         .collect::<std::result::Result<Vec<_>, arrow::error::ArrowError>>()
         .unwrap();
-    let total_rows: usize = read_batches.iter().map(|b: &RecordBatch| b.num_rows()).sum();
+    let total_rows: usize = read_batches
+        .iter()
+        .map(|b: &RecordBatch| b.num_rows())
+        .sum();
     assert_eq!(total_rows, 60, "Round-tripped data should have 60 rows");
 
     // Verify schema has expected columns
@@ -312,7 +315,11 @@ fn test_parquet_writer_empty_batches_slice() {
 
     match result.unwrap_err() {
         Error::InvalidSchema(msg) => {
-            assert!(msg.contains("No batches"), "Should mention no batches: {}", msg);
+            assert!(
+                msg.contains("No batches"),
+                "Should mention no batches: {}",
+                msg
+            );
         }
         other => panic!("Expected InvalidSchema, got: {:?}", other),
     }
@@ -334,9 +341,7 @@ fn test_parquet_writer_multiple_batches_roundtrip() {
         .build()
         .unwrap();
 
-    let total_rows: usize = reader
-        .map(|r| r.unwrap().num_rows())
-        .sum();
+    let total_rows: usize = reader.map(|r| r.unwrap().num_rows()).sum();
     assert_eq!(total_rows, 300, "Should have 300 total rows from 2 batches");
 }
 
@@ -434,7 +439,10 @@ async fn test_split_full_lifecycle() {
 
     // Verify split state is gone
     let state = metadata.get_split_state(shard_id).await.unwrap();
-    assert!(state.is_none(), "Split state should be removed after completion");
+    assert!(
+        state.is_none(),
+        "Split state should be removed after completion"
+    );
 }
 
 #[tokio::test]
@@ -447,7 +455,10 @@ async fn test_split_progress_on_nonexistent_shard() {
     let result = metadata
         .update_split_progress("nonexistent", 0.5, SplitPhase::Backfill)
         .await;
-    assert!(result.is_ok(), "Update progress on non-existent should be ok (no-op)");
+    assert!(
+        result.is_ok(),
+        "Update progress on non-existent should be ok (no-op)"
+    );
 }
 
 #[tokio::test]
@@ -456,7 +467,10 @@ async fn test_complete_split_on_nonexistent_shard() {
 
     // Completing a non-existent split should succeed (idempotent)
     let result = metadata.complete_split("nonexistent").await;
-    assert!(result.is_ok(), "Completing non-existent split should succeed");
+    assert!(
+        result.is_ok(),
+        "Completing non-existent split should succeed"
+    );
 }
 
 // =========================================================================
@@ -475,9 +489,18 @@ fn test_shard_monitor_metrics_after_writes() {
 
     let metrics = monitor.get_metrics(&shard_id).unwrap();
     assert!(!metrics.write_qps.is_empty(), "Should have QPS samples");
-    assert!(!metrics.bytes_per_sec.is_empty(), "Should have bytes samples");
-    assert!(!metrics.p99_latency.is_empty(), "Should have latency samples");
-    assert!(metrics.cpu_utilization.is_empty(), "Should have no CPU samples yet");
+    assert!(
+        !metrics.bytes_per_sec.is_empty(),
+        "Should have bytes samples"
+    );
+    assert!(
+        !metrics.p99_latency.is_empty(),
+        "Should have latency samples"
+    );
+    assert!(
+        metrics.cpu_utilization.is_empty(),
+        "Should have no CPU samples yet"
+    );
 }
 
 #[test]
@@ -527,7 +550,10 @@ fn test_shard_monitor_metrics_retrieval() {
     let shard_id = "shard-1".to_string();
     monitor.record_write(&shard_id, 1000, Duration::from_millis(5));
     let metrics = monitor.get_metrics(&"shard-1".to_string());
-    assert!(metrics.is_some(), "Should have metrics after recording write");
+    assert!(
+        metrics.is_some(),
+        "Should have metrics after recording write"
+    );
 }
 
 // =========================================================================
@@ -627,7 +653,11 @@ async fn test_time_index_rebuild() {
     // Verify chunks are still queryable after rebuild
     let range = TimeRange::new(0, nanos_per_hour * 3);
     let chunks = client.get_chunks(range).await.unwrap();
-    assert_eq!(chunks.len(), 3, "All 3 chunks should be found after rebuild");
+    assert_eq!(
+        chunks.len(),
+        3,
+        "All 3 chunks should be found after rebuild"
+    );
 }
 
 // =========================================================================
@@ -670,7 +700,11 @@ async fn test_compaction_level_tracking_through_metadata() {
     // Verify L0 candidates include our chunks
     let l0_candidates = client.get_l0_candidates(1).await.unwrap();
     let total_l0: usize = l0_candidates.iter().map(|g| g.len()).sum();
-    assert!(total_l0 >= 3, "Should have at least 3 L0 chunks: {}", total_l0);
+    assert!(
+        total_l0 >= 3,
+        "Should have at least 3 L0 chunks: {}",
+        total_l0
+    );
 
     // Complete compaction: L0 sources -> L1 target
     let sources: Vec<String> = (0..3).map(|i| format!("l0_{}.parquet", i)).collect();
@@ -681,7 +715,10 @@ async fn test_compaction_level_tracking_through_metadata() {
 
     // Verify source chunks are removed
     for i in 0..3 {
-        let chunk = client.get_chunk(&format!("l0_{}.parquet", i)).await.unwrap();
+        let chunk = client
+            .get_chunk(&format!("l0_{}.parquet", i))
+            .await
+            .unwrap();
         assert!(chunk.is_none(), "Source L0 chunk {} should be removed", i);
     }
 
@@ -830,7 +867,11 @@ async fn test_s3_shard_metadata_lifecycle() {
         .unwrap();
 
     // Verify generation incremented
-    let updated = client.get_shard_metadata("shard-s3-test").await.unwrap().unwrap();
+    let updated = client
+        .get_shard_metadata("shard-s3-test")
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.generation, 2);
 
     // Stale generation should fail
@@ -902,7 +943,11 @@ async fn test_s3_split_lifecycle() {
         .await
         .unwrap();
 
-    let state = client.get_split_state("split-shard").await.unwrap().unwrap();
+    let state = client
+        .get_split_state("split-shard")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(matches!(state.phase, SplitPhase::Backfill));
     assert!((state.backfill_progress - 0.75).abs() < 0.001);
 
@@ -939,7 +984,10 @@ async fn test_ingester_buffer_stats_accuracy() {
     assert!(stats.size_bytes > 0);
 
     // Write second batch
-    ingester.write(create_ts_batch(20, now + 100_000_000)).await.unwrap();
+    ingester
+        .write(create_ts_batch(20, now + 100_000_000))
+        .await
+        .unwrap();
     let stats = ingester.buffer_stats().await;
     assert_eq!(stats.row_count, 30);
     assert_eq!(stats.batch_count, 2);

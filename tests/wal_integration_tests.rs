@@ -7,8 +7,8 @@
 //! - Crash recovery with partial/corrupt entries
 //! - Flushed sequence number persistence
 
-use arrow_array::{Int64Array, RecordBatch};
 use arrow_array::types::TimestampNanosecondType;
+use arrow_array::{Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use cardinalsin::ingester::{
     load_flushed_seq, persist_flushed_seq, IngesterConfig, WalConfig, WalSyncMode, WriteAheadLog,
@@ -50,18 +50,14 @@ fn make_timestamp_batch(values: &[i64]) -> RecordBatch {
     RecordBatch::try_new(
         schema,
         vec![
-            Arc::new(
-                arrow_array::PrimitiveArray::<TimestampNanosecondType>::from(values.to_vec()),
-            ),
+            Arc::new(arrow_array::PrimitiveArray::<TimestampNanosecondType>::from(values.to_vec())),
             Arc::new(Int64Array::from(values.to_vec())),
         ],
     )
     .unwrap()
 }
 
-fn make_ingester(
-    config: IngesterConfig,
-) -> cardinalsin::ingester::Ingester {
+fn make_ingester(config: IngesterConfig) -> cardinalsin::ingester::Ingester {
     let store = Arc::new(InMemory::new());
     let metadata: Arc<dyn cardinalsin::metadata::MetadataClient> =
         Arc::new(LocalMetadataClient::new());
@@ -248,11 +244,7 @@ async fn test_wal_disabled_does_not_write() {
     let segments: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_name()
-                .to_string_lossy()
-                .starts_with("segment-")
-        })
+        .filter(|e| e.file_name().to_string_lossy().starts_with("segment-"))
         .collect();
     assert!(segments.is_empty(), "no WAL segments when WAL is disabled");
 }
@@ -284,7 +276,11 @@ async fn test_wal_next_seq_after_recovery() {
 
     // Reopen - next_seq should continue from 4
     let wal = WriteAheadLog::open(wal_config).await.unwrap();
-    assert_eq!(wal.next_seq(), 4, "next_seq should be 4 after reopening with 3 entries");
+    assert_eq!(
+        wal.next_seq(),
+        4,
+        "next_seq should be 4 after reopening with 3 entries"
+    );
 }
 
 #[tokio::test]

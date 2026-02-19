@@ -238,7 +238,11 @@ impl E2EHarness {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Prometheus range query failed: {} - {}", status, text));
+            return Err(anyhow!(
+                "Prometheus range query failed: {} - {}",
+                status,
+                text
+            ));
         }
 
         let prom_response: PrometheusResponse = resp.json().await?;
@@ -482,9 +486,7 @@ impl Sample {
     /// Create a new sample with the current timestamp
     pub fn now(metric_name: &str, value: f64) -> Self {
         Self {
-            timestamp_ns: chrono::Utc::now()
-                .timestamp_nanos_opt()
-                .unwrap_or(0),
+            timestamp_ns: chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0),
             metric_name: metric_name.to_string(),
             value,
             labels: HashMap::new(),
@@ -606,9 +608,9 @@ pub fn generate_test_samples(count: usize, num_metrics: usize) -> Vec<Sample> {
         .map(|i| format!("test_metric_{}", i))
         .collect();
 
-    let hosts = vec!["host-001", "host-002", "host-003"];
-    let regions = vec!["us-east-1", "eu-west-1"];
-    let envs = vec!["prod", "staging"];
+    let hosts = ["host-001", "host-002", "host-003"];
+    let regions = ["us-east-1", "eu-west-1"];
+    let envs = ["prod", "staging"];
 
     let base_ts = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
@@ -635,11 +637,7 @@ pub fn generate_test_samples(count: usize, num_metrics: usize) -> Vec<Sample> {
 }
 
 /// Generate CPU-like samples with sine wave pattern
-pub fn generate_cpu_samples(
-    count: usize,
-    hosts: &[&str],
-    interval_ms: i64,
-) -> Vec<Sample> {
+pub fn generate_cpu_samples(count: usize, hosts: &[&str], interval_ms: i64) -> Vec<Sample> {
     let base_ts = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
     hosts

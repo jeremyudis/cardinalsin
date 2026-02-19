@@ -4,14 +4,14 @@
 //! without downtime.
 
 mod monitor;
-mod splitter;
 mod rebalancer;
 mod router;
+mod splitter;
 
-pub use monitor::{ShardMonitor, ShardMetrics, HotShardConfig, ShardAction};
-pub use splitter::{ShardSplitter, SplitPhase};
+pub use monitor::{HotShardConfig, ShardAction, ShardMetrics, ShardMonitor};
 pub use rebalancer::RebalanceStrategy;
 pub use router::ShardRouter;
+pub use splitter::{ShardSplitter, SplitPhase};
 
 use std::time::Duration;
 

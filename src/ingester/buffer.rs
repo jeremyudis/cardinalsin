@@ -1,7 +1,7 @@
 //! Write buffer for batching incoming metrics
 
-use arrow_array::RecordBatch;
 use crate::Result;
+use arrow_array::RecordBatch;
 
 /// Write buffer that accumulates record batches before flushing
 #[derive(Debug)]
@@ -80,8 +80,8 @@ impl Default for WriteBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::{Int64Array, Float64Array};
-    use arrow_schema::{Schema, Field, DataType};
+    use arrow_array::{Float64Array, Int64Array};
+    use arrow_schema::{DataType, Field, Schema};
     use std::sync::Arc;
 
     fn create_test_batch(rows: usize) -> RecordBatch {
@@ -99,7 +99,8 @@ mod tests {
                 Arc::new(Int64Array::from(timestamps)),
                 Arc::new(Float64Array::from(values)),
             ],
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]

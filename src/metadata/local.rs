@@ -1,6 +1,8 @@
 //! Local in-memory metadata client for development and testing
 
-use super::{CompactionJob, CompactionStatus, MetadataClient, SplitState, TimeIndexEntry, TimeRange};
+use super::{
+    CompactionJob, CompactionStatus, MetadataClient, SplitState, TimeIndexEntry, TimeRange,
+};
 use crate::ingester::ChunkMetadata;
 use crate::sharding::SplitPhase;
 use crate::Result;
@@ -76,10 +78,7 @@ impl MetadataClient for LocalMetadataClient {
             let mut time_index = self.time_index.write();
             let mut bucket = start_bucket;
             while bucket <= end_bucket {
-                time_index
-                    .entry(bucket)
-                    .or_insert_with(Vec::new)
-                    .push(path.to_string());
+                time_index.entry(bucket).or_default().push(path.to_string());
                 bucket += Self::NANOS_PER_HOUR;
             }
         }
@@ -152,7 +151,8 @@ impl MetadataClient for LocalMetadataClient {
     }
 
     async fn list_chunks(&self) -> Result<Vec<TimeIndexEntry>> {
-        let results: Vec<TimeIndexEntry> = self.chunks
+        let results: Vec<TimeIndexEntry> = self
+            .chunks
             .iter()
             .map(|entry| TimeIndexEntry::from(entry.value()))
             .collect();
@@ -170,7 +170,7 @@ impl MetadataClient for LocalMetadataClient {
                     let bucket = Self::hour_bucket(meta.min_timestamp);
                     hour_groups
                         .entry(bucket)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(entry.key().clone());
                 }
             }
@@ -185,7 +185,11 @@ impl MetadataClient for LocalMetadataClient {
         Ok(candidates)
     }
 
-    async fn get_level_candidates(&self, level: usize, target_size: usize) -> Result<Vec<Vec<String>>> {
+    async fn get_level_candidates(
+        &self,
+        level: usize,
+        target_size: usize,
+    ) -> Result<Vec<Vec<String>>> {
         // Get all chunks at the specified level
         let mut level_chunks: Vec<(String, ChunkMetadata)> = Vec::new();
 
@@ -244,7 +248,8 @@ impl MetadataClient for LocalMetadataClient {
         }
 
         // Set level for target chunk
-        self.chunk_levels.insert(target_chunk.to_string(), new_level);
+        self.chunk_levels
+            .insert(target_chunk.to_string(), new_level);
 
         Ok(())
     }
@@ -283,8 +288,7 @@ impl MetadataClient for LocalMetadataClient {
             backfill_progress: 0.0,
         };
 
-        self.split_states
-            .insert(old_shard.to_string(), split_state);
+        self.split_states.insert(old_shard.to_string(), split_state);
         Ok(())
     }
 
@@ -378,7 +382,10 @@ mod tests {
         let client = LocalMetadataClient::new();
         let meta = create_test_metadata("chunk1.parquet", 1000, 2000);
 
-        client.register_chunk("chunk1.parquet", &meta).await.unwrap();
+        client
+            .register_chunk("chunk1.parquet", &meta)
+            .await
+            .unwrap();
 
         let result = client.get_chunk("chunk1.parquet").await.unwrap();
         assert!(result.is_some());
@@ -391,9 +398,27 @@ mod tests {
 
         // Register chunks at different times
         let hour = 3_600_000_000_000i64;
-        client.register_chunk("chunk1.parquet", &create_test_metadata("chunk1.parquet", hour, hour * 2)).await.unwrap();
-        client.register_chunk("chunk2.parquet", &create_test_metadata("chunk2.parquet", hour * 3, hour * 4)).await.unwrap();
-        client.register_chunk("chunk3.parquet", &create_test_metadata("chunk3.parquet", hour * 5, hour * 6)).await.unwrap();
+        client
+            .register_chunk(
+                "chunk1.parquet",
+                &create_test_metadata("chunk1.parquet", hour, hour * 2),
+            )
+            .await
+            .unwrap();
+        client
+            .register_chunk(
+                "chunk2.parquet",
+                &create_test_metadata("chunk2.parquet", hour * 3, hour * 4),
+            )
+            .await
+            .unwrap();
+        client
+            .register_chunk(
+                "chunk3.parquet",
+                &create_test_metadata("chunk3.parquet", hour * 5, hour * 6),
+            )
+            .await
+            .unwrap();
 
         // Query that overlaps first two chunks
         let range = TimeRange::new(hour, hour * 4);
@@ -407,7 +432,10 @@ mod tests {
         let client = LocalMetadataClient::new();
         let meta = create_test_metadata("chunk1.parquet", 1000, 2000);
 
-        client.register_chunk("chunk1.parquet", &meta).await.unwrap();
+        client
+            .register_chunk("chunk1.parquet", &meta)
+            .await
+            .unwrap();
         client.delete_chunk("chunk1.parquet").await.unwrap();
 
         let result = client.get_chunk("chunk1.parquet").await.unwrap();

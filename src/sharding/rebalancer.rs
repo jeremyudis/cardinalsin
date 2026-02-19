@@ -1,6 +1,6 @@
 //! Lease transfer and replica rebalancing
 
-use super::{ShardId, ShardMetadata, ReplicaInfo};
+use super::{ReplicaInfo, ShardId, ShardMetadata};
 use crate::Result;
 
 /// Rebalancing strategy
@@ -61,19 +61,17 @@ impl RebalanceStrategy {
     ) -> Option<&'a ReplicaInfo> {
         let load_map: std::collections::HashMap<_, _> = node_loads.iter().cloned().collect();
 
-        shard.replicas
-            .iter()
-            .min_by(|a, b| {
-                let load_a = load_map.get(&a.node_id).unwrap_or(&1.0);
-                let load_b = load_map.get(&b.node_id).unwrap_or(&1.0);
-                load_a.partial_cmp(load_b).unwrap()
-            })
+        shard.replicas.iter().min_by(|a, b| {
+            let load_a = load_map.get(&a.node_id).unwrap_or(&1.0);
+            let load_b = load_map.get(&b.node_id).unwrap_or(&1.0);
+            load_a.partial_cmp(load_b).unwrap()
+        })
     }
 
     /// Find an underloaded node for replica placement
     fn find_underloaded_node(&self, node_loads: &[(String, f64)]) -> Option<(String, f64)> {
-        let avg_load: f64 = node_loads.iter().map(|(_, l)| l).sum::<f64>()
-            / node_loads.len() as f64;
+        let avg_load: f64 =
+            node_loads.iter().map(|(_, l)| l).sum::<f64>() / node_loads.len() as f64;
 
         node_loads
             .iter()
@@ -110,8 +108,8 @@ impl Default for RebalanceStrategy {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ShardState;
+    use super::*;
 
     #[tokio::test]
     async fn test_lease_transfer() {
@@ -143,10 +141,17 @@ mod tests {
             ("node-2".to_string(), 0.2), // Low load
         ];
 
-        let action = strategy.rebalance_hot_shard(&shard, &node_loads).await.unwrap();
+        let action = strategy
+            .rebalance_hot_shard(&shard, &node_loads)
+            .await
+            .unwrap();
 
         match action {
-            RebalanceAction::TransferLease { from_replica, to_replica, .. } => {
+            RebalanceAction::TransferLease {
+                from_replica,
+                to_replica,
+                ..
+            } => {
                 assert_eq!(from_replica, "replica-1");
                 assert_eq!(to_replica, "replica-2");
             }

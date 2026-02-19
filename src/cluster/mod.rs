@@ -5,14 +5,14 @@
 //! the system cannot scale beyond a single node.
 
 pub mod node_registry;
+pub mod query_router;
 pub mod shard_assignment;
 pub mod write_router;
-pub mod query_router;
 
-pub use node_registry::{NodeRegistry, NodeInfo, NodeType, NodeStatus};
-pub use shard_assignment::{ShardAssignment, AssignmentStrategy};
-pub use write_router::DistributedWriteRouter;
+pub use node_registry::{NodeInfo, NodeRegistry, NodeStatus, NodeType};
 pub use query_router::DistributedQueryRouter;
+pub use shard_assignment::{AssignmentStrategy, ShardAssignment};
+pub use write_router::DistributedWriteRouter;
 
 use std::net::SocketAddr;
 
