@@ -598,10 +598,22 @@ mod tests {
 
     #[test]
     fn test_sync_mode_from_str() {
-        assert!(matches!(WalSyncMode::from_str("every_write").unwrap(), WalSyncMode::EveryWrite));
-        assert!(matches!(WalSyncMode::from_str("on_rotation").unwrap(), WalSyncMode::OnRotation));
-        assert!(matches!(WalSyncMode::from_str("none").unwrap(), WalSyncMode::None));
-        assert!(matches!(WalSyncMode::from_str("EVERY_WRITE").unwrap(), WalSyncMode::EveryWrite));
+        assert!(matches!(
+            WalSyncMode::from_str("every_write").unwrap(),
+            WalSyncMode::EveryWrite
+        ));
+        assert!(matches!(
+            WalSyncMode::from_str("on_rotation").unwrap(),
+            WalSyncMode::OnRotation
+        ));
+        assert!(matches!(
+            WalSyncMode::from_str("none").unwrap(),
+            WalSyncMode::None
+        ));
+        assert!(matches!(
+            WalSyncMode::from_str("EVERY_WRITE").unwrap(),
+            WalSyncMode::EveryWrite
+        ));
 
         match WalSyncMode::from_str("interval_100ms").unwrap() {
             WalSyncMode::Interval(d) => assert_eq!(d, Duration::from_millis(100)),
