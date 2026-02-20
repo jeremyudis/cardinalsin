@@ -4,10 +4,10 @@
 //! the old shard and the new shards. This module provides deduplication
 //! so queries return each row exactly once.
 
-use arrow_array::cast::AsArray;
-use arrow_array::{Array, RecordBatch};
 use arrow::compute::filter_record_batch;
+use arrow_array::cast::AsArray;
 use arrow_array::BooleanArray;
+use arrow_array::{Array, RecordBatch};
 use std::collections::HashSet;
 
 use crate::Result;
@@ -41,20 +41,33 @@ pub fn dedup_batches(batches: Vec<RecordBatch>) -> Result<Vec<RecordBatch>> {
         };
 
         // Try to get timestamp as nanosecond or int64
-        let ts_values: Vec<Option<i64>> =
-            if let Some(ts_arr) = ts_col.as_primitive_opt::<arrow_array::types::TimestampNanosecondType>() {
-                (0..batch.num_rows()).map(|i| {
-                    if ts_arr.is_null(i) { None } else { Some(ts_arr.value(i)) }
-                }).collect()
-            } else if let Some(ts_arr) = ts_col.as_primitive_opt::<arrow_array::types::Int64Type>() {
-                (0..batch.num_rows()).map(|i| {
-                    if ts_arr.is_null(i) { None } else { Some(ts_arr.value(i)) }
-                }).collect()
-            } else {
-                // Can't interpret timestamp column — pass through
-                result.push(batch.clone());
-                continue;
-            };
+        let ts_values: Vec<Option<i64>> = if let Some(ts_arr) =
+            ts_col.as_primitive_opt::<arrow_array::types::TimestampNanosecondType>()
+        {
+            (0..batch.num_rows())
+                .map(|i| {
+                    if ts_arr.is_null(i) {
+                        None
+                    } else {
+                        Some(ts_arr.value(i))
+                    }
+                })
+                .collect()
+        } else if let Some(ts_arr) = ts_col.as_primitive_opt::<arrow_array::types::Int64Type>() {
+            (0..batch.num_rows())
+                .map(|i| {
+                    if ts_arr.is_null(i) {
+                        None
+                    } else {
+                        Some(ts_arr.value(i))
+                    }
+                })
+                .collect()
+        } else {
+            // Can't interpret timestamp column — pass through
+            result.push(batch.clone());
+            continue;
+        };
 
         let metric_arr = match metric_col.as_string_opt::<i32>() {
             Some(arr) => arr,
@@ -132,7 +145,10 @@ mod tests {
         let result = dedup_batches(vec![batch1, batch2]).unwrap();
 
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 4, "Should keep 4 unique rows (100/cpu, 200/mem, 300/cpu, 400/disk)");
+        assert_eq!(
+            total_rows, 4,
+            "Should keep 4 unique rows (100/cpu, 200/mem, 300/cpu, 400/disk)"
+        );
     }
 
     #[test]
@@ -159,7 +175,10 @@ mod tests {
         let result = dedup_batches(vec![batch1, batch2]).unwrap();
 
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 2, "Should keep only first occurrence of each key");
+        assert_eq!(
+            total_rows, 2,
+            "Should keep only first occurrence of each key"
+        );
     }
 
     #[test]
@@ -169,6 +188,9 @@ mod tests {
         let result = dedup_batches(vec![batch]).unwrap();
 
         let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
-        assert_eq!(total_rows, 3, "Different metrics at same timestamp are not duplicates");
+        assert_eq!(
+            total_rows, 3,
+            "Different metrics at same timestamp are not duplicates"
+        );
     }
 }
