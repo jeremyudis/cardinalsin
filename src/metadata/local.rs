@@ -376,9 +376,9 @@ impl MetadataClient for LocalMetadataClient {
         let now = chrono::Utc::now();
 
         // Scavenge expired active leases
-        leases.leases.retain(|_, lease| {
-            !(lease.status == LeaseStatus::Active && lease.expires_at <= now)
-        });
+        leases
+            .leases
+            .retain(|_, lease| !(lease.status == LeaseStatus::Active && lease.expires_at <= now));
 
         // Check for conflicts
         let leased_chunks: std::collections::HashSet<&str> = leases
@@ -439,7 +439,10 @@ impl MetadataClient for LocalMetadataClient {
             }
             lease.expires_at = chrono::Utc::now() + chrono::Duration::seconds(300);
         } else {
-            return Err(crate::Error::Internal(format!("Lease {} not found", lease_id)));
+            return Err(crate::Error::Internal(format!(
+                "Lease {} not found",
+                lease_id
+            )));
         }
         Ok(())
     }

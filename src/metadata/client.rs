@@ -1,6 +1,9 @@
 //! Metadata client trait
 
-use super::{CompactionJob, CompactionLease, CompactionLeases, CompactionStatus, LeaseStatus, TimeIndexEntry, TimeRange};
+use super::{
+    CompactionJob, CompactionLease, CompactionLeases, CompactionStatus, LeaseStatus,
+    TimeIndexEntry, TimeRange,
+};
 use crate::ingester::ChunkMetadata;
 use crate::sharding::SplitPhase;
 use crate::Result;

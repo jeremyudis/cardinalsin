@@ -899,11 +899,10 @@ impl S3MetadataClient {
                 let bytes = result.bytes().await?;
                 let content = String::from_utf8_lossy(&bytes);
 
-                let leases: CompactionLeases = serde_json::from_str(&content)
-                    .map_err(|e| {
-                        warn!("Corrupt compaction leases file, treating as empty: {}", e);
-                        Error::Metadata(format!("Corrupt compaction leases: {}", e))
-                    })?;
+                let leases: CompactionLeases = serde_json::from_str(&content).map_err(|e| {
+                    warn!("Corrupt compaction leases file, treating as empty: {}", e);
+                    Error::Metadata(format!("Corrupt compaction leases: {}", e))
+                })?;
 
                 debug!(
                     "Loaded {} compaction leases with ETag: {}",
@@ -1521,7 +1520,10 @@ impl MetadataClient for S3MetadataClient {
             if let Some(lease) = leases.leases.get_mut(lease_id) {
                 lease.status = LeaseStatus::Completed;
             } else {
-                warn!("Lease {} not found during completion -- may have expired", lease_id);
+                warn!(
+                    "Lease {} not found during completion -- may have expired",
+                    lease_id
+                );
                 return Ok(());
             }
 
@@ -1549,13 +1551,19 @@ impl MetadataClient for S3MetadataClient {
             if let Some(lease) = leases.leases.get_mut(lease_id) {
                 lease.status = LeaseStatus::Failed;
             } else {
-                warn!("Lease {} not found during failure marking -- may have expired", lease_id);
+                warn!(
+                    "Lease {} not found during failure marking -- may have expired",
+                    lease_id
+                );
                 return Ok(());
             }
 
             match self.atomic_save_leases(&leases, etag).await {
                 Ok(_) => {
-                    info!("Marked lease {} as failed after {} retries", lease_id, retry);
+                    info!(
+                        "Marked lease {} as failed after {} retries",
+                        lease_id, retry
+                    );
                     return Ok(());
                 }
                 Err(Error::Conflict) => {
@@ -1583,8 +1591,8 @@ impl MetadataClient for S3MetadataClient {
                         lease_id
                     )));
                 }
-                lease.expires_at = chrono::Utc::now()
-                    + chrono::Duration::from_std(extension).unwrap();
+                lease.expires_at =
+                    chrono::Utc::now() + chrono::Duration::from_std(extension).unwrap();
             } else {
                 return Err(Error::Internal(format!("Lease {} not found", lease_id)));
             }

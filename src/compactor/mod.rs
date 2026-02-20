@@ -460,10 +460,17 @@ impl Compactor {
             }
 
             // Acquire lease before compaction
-            let lease = match self.metadata.acquire_lease(&self.node_id, &group, level as u32).await {
+            let lease = match self
+                .metadata
+                .acquire_lease(&self.node_id, &group, level as u32)
+                .await
+            {
                 Ok(lease) => lease,
                 Err(Error::ChunksAlreadyLeased(_)) => {
-                    debug!(level = level, "Chunks already leased by another compactor, skipping group");
+                    debug!(
+                        level = level,
+                        "Chunks already leased by another compactor, skipping group"
+                    );
                     continue;
                 }
                 Err(e) => return Err(e),
