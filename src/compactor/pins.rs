@@ -4,9 +4,9 @@
 //! compactor's garbage collector skips them. Uses RAII guards that
 //! automatically release pins when queries complete.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Registry tracking chunks pinned by active queries.
 ///
@@ -105,8 +105,14 @@ mod tests {
     fn test_overlapping_pins_refcounted() {
         let registry = ChunkPinRegistry::new();
 
-        let guard1 = registry.pin(vec!["chunk_a.parquet".to_string(), "chunk_b.parquet".to_string()]);
-        let guard2 = registry.pin(vec!["chunk_b.parquet".to_string(), "chunk_c.parquet".to_string()]);
+        let guard1 = registry.pin(vec![
+            "chunk_a.parquet".to_string(),
+            "chunk_b.parquet".to_string(),
+        ]);
+        let guard2 = registry.pin(vec![
+            "chunk_b.parquet".to_string(),
+            "chunk_c.parquet".to_string(),
+        ]);
 
         assert!(registry.is_pinned("chunk_a.parquet"));
         assert!(registry.is_pinned("chunk_b.parquet"));
