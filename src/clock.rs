@@ -114,7 +114,10 @@ mod tests {
         let clock = BoundedClock::default();
         let dt = clock.now();
         // Should be a reasonable time (after 2020)
-        assert!(dt.timestamp() > 1_577_836_800, "timestamp should be after 2020");
+        assert!(
+            dt.timestamp() > 1_577_836_800,
+            "timestamp should be after 2020"
+        );
     }
 
     #[test]

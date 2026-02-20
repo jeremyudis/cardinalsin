@@ -20,17 +20,17 @@
 //! - **Query Node**: Executes queries via DataFusion with tiered caching
 //! - **Compactor**: Merges files, downsamples, enforces retention
 
-pub mod schema;
-pub mod ingester;
-pub mod query;
-pub mod compactor;
 pub mod adaptive_index;
-pub mod sharding;
-pub mod metadata;
 pub mod api;
-pub mod config;
-pub mod cluster;
 pub mod clock;
+pub mod cluster;
+pub mod compactor;
+pub mod config;
+pub mod ingester;
+pub mod metadata;
+pub mod query;
+pub mod schema;
+pub mod sharding;
 
 mod error;
 
@@ -75,9 +75,9 @@ impl Default for StorageConfig {
 
 /// Re-exports for convenience
 pub mod prelude {
-    pub use crate::schema::{MetricSchema, MetricType};
-    pub use crate::ingester::{Ingester, IngesterConfig};
-    pub use crate::query::{QueryNode, QueryConfig};
     pub use crate::compactor::{Compactor, CompactorConfig};
-    pub use crate::{Config, StorageConfig, Error, Result};
+    pub use crate::ingester::{Ingester, IngesterConfig};
+    pub use crate::query::{QueryConfig, QueryNode};
+    pub use crate::schema::{MetricSchema, MetricType};
+    pub use crate::{Config, Error, Result, StorageConfig};
 }
