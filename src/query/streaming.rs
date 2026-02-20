@@ -250,7 +250,11 @@ impl QueryFilter {
     }
 
     /// Try to extract a ColumnPredicate from a binary comparison
-    fn try_extract_comparison(left: &Expr, op: &BinaryOperator, right: &Expr) -> Option<ColumnPredicate> {
+    fn try_extract_comparison(
+        left: &Expr,
+        op: &BinaryOperator,
+        right: &Expr,
+    ) -> Option<ColumnPredicate> {
         // Try column op value
         if let Some(pred) = Self::try_column_op_value(left, op, right) {
             return Some(pred);
@@ -272,7 +276,11 @@ impl QueryFilter {
     }
 
     /// Try to extract column name and value, producing a ColumnPredicate
-    fn try_column_op_value(col_expr: &Expr, op: &BinaryOperator, val_expr: &Expr) -> Option<ColumnPredicate> {
+    fn try_column_op_value(
+        col_expr: &Expr,
+        op: &BinaryOperator,
+        val_expr: &Expr,
+    ) -> Option<ColumnPredicate> {
         let column = match col_expr {
             Expr::Identifier(ident) => ident.value.to_lowercase(),
             Expr::CompoundIdentifier(idents) => idents.last()?.value.to_lowercase(),
@@ -372,9 +380,12 @@ impl QueryFilter {
     /// Apply a single ColumnPredicate to a row mask
     fn apply_predicate_to_mask(pred: &ColumnPredicate, batch: &RecordBatch, mask: &mut [bool]) {
         match pred {
-            ColumnPredicate::Eq(col, val) | ColumnPredicate::NotEq(col, val)
-            | ColumnPredicate::Lt(col, val) | ColumnPredicate::LtEq(col, val)
-            | ColumnPredicate::Gt(col, val) | ColumnPredicate::GtEq(col, val) => {
+            ColumnPredicate::Eq(col, val)
+            | ColumnPredicate::NotEq(col, val)
+            | ColumnPredicate::Lt(col, val)
+            | ColumnPredicate::LtEq(col, val)
+            | ColumnPredicate::Gt(col, val)
+            | ColumnPredicate::GtEq(col, val) => {
                 if let Some(column) = batch.column_by_name(col) {
                     Self::apply_comparison(pred, column, val, mask);
                 }
@@ -447,7 +458,9 @@ impl QueryFilter {
                             mask[i] = match (pred, arr.is_null(i)) {
                                 (_, true) => false,
                                 (ColumnPredicate::Eq(..), _) => arr.value(i) == expected.as_str(),
-                                (ColumnPredicate::NotEq(..), _) => arr.value(i) != expected.as_str(),
+                                (ColumnPredicate::NotEq(..), _) => {
+                                    arr.value(i) != expected.as_str()
+                                }
                                 (ColumnPredicate::Lt(..), _) => arr.value(i) < expected.as_str(),
                                 (ColumnPredicate::LtEq(..), _) => arr.value(i) <= expected.as_str(),
                                 (ColumnPredicate::Gt(..), _) => arr.value(i) > expected.as_str(),
@@ -480,8 +493,12 @@ impl QueryFilter {
                     for (i, val_opt) in arr.iter().enumerate() {
                         if mask[i] {
                             mask[i] = match (pred, val_opt) {
-                                (ColumnPredicate::Eq(..), Some(v)) => (v - expected).abs() < f64::EPSILON,
-                                (ColumnPredicate::NotEq(..), Some(v)) => (v - expected).abs() >= f64::EPSILON,
+                                (ColumnPredicate::Eq(..), Some(v)) => {
+                                    (v - expected).abs() < f64::EPSILON
+                                }
+                                (ColumnPredicate::NotEq(..), Some(v)) => {
+                                    (v - expected).abs() >= f64::EPSILON
+                                }
                                 (ColumnPredicate::Lt(..), Some(v)) => v < *expected,
                                 (ColumnPredicate::LtEq(..), Some(v)) => v <= *expected,
                                 (ColumnPredicate::Gt(..), Some(v)) => v > *expected,
@@ -497,23 +514,36 @@ impl QueryFilter {
     }
 
     /// Check if a row's value matches a PredicateValue (for IN/NOT IN)
-    fn row_matches_value(column: &dyn arrow_array::Array, row: usize, val: &PredicateValue) -> bool {
+    fn row_matches_value(
+        column: &dyn arrow_array::Array,
+        row: usize,
+        val: &PredicateValue,
+    ) -> bool {
         match val {
-            PredicateValue::String(expected) => {
-                column.as_string_opt::<i32>()
-                    .map(|arr| !arr.is_null(row) && arr.value(row) == expected.as_str())
-                    .unwrap_or(false)
-            }
-            PredicateValue::Int64(expected) => {
-                column.as_primitive_opt::<arrow_array::types::Int64Type>()
-                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v == *expected).unwrap_or(false))
-                    .unwrap_or(false)
-            }
-            PredicateValue::Float64(expected) => {
-                column.as_primitive_opt::<arrow_array::types::Float64Type>()
-                    .map(|arr| arr.iter().nth(row).flatten().map(|v| (v - expected).abs() < f64::EPSILON).unwrap_or(false))
-                    .unwrap_or(false)
-            }
+            PredicateValue::String(expected) => column
+                .as_string_opt::<i32>()
+                .map(|arr| !arr.is_null(row) && arr.value(row) == expected.as_str())
+                .unwrap_or(false),
+            PredicateValue::Int64(expected) => column
+                .as_primitive_opt::<arrow_array::types::Int64Type>()
+                .map(|arr| {
+                    arr.iter()
+                        .nth(row)
+                        .flatten()
+                        .map(|v| v == *expected)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false),
+            PredicateValue::Float64(expected) => column
+                .as_primitive_opt::<arrow_array::types::Float64Type>()
+                .map(|arr| {
+                    arr.iter()
+                        .nth(row)
+                        .flatten()
+                        .map(|v| (v - expected).abs() < f64::EPSILON)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false),
             _ => false,
         }
     }
@@ -521,21 +551,30 @@ impl QueryFilter {
     /// Check if row value >= predicate value (for BETWEEN)
     fn row_gte_value(column: &dyn arrow_array::Array, row: usize, val: &PredicateValue) -> bool {
         match val {
-            PredicateValue::Int64(expected) => {
-                column.as_primitive_opt::<arrow_array::types::Int64Type>()
-                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v >= *expected).unwrap_or(false))
-                    .unwrap_or(false)
-            }
-            PredicateValue::Float64(expected) => {
-                column.as_primitive_opt::<arrow_array::types::Float64Type>()
-                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v >= *expected).unwrap_or(false))
-                    .unwrap_or(false)
-            }
-            PredicateValue::String(expected) => {
-                column.as_string_opt::<i32>()
-                    .map(|arr| !arr.is_null(row) && arr.value(row) >= expected.as_str())
-                    .unwrap_or(false)
-            }
+            PredicateValue::Int64(expected) => column
+                .as_primitive_opt::<arrow_array::types::Int64Type>()
+                .map(|arr| {
+                    arr.iter()
+                        .nth(row)
+                        .flatten()
+                        .map(|v| v >= *expected)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false),
+            PredicateValue::Float64(expected) => column
+                .as_primitive_opt::<arrow_array::types::Float64Type>()
+                .map(|arr| {
+                    arr.iter()
+                        .nth(row)
+                        .flatten()
+                        .map(|v| v >= *expected)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false),
+            PredicateValue::String(expected) => column
+                .as_string_opt::<i32>()
+                .map(|arr| !arr.is_null(row) && arr.value(row) >= expected.as_str())
+                .unwrap_or(false),
             _ => false,
         }
     }
@@ -543,21 +582,30 @@ impl QueryFilter {
     /// Check if row value <= predicate value (for BETWEEN)
     fn row_lte_value(column: &dyn arrow_array::Array, row: usize, val: &PredicateValue) -> bool {
         match val {
-            PredicateValue::Int64(expected) => {
-                column.as_primitive_opt::<arrow_array::types::Int64Type>()
-                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v <= *expected).unwrap_or(false))
-                    .unwrap_or(false)
-            }
-            PredicateValue::Float64(expected) => {
-                column.as_primitive_opt::<arrow_array::types::Float64Type>()
-                    .map(|arr| arr.iter().nth(row).flatten().map(|v| v <= *expected).unwrap_or(false))
-                    .unwrap_or(false)
-            }
-            PredicateValue::String(expected) => {
-                column.as_string_opt::<i32>()
-                    .map(|arr| !arr.is_null(row) && arr.value(row) <= expected.as_str())
-                    .unwrap_or(false)
-            }
+            PredicateValue::Int64(expected) => column
+                .as_primitive_opt::<arrow_array::types::Int64Type>()
+                .map(|arr| {
+                    arr.iter()
+                        .nth(row)
+                        .flatten()
+                        .map(|v| v <= *expected)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false),
+            PredicateValue::Float64(expected) => column
+                .as_primitive_opt::<arrow_array::types::Float64Type>()
+                .map(|arr| {
+                    arr.iter()
+                        .nth(row)
+                        .flatten()
+                        .map(|v| v <= *expected)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false),
+            PredicateValue::String(expected) => column
+                .as_string_opt::<i32>()
+                .map(|arr| !arr.is_null(row) && arr.value(row) <= expected.as_str())
+                .unwrap_or(false),
             _ => false,
         }
     }

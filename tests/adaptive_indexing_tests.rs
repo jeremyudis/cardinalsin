@@ -24,8 +24,8 @@ async fn test_extract_filter_columns_simple() {
 /// Test QueryFilter parsing with sqlparser (verifies P1 fix)
 #[tokio::test]
 async fn test_query_filter_parsing() {
-    use cardinalsin::query::QueryFilter;
     use cardinalsin::metadata::predicates::{ColumnPredicate, PredicateValue};
+    use cardinalsin::query::QueryFilter;
 
     // Test simple equality with string
     let filter = QueryFilter::from_sql("SELECT * FROM metrics WHERE service = 'api'");
