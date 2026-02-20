@@ -114,8 +114,8 @@ impl ShardSplitter {
 
     async fn persist_progress(&self, progress: &SplitProgress) -> Result<()> {
         let path = Self::progress_path(&progress.old_shard);
-        let json = serde_json::to_vec(progress)
-            .map_err(|e| crate::Error::Serialization(e.to_string()))?;
+        let json =
+            serde_json::to_vec(progress).map_err(|e| crate::Error::Serialization(e.to_string()))?;
         let obj_path: object_store::path::Path = path.as_str().into();
         self.object_store
             .put(&obj_path, Bytes::from(json).into())
@@ -181,10 +181,14 @@ impl ShardSplitter {
 
         progress.completed_phase = Some(SplitPhase::Preparation);
         self.persist_progress(&progress).await?;
-        info!("Phase 1/5 complete: Created shards {} and {}", new_shard_a, new_shard_b);
+        info!(
+            "Phase 1/5 complete: Created shards {} and {}",
+            new_shard_a, new_shard_b
+        );
 
         // Run remaining phases
-        self.run_from_phase(&mut progress, SplitPhase::DualWrite).await
+        self.run_from_phase(&mut progress, SplitPhase::DualWrite)
+            .await
     }
 
     /// Execute full 5-phase split (legacy API, delegates to monitored version)
@@ -315,18 +319,18 @@ impl ShardSplitter {
             .ok_or_else(|| crate::Error::ShardNotFound(old_shard.to_string()))?;
 
         let current_generation = old_metadata.generation;
-        let split_ts = i64::from_be_bytes(
-            split_state.split_point[..8]
-                .try_into()
-                .unwrap_or([0u8; 8]),
-        );
+        let split_ts =
+            i64::from_be_bytes(split_state.split_point[..8].try_into().unwrap_or([0u8; 8]));
 
         // Step 1: Create shard A (idempotent — skipped if already done)
         if !progress.shard_a_created {
             let new_shard_a = ShardMetadata {
                 shard_id: split_state.new_shards[0].clone(),
                 generation: 0,
-                key_range: (old_metadata.key_range.0.clone(), split_state.split_point.clone()),
+                key_range: (
+                    old_metadata.key_range.0.clone(),
+                    split_state.split_point.clone(),
+                ),
                 replicas: old_metadata.replicas.clone(),
                 state: ShardState::Active,
                 min_time: old_metadata.min_time,
@@ -344,7 +348,10 @@ impl ShardSplitter {
             let new_shard_b = ShardMetadata {
                 shard_id: split_state.new_shards[1].clone(),
                 generation: 0,
-                key_range: (split_state.split_point.clone(), old_metadata.key_range.1.clone()),
+                key_range: (
+                    split_state.split_point.clone(),
+                    old_metadata.key_range.1.clone(),
+                ),
                 replicas: old_metadata.replicas.clone(),
                 state: ShardState::Active,
                 min_time: split_ts,
@@ -535,7 +542,10 @@ impl ShardSplitter {
             }
 
             if let Err(e) = self.metadata.delete_chunk(&chunk.chunk_path).await {
-                warn!("Failed to delete chunk metadata {}: {}", chunk.chunk_path, e);
+                warn!(
+                    "Failed to delete chunk metadata {}: {}",
+                    chunk.chunk_path, e
+                );
             }
         }
 
