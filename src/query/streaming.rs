@@ -471,9 +471,7 @@ mod tests {
     #[test]
     fn test_case_sensitive_string_values_preserved() {
         // Regression: string predicate values must preserve case
-        let filter = QueryFilter::from_sql(
-            "SELECT * FROM metrics WHERE service = 'API-Gateway'"
-        );
+        let filter = QueryFilter::from_sql("SELECT * FROM metrics WHERE service = 'API-Gateway'");
         assert_eq!(filter.predicates.len(), 1);
         assert_eq!(filter.predicates[0].column, "service"); // column lowercased (SQL standard)
         assert_eq!(
@@ -485,9 +483,7 @@ mod tests {
     #[test]
     fn test_column_name_case_insensitive() {
         // SQL column names are case-insensitive (lowercased for lookup)
-        let filter = QueryFilter::from_sql(
-            "SELECT * FROM metrics WHERE SERVICE = 'running'"
-        );
+        let filter = QueryFilter::from_sql("SELECT * FROM metrics WHERE SERVICE = 'running'");
         assert_eq!(filter.predicates[0].column, "service");
     }
 }
