@@ -280,7 +280,10 @@ impl MetadataClient for LocalMetadataClient {
             if job.status == CompactionStatus::Completed || job.status == CompactionStatus::Failed {
                 match job.created_at {
                     Some(ts) if ts > cutoff => true,
-                    _ => { removed += 1; false }
+                    _ => {
+                        removed += 1;
+                        false
+                    }
                 }
             } else {
                 true
