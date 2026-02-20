@@ -1,6 +1,6 @@
 //! Shard-aware query routing
 
-use super::{ShardId, ShardMetadata, ShardKey};
+use super::{ShardId, ShardKey, ShardMetadata};
 use crate::{Error, Result};
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
@@ -63,7 +63,8 @@ impl ShardRouter {
         key: &ShardKey,
         expected_generation: u64,
     ) -> Option<ShardMetadata> {
-        self.get_shard(key).filter(|s| s.generation == expected_generation)
+        self.get_shard(key)
+            .filter(|s| s.generation == expected_generation)
     }
 
     /// Update routing for a shard.
@@ -78,10 +79,13 @@ impl ShardRouter {
                 return; // Reject stale update
             }
         }
-        self.cache.insert(shard_id, RoutingEntry {
-            shard,
-            cached_at: Instant::now(),
-        });
+        self.cache.insert(
+            shard_id,
+            RoutingEntry {
+                shard,
+                cached_at: Instant::now(),
+            },
+        );
     }
 
     /// Invalidate routing for a shard
@@ -106,11 +110,7 @@ impl ShardRouter {
     }
 
     /// Route a query with automatic retry on shard moves
-    pub async fn route_query<F, Fut, T>(
-        &self,
-        key: &ShardKey,
-        execute: F,
-    ) -> Result<T>
+    pub async fn route_query<F, Fut, T>(&self, key: &ShardKey, execute: F) -> Result<T>
     where
         F: Fn(ShardMetadata) -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
@@ -118,10 +118,9 @@ impl ShardRouter {
         const MAX_RETRIES: usize = 3;
 
         for attempt in 0..MAX_RETRIES {
-            let shard = self.get_shard(key)
-                .ok_or_else(|| Error::ShardNotFound(
-                    format!("No shard found for key: {:?}", key)
-                ))?;
+            let shard = self.get_shard(key).ok_or_else(|| {
+                Error::ShardNotFound(format!("No shard found for key: {:?}", key))
+            })?;
 
             match execute(shard.clone()).await {
                 Ok(result) => return Ok(result),
@@ -154,8 +153,8 @@ impl Default for ShardRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::ShardState;
+    use super::*;
 
     #[test]
     fn test_routing() {
@@ -199,7 +198,10 @@ mod tests {
         router.update_routing(shard);
 
         let key = ShardKey::new(1, "cpu", 1000000000);
-        assert!(router.get_shard(&key).is_none(), "Should not route to splitting shard");
+        assert!(
+            router.get_shard(&key).is_none(),
+            "Should not route to splitting shard"
+        );
     }
 
     #[test]
@@ -251,7 +253,10 @@ mod tests {
 
         let key = ShardKey::new(1, "cpu", 1000000000);
         assert!(router.get_shard_if_generation(&key, 3).is_some());
-        assert!(router.get_shard_if_generation(&key, 2).is_none(), "Wrong generation should return None");
+        assert!(
+            router.get_shard_if_generation(&key, 2).is_none(),
+            "Wrong generation should return None"
+        );
     }
 
     #[test]
