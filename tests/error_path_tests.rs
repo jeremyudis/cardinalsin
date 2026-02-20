@@ -1000,6 +1000,7 @@ async fn test_compaction_job_lifecycle() {
         source_chunks: vec!["chunk1.parquet".to_string(), "chunk2.parquet".to_string()],
         target_level: 1,
         status: CompactionStatus::Pending,
+        created_at: None,
     };
     metadata.create_compaction_job(job.clone()).await.unwrap();
 
