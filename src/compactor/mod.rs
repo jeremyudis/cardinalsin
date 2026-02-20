@@ -581,7 +581,11 @@ impl Compactor {
 
     /// S3 path for persisted pending deletions
     fn pending_deletions_path(&self) -> object_store::path::Path {
-        format!("{}/metadata/pending-deletions.json", self.storage_config.tenant_id).into()
+        format!(
+            "{}/metadata/pending-deletions.json",
+            self.storage_config.tenant_id
+        )
+        .into()
     }
 
     /// Load pending deletions from S3, merging with any already in memory.
