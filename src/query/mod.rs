@@ -16,9 +16,7 @@ pub use cache::{CacheConfig, TieredCache};
 pub use cached_store::CachedObjectStore;
 pub use engine::QueryEngine;
 pub use router::QueryRouter;
-pub use streaming::{
-    Predicate, PredicateOp, PredicateValue, QueryFilter, StreamingQuery, StreamingQueryExecutor,
-};
+pub use streaming::{QueryFilter, StreamingQuery, StreamingQueryExecutor};
 
 use crate::compactor::ChunkPinRegistry;
 use crate::ingester::FilteredReceiver;
