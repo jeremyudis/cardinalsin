@@ -414,27 +414,27 @@ impl QueryFilter {
             }
             ColumnPredicate::In(col, values) => {
                 if let Some(column) = batch.column_by_name(col) {
-                    for i in 0..mask.len() {
-                        if mask[i] {
-                            mask[i] = values.iter().any(|v| Self::row_matches_value(column, i, v));
+                    for (i, m) in mask.iter_mut().enumerate() {
+                        if *m {
+                            *m = values.iter().any(|v| Self::row_matches_value(column, i, v));
                         }
                     }
                 }
             }
             ColumnPredicate::NotIn(col, values) => {
                 if let Some(column) = batch.column_by_name(col) {
-                    for i in 0..mask.len() {
-                        if mask[i] {
-                            mask[i] = !values.iter().any(|v| Self::row_matches_value(column, i, v));
+                    for (i, m) in mask.iter_mut().enumerate() {
+                        if *m {
+                            *m = !values.iter().any(|v| Self::row_matches_value(column, i, v));
                         }
                     }
                 }
             }
             ColumnPredicate::Between(col, low, high) => {
                 if let Some(column) = batch.column_by_name(col) {
-                    for i in 0..mask.len() {
-                        if mask[i] {
-                            mask[i] = Self::row_gte_value(column, i, low)
+                    for (i, m) in mask.iter_mut().enumerate() {
+                        if *m {
+                            *m = Self::row_gte_value(column, i, low)
                                 && Self::row_lte_value(column, i, high);
                         }
                     }
@@ -453,9 +453,9 @@ impl QueryFilter {
         match val {
             PredicateValue::String(expected) => {
                 if let Some(arr) = column.as_string_opt::<i32>() {
-                    for i in 0..mask.len() {
-                        if mask[i] {
-                            mask[i] = match (pred, arr.is_null(i)) {
+                    for (i, m) in mask.iter_mut().enumerate() {
+                        if *m {
+                            *m = match (pred, arr.is_null(i)) {
                                 (_, true) => false,
                                 (ColumnPredicate::Eq(..), _) => arr.value(i) == expected.as_str(),
                                 (ColumnPredicate::NotEq(..), _) => {
