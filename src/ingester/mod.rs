@@ -10,6 +10,7 @@
 mod broadcast;
 mod buffer;
 mod parquet_writer;
+mod telemetry;
 mod topic_broadcast;
 mod wal;
 
@@ -244,6 +245,7 @@ impl Ingester {
                     }
                 }
                 self.last_wal_seq.store(max_seq, Ordering::Release);
+                telemetry::record_wal_replay_entries(replayed);
                 info!(
                     replayed_entries = replayed,
                     buffer_rows = buffer.row_count(),
@@ -291,27 +293,46 @@ impl Ingester {
 
         // Normal single-write path
         if let Some(wal) = self.wal.as_ref() {
-            let seq = wal.lock().await.append(&batch).await?;
+            let seq = match wal.lock().await.append(&batch).await {
+                Ok(seq) => {
+                    telemetry::record_wal_append_outcome("success");
+                    seq
+                }
+                Err(e) => {
+                    telemetry::record_wal_append_outcome("error");
+                    return Err(e);
+                }
+            };
             self.last_wal_seq.store(seq, Ordering::Release);
         } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
+            telemetry::record_wal_append_outcome("uninitialized");
             warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
         }
         let mut buffer = self.buffer.write().await;
 
         // Check if buffer is too full
         if buffer.size_bytes() + batch_size > self.config.max_buffer_size_bytes {
+            telemetry::record_backpressure_rejection();
             return Err(Error::BufferFull);
         }
 
         buffer.append(batch.clone())?;
+        let max_buffer_size = self.config.max_buffer_size_bytes.max(1) as f64;
+        let buffer_fullness_ratio = buffer.size_bytes() as f64 / max_buffer_size;
 
         // Record write metrics for hot shard detection
         let write_latency = start_time.elapsed();
         self.shard_monitor
             .record_write(&shard_id, batch_size, write_latency);
+        telemetry::record_write(
+            write_latency.as_secs_f64(),
+            batch_size as u64,
+            buffer_fullness_ratio,
+        );
 
         // Check if flush is needed (whichever threshold comes first)
-        if self.should_flush(&buffer) {
+        if let Some(reason) = self.flush_trigger_reason(&buffer) {
+            telemetry::record_flush_trigger(reason);
             let batches = buffer.take();
             drop(buffer); // Release lock before I/O
 
@@ -323,6 +344,7 @@ impl Ingester {
 
     /// Write with split awareness (dual-write to old and new shards)
     async fn write_with_split_awareness(&self, batch: RecordBatch, shard_id: &str) -> Result<()> {
+        telemetry::record_split_dual_write_request();
         let split_state = self
             .metadata
             .get_split_state(shard_id)
@@ -330,9 +352,19 @@ impl Ingester {
             .ok_or_else(|| Error::Internal("Split state disappeared".to_string()))?;
 
         if let Some(wal) = self.wal.as_ref() {
-            let seq = wal.lock().await.append(&batch).await?;
+            let seq = match wal.lock().await.append(&batch).await {
+                Ok(seq) => {
+                    telemetry::record_wal_append_outcome("success");
+                    seq
+                }
+                Err(e) => {
+                    telemetry::record_wal_append_outcome("error");
+                    return Err(e);
+                }
+            };
             self.last_wal_seq.store(seq, Ordering::Release);
         } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
+            telemetry::record_wal_append_outcome("uninitialized");
             warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
         }
 
@@ -530,10 +562,15 @@ impl Ingester {
         self.topic_broadcast.subscribe(filter).await
     }
 
-    /// Check if flush is needed based on thresholds
-    fn should_flush(&self, buffer: &WriteBuffer) -> bool {
-        buffer.row_count() >= self.config.flush_row_count
-            || buffer.size_bytes() >= self.config.flush_size_bytes
+    /// Determine flush trigger reason, if any threshold has been reached.
+    fn flush_trigger_reason(&self, buffer: &WriteBuffer) -> Option<&'static str> {
+        if buffer.row_count() >= self.config.flush_row_count {
+            Some("rows")
+        } else if buffer.size_bytes() >= self.config.flush_size_bytes {
+            Some("bytes")
+        } else {
+            None
+        }
     }
 
     /// Flush batches to object storage
@@ -541,6 +578,7 @@ impl Ingester {
         if batches.is_empty() {
             return Ok(());
         }
+        let flush_started = Instant::now();
 
         info!(
             batch_count = batches.len(),
@@ -550,6 +588,7 @@ impl Ingester {
 
         // Concatenate batches
         let combined = arrow::compute::concat_batches(&batches[0].schema(), batches.iter())?;
+        let total_rows = combined.num_rows() as u64;
 
         // Convert to Parquet
         let parquet_bytes = self.parquet_writer.write_batch(&combined)?;
@@ -598,7 +637,11 @@ impl Ingester {
         let flushed_up_to = self.last_wal_seq.load(Ordering::Acquire);
         if flushed_up_to > 0 {
             if let Some(wal) = self.wal.as_ref() {
-                wal.lock().await.truncate_before(flushed_up_to).await?;
+                if let Err(e) = wal.lock().await.truncate_before(flushed_up_to).await {
+                    telemetry::record_wal_truncate_outcome("error");
+                    return Err(e);
+                }
+                telemetry::record_wal_truncate_outcome("success");
             }
             self.last_flushed_seq
                 .store(flushed_up_to, Ordering::Release);
@@ -609,6 +652,11 @@ impl Ingester {
 
         // Update last flush time
         *self.last_flush.write().await = Instant::now();
+        telemetry::record_flush(
+            flush_started.elapsed().as_secs_f64(),
+            parquet_size,
+            total_rows,
+        );
 
         Ok(())
     }
@@ -628,6 +676,7 @@ impl Ingester {
                     };
 
                     if should_flush {
+                        telemetry::record_flush_trigger("time");
                         let batches = {
                             let mut buffer = self.buffer.write().await;
                             buffer.take()
@@ -645,6 +694,7 @@ impl Ingester {
                         buffer.take()
                     };
                     if !batches.is_empty() {
+                        telemetry::record_flush_trigger("shutdown");
                         if let Err(e) = self.flush_batches(batches).await {
                             error!("Final flush failed during shutdown: {}", e);
                         }
