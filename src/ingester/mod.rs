@@ -21,6 +21,7 @@ pub use topic_broadcast::{
 };
 pub use wal::{load_flushed_seq, persist_flushed_seq, WalConfig, WalSyncMode, WriteAheadLog};
 
+use crate::clock::BoundedClock;
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
 use crate::sharding::{HotShardConfig, ShardKey, ShardMonitor};
@@ -122,6 +123,8 @@ pub struct Ingester {
     last_flushed_seq: AtomicU64,
     /// Cancellation token for graceful shutdown
     shutdown: CancellationToken,
+    /// Bounded clock for skew-safe timestamp operations
+    clock: Arc<BoundedClock>,
 }
 
 impl Ingester {
@@ -158,6 +161,7 @@ impl Ingester {
             last_wal_seq: AtomicU64::new(0),
             last_flushed_seq: AtomicU64::new(0),
             shutdown: CancellationToken::new(),
+            clock: Arc::new(BoundedClock::default()),
         }
     }
 
@@ -194,6 +198,7 @@ impl Ingester {
             last_wal_seq: AtomicU64::new(0),
             last_flushed_seq: AtomicU64::new(0),
             shutdown: CancellationToken::new(),
+            clock: Arc::new(BoundedClock::default()),
         }
     }
 
@@ -259,7 +264,12 @@ impl Ingester {
         Ok(())
     }
 
-    /// Write metrics to the buffer
+    /// Write metrics to the buffer.
+    ///
+    /// Ack semantics: this method returns (acks) after the WAL append completes
+    /// (buffered file write), NOT after fsync. The data loss window equals the
+    /// WAL sync interval (default 100ms). This matches InfluxDB 3 and Prometheus
+    /// behavior — fsync runs asynchronously on the configured interval.
     pub async fn write(&self, batch: RecordBatch) -> Result<()> {
         let start_time = std::time::Instant::now();
         let batch_size = batch.get_array_memory_size();
@@ -364,7 +374,7 @@ impl Ingester {
         let parquet_size = parquet_bytes.len() as u64;
 
         // Generate path for this shard
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let uuid = uuid::Uuid::new_v4();
         let path = format!(
             "{}/data/shard={}/year={}/month={:02}/day={:02}/hour={:02}/chunk_{}.parquet",
@@ -466,10 +476,10 @@ impl Ingester {
             } else if let Some(arr) = col.as_primitive_opt::<arrow_array::types::Int64Type>() {
                 arr.value(0)
             } else {
-                chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+                self.clock.now_nanos()
             }
         } else {
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            self.clock.now_nanos()
         };
 
         // Create shard key and convert to shard ID
@@ -647,7 +657,7 @@ impl Ingester {
 
     /// Generate a unique path for the Parquet file
     fn generate_path(&self) -> String {
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let uuid = uuid::Uuid::new_v4();
 
         format!(

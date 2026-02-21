@@ -11,7 +11,7 @@ mod splitter;
 pub use monitor::{HotShardConfig, ShardAction, ShardMetrics, ShardMonitor};
 pub use rebalancer::RebalanceStrategy;
 pub use router::ShardRouter;
-pub use splitter::{ShardSplitter, SplitPhase};
+pub use splitter::{ShardSplitter, SplitPhase, SplitProgress};
 
 use std::time::Duration;
 

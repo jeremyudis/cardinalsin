@@ -1166,6 +1166,44 @@ impl MetadataClient for S3MetadataClient {
         })
     }
 
+    async fn cleanup_completed_jobs(&self, max_age_secs: i64) -> Result<usize> {
+        let now = chrono::Utc::now().timestamp();
+        let cutoff = now - max_age_secs;
+
+        for _attempt in 0..MAX_CAS_RETRIES {
+            let (mut jobs, etag) = self.load_compaction_jobs_with_etag().await?;
+            let original_count = jobs.len();
+
+            jobs.retain(|j| {
+                if j.status == CompactionStatus::Completed || j.status == CompactionStatus::Failed {
+                    // Remove if created_at is before cutoff, or if no timestamp (legacy job)
+                    match j.created_at {
+                        Some(ts) => ts > cutoff,
+                        None => false, // remove legacy jobs with no timestamp
+                    }
+                } else {
+                    true // keep Pending/InProgress
+                }
+            });
+
+            let removed = original_count - jobs.len();
+            if removed == 0 {
+                return Ok(0);
+            }
+
+            match self.atomic_save_compaction_jobs(&jobs, etag).await {
+                Ok(()) => {
+                    info!(removed, "Cleaned up terminal compaction jobs");
+                    return Ok(removed);
+                }
+                Err(Error::Conflict) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::TooManyRetries)
+    }
+
     async fn get_pending_compaction_jobs(&self) -> Result<Vec<CompactionJob>> {
         let path = self.compaction_jobs_path();
 
@@ -1367,5 +1405,13 @@ impl MetadataClient for S3MetadataClient {
             );
             Ok(())
         })
+    }
+
+    async fn has_active_split(&self) -> Result<bool> {
+        use crate::sharding::SplitPhase;
+        let (states, _) = self.load_split_states_with_etag().await?;
+        Ok(states
+            .values()
+            .any(|s| matches!(s.phase, SplitPhase::DualWrite | SplitPhase::Backfill)))
     }
 }

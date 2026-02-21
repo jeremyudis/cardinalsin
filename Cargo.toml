@@ -108,17 +108,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 parking_lot = "0.12"
-once_cell = "1"
 url = "2"
 base64 = "0.22"
 rand = "0.8"
-hex = "0.4"
 itertools = "0.13"
 num_cpus = "1"
 regex = "1"
 
 # Configuration
-config = "0.14"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
 humantime = "2"

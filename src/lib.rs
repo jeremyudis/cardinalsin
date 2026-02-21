@@ -22,6 +22,7 @@
 
 pub mod adaptive_index;
 pub mod api;
+pub mod clock;
 pub mod cluster;
 pub mod compactor;
 pub mod config;
