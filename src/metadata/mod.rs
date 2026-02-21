@@ -86,3 +86,39 @@ pub enum CompactionStatus {
     Completed,
     Failed,
 }
+
+/// Compaction lease for mutual exclusion between concurrent compactors
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CompactionLease {
+    /// Unique lease ID
+    pub lease_id: String,
+    /// ID of the compactor holding this lease
+    pub holder_id: String,
+    /// Chunks claimed by this lease
+    pub chunks: Vec<String>,
+    /// When the lease was acquired (UTC)
+    pub acquired_at: chrono::DateTime<chrono::Utc>,
+    /// When the lease expires (must be renewed before this)
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Compaction level being targeted
+    pub level: u32,
+    /// Lease status
+    pub status: LeaseStatus,
+}
+
+/// Status of a compaction lease
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum LeaseStatus {
+    /// Lease is active, chunks are being compacted
+    Active,
+    /// Compaction completed successfully
+    Completed,
+    /// Compaction failed, chunks should be released
+    Failed,
+}
+
+/// All compaction leases stored in a single S3 object
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct CompactionLeases {
+    pub leases: std::collections::HashMap<String, CompactionLease>,
+}

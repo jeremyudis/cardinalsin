@@ -10,15 +10,17 @@
 
 mod levels;
 mod merge;
+pub mod pins;
 
 pub use levels::Level;
 pub use merge::ChunkMerger;
+pub use pins::ChunkPinRegistry;
 
 use crate::clock::BoundedClock;
 use crate::ingester::ParquetWriter;
 use crate::metadata::{CompactionJob, CompactionStatus, MetadataClient, TimeRange};
 use crate::sharding::{ShardAction, ShardMonitor, ShardSplitter};
-use crate::{Result, StorageConfig};
+use crate::{Error, Result, StorageConfig};
 
 use object_store::ObjectStore;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -73,7 +75,7 @@ impl Default for CompactorConfig {
             downsample_after_days: 7,
             downsample_resolution: Duration::from_secs(60), // 1 minute
             check_interval: Duration::from_secs(60),        // Check every minute
-            gc_grace_period: Duration::from_secs(60),       // 60 seconds
+            gc_grace_period: Duration::from_secs(300), // 5 minutes (prevents GC during long queries)
             sharding_enabled: true,
         }
     }
@@ -98,6 +100,8 @@ pub struct Compactor {
     merger: ChunkMerger,
     parquet_writer: ParquetWriter,
     storage_config: StorageConfig,
+    /// Unique node ID for lease ownership
+    node_id: String,
     /// Number of concurrent compactions currently running
     active_compactions: AtomicU64,
     /// Maximum concurrent compactions allowed
@@ -116,6 +120,8 @@ pub struct Compactor {
     shard_splitter: Arc<ShardSplitter>,
     /// Cancellation token for graceful shutdown
     shutdown: CancellationToken,
+    /// Optional chunk pin registry shared with query node (single-node mode)
+    pin_registry: Option<ChunkPinRegistry>,
     /// Bounded clock for skew-safe timestamp operations
     clock: Arc<BoundedClock>,
 }
@@ -138,6 +144,9 @@ impl Compactor {
             Arc::clone(&object_store),
         ));
 
+        // Generate a unique node ID for lease ownership
+        let node_id = format!("compactor-{}", uuid::Uuid::new_v4());
+
         Self {
             config,
             object_store: object_store.clone(),
@@ -145,6 +154,7 @@ impl Compactor {
             merger: ChunkMerger::new(object_store),
             parquet_writer: ParquetWriter::new(),
             storage_config,
+            node_id,
             active_compactions: AtomicU64::new(0),
             max_concurrent_compactions: 4, // Allow 4 concurrent compactions
             shard_monitor,
@@ -154,6 +164,7 @@ impl Compactor {
             is_behind: AtomicBool::new(false),
             pending_deletions: std::sync::RwLock::new(Vec::new()),
             shutdown: CancellationToken::new(),
+            pin_registry: None,
             clock: Arc::new(BoundedClock::default()),
         }
     }
@@ -161,6 +172,16 @@ impl Compactor {
     /// Get a cancellation token that can be used to trigger graceful shutdown.
     pub fn shutdown_token(&self) -> CancellationToken {
         self.shutdown.clone()
+    }
+
+    /// Set a chunk pin registry shared with the query node.
+    ///
+    /// When set, GC will skip chunks that are pinned by active queries.
+    /// For multi-process deployments, the extended GC grace period (5 min)
+    /// provides the safety margin instead.
+    pub fn with_pin_registry(mut self, registry: ChunkPinRegistry) -> Self {
+        self.pin_registry = Some(registry);
+        self
     }
 
     /// Get current backpressure state (for ingesters to check)
@@ -187,6 +208,25 @@ impl Compactor {
     /// Check if compaction has capacity for more work
     fn has_capacity(&self) -> bool {
         self.active_compactions.load(Ordering::Relaxed) < self.max_concurrent_compactions
+    }
+
+    /// Spawn a background task that renews a lease every 2 minutes
+    fn spawn_lease_renewal(&self, lease_id: String) -> tokio::task::JoinHandle<()> {
+        let renewal_interval = Duration::from_secs(120); // Renew every 2 minutes (TTL is 5 minutes)
+        let metadata = Arc::clone(&self.metadata);
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(renewal_interval);
+            interval.tick().await; // Skip first immediate tick
+            loop {
+                interval.tick().await;
+                if let Err(e) = metadata.renew_lease(&lease_id).await {
+                    warn!(lease_id = %lease_id, error = %e, "Failed to renew compaction lease");
+                    break;
+                }
+                debug!(lease_id = %lease_id, "Renewed compaction lease");
+            }
+        })
     }
 
     /// Run the main service loop. Returns when the shutdown token is cancelled.
@@ -321,6 +361,17 @@ impl Compactor {
         // Enforce retention policy
         self.enforce_retention().await?;
 
+        // Scavenge expired/terminal compaction leases
+        match self.metadata.scavenge_leases().await {
+            Ok(removed) if removed > 0 => {
+                info!(removed, "Scavenged expired compaction leases");
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to scavenge compaction leases");
+            }
+            _ => {}
+        }
+
         // Clean up completed/failed jobs older than 1 hour
         if let Err(e) = self.metadata.cleanup_completed_jobs(3600).await {
             warn!("Failed to clean up compaction jobs: {}", e);
@@ -377,10 +428,27 @@ impl Compactor {
                 break;
             }
 
+            // Acquire lease before compaction
+            let lease = match self.metadata.acquire_lease(&self.node_id, &group, 0).await {
+                Ok(lease) => lease,
+                Err(Error::ChunksAlreadyLeased(_)) => {
+                    debug!("Chunks already leased by another compactor, skipping L0 group");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+
             // Track active compaction
             self.active_compactions.fetch_add(1, Ordering::Relaxed);
 
-            info!(file_count = group.len(), "Starting L0 compaction");
+            // Spawn lease renewal task for long-running compactions
+            let renewal_handle = self.spawn_lease_renewal(lease.lease_id.clone());
+
+            info!(
+                file_count = group.len(),
+                lease_id = %lease.lease_id,
+                "Starting L0 compaction"
+            );
 
             // Create compaction job
             let job = CompactionJob {
@@ -401,6 +469,7 @@ impl Compactor {
                     self.metadata
                         .update_compaction_status(&job.id, CompactionStatus::Completed)
                         .await?;
+                    self.metadata.complete_lease(&lease.lease_id).await?;
 
                     // Schedule source chunks for deletion
                     for path in &group {
@@ -413,10 +482,12 @@ impl Compactor {
                     self.metadata
                         .update_compaction_status(&job.id, CompactionStatus::Failed)
                         .await?;
+                    self.metadata.fail_lease(&lease.lease_id).await?;
                     error!("L0 compaction failed: {}", e);
                 }
             }
 
+            renewal_handle.abort();
             // Track compaction completion
             self.active_compactions.fetch_sub(1, Ordering::Relaxed);
         }
@@ -446,12 +517,33 @@ impl Compactor {
                 break;
             }
 
+            // Acquire lease before compaction
+            let lease = match self
+                .metadata
+                .acquire_lease(&self.node_id, &group, level as u32)
+                .await
+            {
+                Ok(lease) => lease,
+                Err(Error::ChunksAlreadyLeased(_)) => {
+                    debug!(
+                        level = level,
+                        "Chunks already leased by another compactor, skipping group"
+                    );
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+
             // Track active compaction
             self.active_compactions.fetch_add(1, Ordering::Relaxed);
+
+            // Spawn lease renewal task
+            let renewal_handle = self.spawn_lease_renewal(lease.lease_id.clone());
 
             info!(
                 level = level,
                 file_count = group.len(),
+                lease_id = %lease.lease_id,
                 "Starting level compaction"
             );
 
@@ -472,6 +564,7 @@ impl Compactor {
                     self.metadata
                         .update_compaction_status(&job.id, CompactionStatus::Completed)
                         .await?;
+                    self.metadata.complete_lease(&lease.lease_id).await?;
 
                     // Schedule source chunks for deletion
                     for path in &group {
@@ -484,10 +577,12 @@ impl Compactor {
                     self.metadata
                         .update_compaction_status(&job.id, CompactionStatus::Failed)
                         .await?;
+                    self.metadata.fail_lease(&lease.lease_id).await?;
                     error!(level = level, "Level compaction failed: {}", e);
                 }
             }
 
+            renewal_handle.abort();
             // Track compaction completion
             self.active_compactions.fetch_sub(1, Ordering::Relaxed);
         }
@@ -530,6 +625,16 @@ impl Compactor {
             pending
                 .iter()
                 .filter(|entry| entry.scheduled_at <= cutoff)
+                .filter(|entry| {
+                    // Skip chunks pinned by active queries
+                    if let Some(ref registry) = self.pin_registry {
+                        if registry.is_pinned(&entry.path) {
+                            debug!(path = %entry.path, "Skipping GC for pinned chunk (active query)");
+                            return false;
+                        }
+                    }
+                    true
+                })
                 .map(|entry| entry.path.clone())
                 .collect()
         };

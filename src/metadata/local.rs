@@ -1,7 +1,8 @@
 //! Local in-memory metadata client for development and testing
 
 use super::{
-    CompactionJob, CompactionStatus, MetadataClient, SplitState, TimeIndexEntry, TimeRange,
+    CompactionJob, CompactionLease, CompactionLeases, CompactionStatus, LeaseStatus,
+    MetadataClient, SplitState, TimeIndexEntry, TimeRange,
 };
 use crate::ingester::ChunkMetadata;
 use crate::sharding::SplitPhase;
@@ -32,6 +33,8 @@ pub struct LocalMetadataClient {
     split_states: DashMap<String, SplitState>,
     /// Shard metadata
     shard_metadata: DashMap<String, crate::sharding::ShardMetadata>,
+    /// Compaction leases
+    compaction_leases: RwLock<CompactionLeases>,
 }
 
 impl LocalMetadataClient {
@@ -44,6 +47,7 @@ impl LocalMetadataClient {
             chunk_levels: DashMap::new(),
             split_states: DashMap::new(),
             shard_metadata: DashMap::new(),
+            compaction_leases: RwLock::new(CompactionLeases::default()),
         }
     }
 
@@ -380,6 +384,107 @@ impl MetadataClient for LocalMetadataClient {
             .insert(shard_id.to_string(), new_metadata);
 
         Ok(())
+    }
+
+    async fn acquire_lease(
+        &self,
+        node_id: &str,
+        chunks: &[String],
+        level: u32,
+    ) -> Result<CompactionLease> {
+        let mut leases = self.compaction_leases.write();
+        let now = chrono::Utc::now();
+
+        // Scavenge expired active leases
+        leases
+            .leases
+            .retain(|_, lease| !(lease.status == LeaseStatus::Active && lease.expires_at <= now));
+
+        // Check for conflicts
+        let leased_chunks: std::collections::HashSet<&str> = leases
+            .leases
+            .values()
+            .filter(|l| l.status == LeaseStatus::Active && l.expires_at > now)
+            .flat_map(|l| l.chunks.iter().map(|c| c.as_str()))
+            .collect();
+
+        let conflicts: Vec<String> = chunks
+            .iter()
+            .filter(|c| leased_chunks.contains(c.as_str()))
+            .cloned()
+            .collect();
+
+        if !conflicts.is_empty() {
+            return Err(crate::Error::ChunksAlreadyLeased(conflicts));
+        }
+
+        let lease = CompactionLease {
+            lease_id: uuid::Uuid::new_v4().to_string(),
+            holder_id: node_id.to_string(),
+            chunks: chunks.to_vec(),
+            acquired_at: now,
+            expires_at: now + chrono::Duration::seconds(300),
+            level,
+            status: LeaseStatus::Active,
+        };
+
+        leases.leases.insert(lease.lease_id.clone(), lease.clone());
+        Ok(lease)
+    }
+
+    async fn complete_lease(&self, lease_id: &str) -> Result<()> {
+        let mut leases = self.compaction_leases.write();
+        if let Some(lease) = leases.leases.get_mut(lease_id) {
+            lease.status = LeaseStatus::Completed;
+        }
+        Ok(())
+    }
+
+    async fn fail_lease(&self, lease_id: &str) -> Result<()> {
+        let mut leases = self.compaction_leases.write();
+        if let Some(lease) = leases.leases.get_mut(lease_id) {
+            lease.status = LeaseStatus::Failed;
+        }
+        Ok(())
+    }
+
+    async fn renew_lease(&self, lease_id: &str) -> Result<()> {
+        let mut leases = self.compaction_leases.write();
+        if let Some(lease) = leases.leases.get_mut(lease_id) {
+            if lease.status != LeaseStatus::Active {
+                return Err(crate::Error::Internal(format!(
+                    "Cannot renew non-active lease {}",
+                    lease_id
+                )));
+            }
+            lease.expires_at = chrono::Utc::now() + chrono::Duration::seconds(300);
+        } else {
+            return Err(crate::Error::Internal(format!(
+                "Lease {} not found",
+                lease_id
+            )));
+        }
+        Ok(())
+    }
+
+    async fn load_leases(&self) -> Result<CompactionLeases> {
+        Ok(self.compaction_leases.read().clone())
+    }
+
+    async fn scavenge_leases(&self) -> Result<usize> {
+        let mut leases = self.compaction_leases.write();
+        let original_count = leases.leases.len();
+        let now = chrono::Utc::now();
+
+        leases.leases.retain(|_, lease| {
+            if lease.status == LeaseStatus::Active {
+                lease.expires_at > now
+            } else {
+                false
+            }
+        });
+
+        Ok(original_count - leases.leases.len())
     }
 
     async fn has_active_split(&self) -> Result<bool> {
