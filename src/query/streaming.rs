@@ -194,32 +194,7 @@ impl StreamingQueryExecutor {
 #[derive(Clone, Debug)]
 pub struct QueryFilter {
     /// Parsed predicates from SQL
-    pub predicates: Vec<Predicate>,
-}
-
-/// A single predicate condition
-#[derive(Clone, Debug)]
-pub struct Predicate {
-    pub column: String,
-    pub op: PredicateOp,
-    pub value: PredicateValue,
-}
-
-#[derive(Clone, Debug)]
-pub enum PredicateOp {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum PredicateValue {
-    String(String),
-    Int(i64),
-    Float(f64),
+    pub predicates: Vec<ColumnPredicate>,
 }
 
 impl QueryFilter {
