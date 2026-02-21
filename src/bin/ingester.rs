@@ -109,7 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metadata = ComponentFactory::create_metadata_client(object_store.clone()).await?;
 
     // Parse WAL sync mode
-    let wal_sync_mode = WalSyncMode::from_str(&args.wal_sync_mode)
+    let wal_sync_mode: WalSyncMode = args
+        .wal_sync_mode
+        .parse()
         .map_err(|e| format!("invalid WAL_SYNC_MODE: {e}"))?;
 
     // Create ingester

@@ -57,13 +57,15 @@ pub enum WalSyncMode {
     None,
 }
 
-impl WalSyncMode {
+impl std::str::FromStr for WalSyncMode {
+    type Err = String;
+
     /// Parse from a string. Accepts:
     /// - "every_write"
     /// - "interval_100ms", "interval_1s", "interval_500ms"
     /// - "on_rotation"
     /// - "none"
-    pub fn from_str(s: &str) -> std::result::Result<Self, String> {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "every_write" => Ok(Self::EveryWrite),
             "on_rotation" => Ok(Self::OnRotation),
@@ -475,6 +477,7 @@ mod tests {
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field, Schema};
     use std::io::{Seek, SeekFrom, Write};
+    use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::TempDir;
 
