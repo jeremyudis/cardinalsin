@@ -59,6 +59,20 @@ spec:
               key: secret_access_key
         - name: RUST_LOG
           value: "info"
+        - name: OTEL_SERVICE_NAME
+          value: "cardinalsin-query"
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: "http://otel-collector:4317"
+        - name: OTEL_EXPORTER_OTLP_PROTOCOL
+          value: "grpc"
+        - name: CARDINALSIN_TELEMETRY_ENABLED
+          value: "true"
+        - name: CARDINALSIN_TELEMETRY_RUN_ID
+          valueFrom:
+            configMapKeyRef:
+              name: cardinalsin-config
+              key: telemetry_run_id
+              optional: true
         resources:
           requests:
             memory: "8Gi"
