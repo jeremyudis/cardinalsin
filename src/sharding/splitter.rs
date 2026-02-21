@@ -15,6 +15,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -54,6 +55,12 @@ pub struct SplitProgress {
     pub shard_a_created: bool,
     pub shard_b_created: bool,
     pub old_shard_deactivated: bool,
+    /// Source chunk paths fully backfilled to new shards.
+    #[serde(default)]
+    pub backfilled_chunks: BTreeSet<String>,
+    /// Number of source chunks observed when backfill last ran.
+    #[serde(default)]
+    pub backfill_total_chunks: usize,
 }
 
 impl SplitProgress {
@@ -67,6 +74,8 @@ impl SplitProgress {
             shard_a_created: false,
             shard_b_created: false,
             old_shard_deactivated: false,
+            backfilled_chunks: BTreeSet::new(),
+            backfill_total_chunks: 0,
         }
     }
 
@@ -259,12 +268,7 @@ impl ShardSplitter {
                 }
                 SplitPhase::Backfill => {
                     info!("Phase 3/5: Backfilling historical data");
-                    self.run_backfill(
-                        &old_shard,
-                        &progress.new_shards.clone(),
-                        &progress.split_point.clone(),
-                    )
-                    .await?;
+                    self.run_backfill_with_progress(progress).await?;
                     progress.completed_phase = Some(SplitPhase::Backfill);
                     self.persist_progress(progress).await?;
                     info!("Phase 3/5 complete");
@@ -430,69 +434,122 @@ impl ShardSplitter {
         new_shards: &[String],
         split_point: &[u8],
     ) -> Result<()> {
+        let mut progress = match self.load_progress(old_shard).await? {
+            Some(progress) => progress,
+            None => {
+                // Standalone backfill calls (outside execute_split_with_monitoring) still
+                // need persisted chunk-level progress for resume/idempotency.
+                let mut progress =
+                    SplitProgress::new(old_shard, new_shards.to_vec(), split_point.to_vec());
+                progress.completed_phase = Some(SplitPhase::DualWrite);
+                self.persist_progress(&progress).await?;
+                progress
+            }
+        };
+
+        if progress.new_shards != new_shards || progress.split_point != split_point {
+            warn!(
+                "run_backfill input differs from persisted split progress for {}; using persisted values",
+                old_shard
+            );
+        }
+
+        self.run_backfill_with_progress(&mut progress).await
+    }
+
+    async fn run_backfill_with_progress(&self, progress: &mut SplitProgress) -> Result<()> {
+        let old_shard = progress.old_shard.clone();
         info!(
             "Phase 3: Starting backfill for shard {} -> {:?}",
-            old_shard, new_shards
+            old_shard, progress.new_shards
         );
 
-        let chunks = self.metadata.get_chunks_for_shard(old_shard).await?;
+        let mut chunks = self.metadata.get_chunks_for_shard(&old_shard).await?;
+        chunks.sort_by(|a, b| a.chunk_path.cmp(&b.chunk_path));
+
+        let current_chunk_paths: BTreeSet<String> = chunks
+            .iter()
+            .map(|chunk| chunk.chunk_path.clone())
+            .collect();
+        progress
+            .backfilled_chunks
+            .retain(|path| current_chunk_paths.contains(path));
+
         let total_chunks = chunks.len();
+        progress.backfill_total_chunks = total_chunks;
+        self.persist_progress(progress).await?;
 
         if total_chunks == 0 {
             info!("No chunks to backfill for shard {}", old_shard);
             self.metadata
-                .update_split_progress(old_shard, 1.0, SplitPhase::Backfill)
+                .update_split_progress(&old_shard, 1.0, SplitPhase::Backfill)
                 .await?;
             return Ok(());
         }
 
-        for (idx, chunk_entry) in chunks.iter().enumerate() {
+        let mut completed_chunks = progress.backfilled_chunks.len();
+        let initial_progress = completed_chunks as f64 / total_chunks as f64;
+        self.metadata
+            .update_split_progress(&old_shard, initial_progress, SplitPhase::Backfill)
+            .await?;
+
+        if completed_chunks == total_chunks {
+            info!("Backfill already complete for shard {}", old_shard);
+            return Ok(());
+        }
+
+        for chunk_entry in &chunks {
+            if progress.backfilled_chunks.contains(&chunk_entry.chunk_path) {
+                continue;
+            }
+
             let path: object_store::path::Path = chunk_entry.chunk_path.as_str().into();
-            let bytes = match self.object_store.get(&path).await {
-                Ok(result) => result.bytes().await?,
-                Err(e) => {
-                    warn!(
-                        "Failed to read chunk {}: {}, skipping",
-                        chunk_entry.chunk_path, e
-                    );
-                    continue;
-                }
-            };
+            let bytes = self.object_store.get(&path).await?.bytes().await?;
+            let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)?
+                .with_batch_size(8192)
+                .build()?;
 
-            let reader = match ParquetRecordBatchReaderBuilder::try_new(bytes) {
-                Ok(builder) => builder.with_batch_size(8192).build()?,
-                Err(e) => {
-                    warn!(
-                        "Failed to parse chunk {}: {}, skipping",
-                        chunk_entry.chunk_path, e
-                    );
-                    continue;
-                }
-            };
-
-            for batch_result in reader {
+            for (batch_idx, batch_result) in reader.enumerate() {
                 let batch = batch_result?;
-                let (batch_a, batch_b) = self.split_batch(&batch, split_point)?;
+                let (batch_a, batch_b) = self.split_batch(&batch, &progress.split_point)?;
 
                 if batch_a.num_rows() > 0 {
-                    self.write_chunk_to_shard(&new_shards[0], batch_a).await?;
+                    let path_a = Self::backfill_chunk_path(
+                        &progress.new_shards[0],
+                        &chunk_entry.chunk_path,
+                        batch_idx,
+                        "a",
+                    );
+                    self.write_chunk_to_path(&path_a, batch_a).await?;
                 }
                 if batch_b.num_rows() > 0 {
-                    self.write_chunk_to_shard(&new_shards[1], batch_b).await?;
+                    let path_b = Self::backfill_chunk_path(
+                        &progress.new_shards[1],
+                        &chunk_entry.chunk_path,
+                        batch_idx,
+                        "b",
+                    );
+                    self.write_chunk_to_path(&path_b, batch_b).await?;
                 }
             }
 
-            let progress = (idx + 1) as f64 / total_chunks as f64;
+            progress
+                .backfilled_chunks
+                .insert(chunk_entry.chunk_path.clone());
+            self.persist_progress(progress).await?;
+
+            completed_chunks += 1;
+            let progress_fraction = completed_chunks as f64 / total_chunks as f64;
             self.metadata
-                .update_split_progress(old_shard, progress, SplitPhase::Backfill)
+                .update_split_progress(&old_shard, progress_fraction, SplitPhase::Backfill)
                 .await?;
 
-            if idx % 10 == 0 || idx == total_chunks - 1 {
+            if completed_chunks % 10 == 0 || completed_chunks == total_chunks {
                 info!(
                     "Backfill progress: {:.1}% ({}/{})",
-                    progress * 100.0,
-                    idx + 1,
-                    total_chunks
+                    progress_fraction * 100.0,
+                    completed_chunks,
+                    total_chunks,
                 );
             }
         }
@@ -610,8 +667,8 @@ impl ShardSplitter {
         Ok((batch_a, batch_b))
     }
 
-    /// Write a batch to a shard as a new chunk
-    async fn write_chunk_to_shard(&self, shard_id: &str, batch: RecordBatch) -> Result<()> {
+    /// Write a batch to an explicit chunk path.
+    async fn write_chunk_to_path(&self, path: &str, batch: RecordBatch) -> Result<()> {
         let mut buffer = Vec::new();
         {
             let props = WriterProperties::builder()
@@ -623,10 +680,7 @@ impl ShardSplitter {
             writer.close()?;
         }
 
-        let chunk_id = uuid::Uuid::new_v4();
-        let path = format!("{}/chunk_{}.parquet", shard_id, chunk_id);
-
-        let object_path: object_store::path::Path = path.as_str().into();
+        let object_path: object_store::path::Path = path.into();
         let bytes_len = buffer.len();
         self.object_store
             .put(&object_path, Bytes::from(buffer).into())
@@ -650,15 +704,38 @@ impl ShardSplitter {
             .unwrap_or(0);
 
         let metadata = ChunkMetadata {
-            path: path.clone(),
+            path: path.to_string(),
             min_timestamp,
             max_timestamp,
             row_count: batch.num_rows() as u64,
             size_bytes: bytes_len as u64,
         };
-        self.metadata.register_chunk(&path, &metadata).await?;
+        self.metadata.register_chunk(path, &metadata).await?;
 
         Ok(())
+    }
+
+    fn backfill_chunk_path(
+        target_shard: &str,
+        source_chunk_path: &str,
+        batch_idx: usize,
+        partition: &str,
+    ) -> String {
+        let source_key = Self::hex_encode(source_chunk_path.as_bytes());
+        format!(
+            "{}/backfill_{}_{}_{}.parquet",
+            target_shard, source_key, batch_idx, partition
+        )
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for &b in bytes {
+            out.push(HEX[(b >> 4) as usize] as char);
+            out.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        out
     }
 
     /// Calculate the split point based on time

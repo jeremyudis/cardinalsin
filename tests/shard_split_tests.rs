@@ -10,6 +10,7 @@ use cardinalsin::metadata::{LocalMetadataClient, MetadataClient};
 use cardinalsin::sharding::{ReplicaInfo, ShardMetadata, ShardSplitter, ShardState, SplitPhase};
 use object_store::memory::InMemory;
 use object_store::ObjectStore;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Helper to create a test shard
@@ -564,5 +565,251 @@ async fn test_backfill_progress_tracking() {
     assert_eq!(
         split_state.backfill_progress, 1.0,
         "Backfill should reach 100%"
+    );
+}
+
+/// Backfill can be retried without creating duplicate target chunks.
+#[tokio::test]
+async fn test_backfill_rerun_is_idempotent() {
+    let metadata = Arc::new(LocalMetadataClient::new());
+    let object_store = Arc::new(InMemory::new());
+    let splitter = ShardSplitter::new(metadata.clone(), object_store.clone());
+
+    let shard = create_test_shard();
+    let batch = create_test_batch(vec![1000, 2000, 3000, 4000, 5000]);
+    let parquet_bytes = {
+        use parquet::arrow::ArrowWriter;
+        use parquet::basic::{Compression, ZstdLevel};
+        use parquet::file::properties::WriterProperties;
+
+        let mut buffer = Vec::new();
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+            .build();
+
+        let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        buffer
+    };
+
+    let chunk_path = format!("{}/retry_source.parquet", shard.shard_id);
+    object_store
+        .put(&chunk_path.as_str().into(), parquet_bytes.into())
+        .await
+        .unwrap();
+
+    metadata
+        .register_chunk(
+            &chunk_path,
+            &ChunkMetadata {
+                path: chunk_path.clone(),
+                min_timestamp: 1000,
+                max_timestamp: 5000,
+                row_count: 5,
+                size_bytes: 1024,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
+    let split_point = 3000i64.to_be_bytes().to_vec();
+    metadata
+        .start_split(
+            &shard.shard_id,
+            vec![shard_a.clone(), shard_b.clone()],
+            split_point.clone(),
+        )
+        .await
+        .unwrap();
+
+    splitter
+        .run_backfill(
+            &shard.shard_id,
+            &[shard_a.clone(), shard_b.clone()],
+            &split_point,
+        )
+        .await
+        .unwrap();
+
+    let chunks_a_first = metadata.get_chunks_for_shard(&shard_a).await.unwrap();
+    let chunks_b_first = metadata.get_chunks_for_shard(&shard_b).await.unwrap();
+
+    splitter
+        .run_backfill(
+            &shard.shard_id,
+            &[shard_a.clone(), shard_b.clone()],
+            &split_point,
+        )
+        .await
+        .unwrap();
+
+    let chunks_a_second = metadata.get_chunks_for_shard(&shard_a).await.unwrap();
+    let chunks_b_second = metadata.get_chunks_for_shard(&shard_b).await.unwrap();
+
+    let set_a_first: BTreeSet<String> = chunks_a_first
+        .iter()
+        .map(|c| c.chunk_path.clone())
+        .collect();
+    let set_a_second: BTreeSet<String> = chunks_a_second
+        .iter()
+        .map(|c| c.chunk_path.clone())
+        .collect();
+    let set_b_first: BTreeSet<String> = chunks_b_first
+        .iter()
+        .map(|c| c.chunk_path.clone())
+        .collect();
+    let set_b_second: BTreeSet<String> = chunks_b_second
+        .iter()
+        .map(|c| c.chunk_path.clone())
+        .collect();
+
+    assert_eq!(
+        set_a_first, set_a_second,
+        "Shard A chunk set should be stable across retries"
+    );
+    assert_eq!(
+        set_b_first, set_b_second,
+        "Shard B chunk set should be stable across retries"
+    );
+
+    let split_state = metadata
+        .get_split_state(&shard.shard_id)
+        .await
+        .unwrap()
+        .expect("Split state should exist");
+    assert_eq!(split_state.backfill_progress, 1.0);
+}
+
+/// Backfill resumes from persisted per-chunk progress after mid-run failure.
+#[tokio::test]
+async fn test_backfill_resume_after_partial_failure() {
+    let metadata = Arc::new(LocalMetadataClient::new());
+    let object_store = Arc::new(InMemory::new());
+    let splitter = ShardSplitter::new(metadata.clone(), object_store.clone());
+
+    let shard = create_test_shard();
+
+    let make_parquet = |timestamps: Vec<i64>| {
+        use parquet::arrow::ArrowWriter;
+        use parquet::basic::{Compression, ZstdLevel};
+        use parquet::file::properties::WriterProperties;
+
+        let mut buffer = Vec::new();
+        let batch = create_test_batch(timestamps);
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::try_new(3).unwrap()))
+            .build();
+        let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        buffer
+    };
+
+    let chunk1_path = format!("{}/chunk_01.parquet", shard.shard_id);
+    let chunk2_path = format!("{}/chunk_02.parquet", shard.shard_id);
+
+    object_store
+        .put(
+            &chunk1_path.as_str().into(),
+            make_parquet(vec![1000, 1500, 2000]).into(),
+        )
+        .await
+        .unwrap();
+
+    metadata
+        .register_chunk(
+            &chunk1_path,
+            &ChunkMetadata {
+                path: chunk1_path.clone(),
+                min_timestamp: 1000,
+                max_timestamp: 2000,
+                row_count: 3,
+                size_bytes: 1024,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Register chunk_02 metadata but do not upload the object yet.
+    metadata
+        .register_chunk(
+            &chunk2_path,
+            &ChunkMetadata {
+                path: chunk2_path.clone(),
+                min_timestamp: 3000,
+                max_timestamp: 5000,
+                row_count: 3,
+                size_bytes: 1024,
+            },
+        )
+        .await
+        .unwrap();
+
+    let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
+    let split_point = 3000i64.to_be_bytes().to_vec();
+
+    metadata
+        .start_split(
+            &shard.shard_id,
+            vec![shard_a.clone(), shard_b.clone()],
+            split_point.clone(),
+        )
+        .await
+        .unwrap();
+
+    let first_attempt = splitter
+        .run_backfill(
+            &shard.shard_id,
+            &[shard_a.clone(), shard_b.clone()],
+            &split_point,
+        )
+        .await;
+    assert!(
+        first_attempt.is_err(),
+        "first attempt should fail on missing chunk object"
+    );
+
+    let partial_progress = splitter
+        .load_progress(&shard.shard_id)
+        .await
+        .unwrap()
+        .expect("progress should be persisted after partial failure");
+    assert!(partial_progress.backfilled_chunks.contains(&chunk1_path));
+    assert!(!partial_progress.backfilled_chunks.contains(&chunk2_path));
+
+    object_store
+        .put(
+            &chunk2_path.as_str().into(),
+            make_parquet(vec![3000, 4000, 5000]).into(),
+        )
+        .await
+        .unwrap();
+
+    splitter
+        .run_backfill(
+            &shard.shard_id,
+            &[shard_a.clone(), shard_b.clone()],
+            &split_point,
+        )
+        .await
+        .unwrap();
+
+    let complete_progress = splitter
+        .load_progress(&shard.shard_id)
+        .await
+        .unwrap()
+        .expect("progress should still exist before cleanup phase");
+    assert!(complete_progress.backfilled_chunks.contains(&chunk1_path));
+    assert!(complete_progress.backfilled_chunks.contains(&chunk2_path));
+    assert_eq!(complete_progress.backfilled_chunks.len(), 2);
+
+    let chunks_a = metadata.get_chunks_for_shard(&shard_a).await.unwrap();
+    let chunks_b = metadata.get_chunks_for_shard(&shard_b).await.unwrap();
+
+    assert!(
+        !chunks_a.is_empty() || !chunks_b.is_empty(),
+        "resumed backfill should populate target shards"
     );
 }
