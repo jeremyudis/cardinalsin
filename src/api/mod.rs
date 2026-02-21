@@ -10,6 +10,7 @@
 pub mod grpc;
 pub mod ingest;
 pub mod query;
+mod telemetry;
 
 use axum::Router;
 use std::sync::Arc;
@@ -43,6 +44,7 @@ pub fn build_http_router(
     ingester: Arc<crate::ingester::Ingester>,
     query_node: Arc<crate::query::QueryNode>,
 ) -> Router {
+    use axum::middleware;
     use axum::routing::{get, post};
     use tower_http::cors::{Any, CorsLayer};
 
@@ -79,6 +81,7 @@ pub fn build_http_router(
             ingester,
             query_node,
         })
+        .layer(middleware::from_fn(telemetry::http_observability_middleware))
         .layer(cors)
 }
 
