@@ -612,8 +612,10 @@ impl Compactor {
     /// Persist pending deletions to S3 so they survive restarts.
     async fn persist_pending_deletions(&self) -> Result<()> {
         let path = self.pending_deletions_path();
-        let pending = self.pending_deletions.read().unwrap();
-        let bytes = serde_json::to_vec(&*pending)?;
+        let bytes = {
+            let pending = self.pending_deletions.read().unwrap();
+            serde_json::to_vec(&*pending)?
+        };
         self.object_store.put(&path, bytes.into()).await?;
         Ok(())
     }
