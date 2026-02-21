@@ -4,12 +4,14 @@
 //! Use this after deploying the S3MetadataClient time index bug fix.
 
 use cardinalsin::metadata::{S3MetadataClient, S3MetadataConfig};
+use cardinalsin::telemetry::Telemetry;
 use object_store::aws::AmazonS3Builder;
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    let _telemetry = Telemetry::init_for_component("cardinalsin-rebuild-metadata", "info")
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let bucket = std::env::var("METADATA_BUCKET")
         .or_else(|_| std::env::var("S3_BUCKET"))
