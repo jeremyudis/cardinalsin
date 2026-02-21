@@ -26,6 +26,7 @@ use object_store::ObjectStore;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// A pending chunk deletion, serializable so it survives compactor restarts.
@@ -117,6 +118,8 @@ pub struct Compactor {
     shard_monitor: Arc<ShardMonitor>,
     /// Shard splitter for executing splits
     shard_splitter: Arc<ShardSplitter>,
+    /// Cancellation token for graceful shutdown
+    shutdown: CancellationToken,
     /// Optional chunk pin registry shared with query node (single-node mode)
     pin_registry: Option<ChunkPinRegistry>,
     /// Bounded clock for skew-safe timestamp operations
@@ -160,9 +163,15 @@ impl Compactor {
             backpressure_threshold,
             is_behind: AtomicBool::new(false),
             pending_deletions: std::sync::RwLock::new(Vec::new()),
+            shutdown: CancellationToken::new(),
             pin_registry: None,
             clock: Arc::new(BoundedClock::default()),
         }
+    }
+
+    /// Get a cancellation token that can be used to trigger graceful shutdown.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     /// Set a chunk pin registry shared with the query node.
@@ -220,7 +229,7 @@ impl Compactor {
         })
     }
 
-    /// Run the main service loop
+    /// Run the main service loop. Returns when the shutdown token is cancelled.
     pub async fn run(&self) {
         // Recover pending deletions from a previous run
         if let Err(e) = self.load_pending_deletions().await {
@@ -230,9 +239,16 @@ impl Compactor {
         let mut interval = tokio::time::interval(self.config.check_interval);
 
         loop {
-            interval.tick().await;
-            if let Err(e) = self.run_cycle().await {
-                error!("Main service cycle failed: {}", e);
+            tokio::select! {
+                _ = interval.tick() => {
+                    if let Err(e) = self.run_cycle().await {
+                        error!("Main service cycle failed: {}", e);
+                    }
+                }
+                _ = self.shutdown.cancelled() => {
+                    info!("Compactor shutting down gracefully");
+                    break;
+                }
             }
         }
     }
