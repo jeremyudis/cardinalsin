@@ -933,7 +933,7 @@ impl S3MetadataClient {
         let content = serde_json::to_string_pretty(leases)?;
         let bytes = content.into_bytes();
 
-        self.put_with_fallback(
+        self.put_with_cas(
             &path,
             PutPayload::from(bytes),
             &expected_etag,
