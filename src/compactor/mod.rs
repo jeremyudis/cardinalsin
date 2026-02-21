@@ -10,9 +10,11 @@
 
 mod levels;
 mod merge;
+pub mod pins;
 
 pub use levels::Level;
 pub use merge::ChunkMerger;
+pub use pins::ChunkPinRegistry;
 
 use crate::clock::BoundedClock;
 use crate::ingester::ParquetWriter;
@@ -72,7 +74,7 @@ impl Default for CompactorConfig {
             downsample_after_days: 7,
             downsample_resolution: Duration::from_secs(60), // 1 minute
             check_interval: Duration::from_secs(60),        // Check every minute
-            gc_grace_period: Duration::from_secs(60),       // 60 seconds
+            gc_grace_period: Duration::from_secs(300), // 5 minutes (prevents GC during long queries)
             sharding_enabled: true,
         }
     }
@@ -115,6 +117,8 @@ pub struct Compactor {
     shard_monitor: Arc<ShardMonitor>,
     /// Shard splitter for executing splits
     shard_splitter: Arc<ShardSplitter>,
+    /// Optional chunk pin registry shared with query node (single-node mode)
+    pin_registry: Option<ChunkPinRegistry>,
     /// Bounded clock for skew-safe timestamp operations
     clock: Arc<BoundedClock>,
 }
@@ -156,8 +160,19 @@ impl Compactor {
             backpressure_threshold,
             is_behind: AtomicBool::new(false),
             pending_deletions: std::sync::RwLock::new(Vec::new()),
+            pin_registry: None,
             clock: Arc::new(BoundedClock::default()),
         }
+    }
+
+    /// Set a chunk pin registry shared with the query node.
+    ///
+    /// When set, GC will skip chunks that are pinned by active queries.
+    /// For multi-process deployments, the extended GC grace period (5 min)
+    /// provides the safety margin instead.
+    pub fn with_pin_registry(mut self, registry: ChunkPinRegistry) -> Self {
+        self.pin_registry = Some(registry);
+        self
     }
 
     /// Get current backpressure state (for ingesters to check)
@@ -594,6 +609,16 @@ impl Compactor {
             pending
                 .iter()
                 .filter(|entry| entry.scheduled_at <= cutoff)
+                .filter(|entry| {
+                    // Skip chunks pinned by active queries
+                    if let Some(ref registry) = self.pin_registry {
+                        if registry.is_pinned(&entry.path) {
+                            debug!(path = %entry.path, "Skipping GC for pinned chunk (active query)");
+                            return false;
+                        }
+                    }
+                    true
+                })
                 .map(|entry| entry.path.clone())
                 .collect()
         };
