@@ -4,7 +4,7 @@
 
 use cardinalsin::api;
 use cardinalsin::config::ComponentFactory;
-use cardinalsin::ingester::{Ingester, IngesterConfig};
+use cardinalsin::ingester::{Ingester, IngesterConfig, WalConfig, WalSyncMode};
 use cardinalsin::query::{QueryConfig, QueryNode};
 use cardinalsin::schema::MetricSchema;
 use cardinalsin::{Error, StorageConfig};
@@ -50,6 +50,22 @@ struct Args {
     #[arg(long, default_value = "300")]
     flush_interval_secs: u64,
 
+    /// Enable WAL for crash durability (default: true)
+    #[arg(long, env = "WAL_ENABLED", default_value = "true")]
+    wal_enabled: bool,
+
+    /// WAL directory
+    #[arg(long, env = "WAL_DIR", default_value = "/var/lib/cardinalsin/wal")]
+    wal_dir: String,
+
+    /// WAL sync mode: every_write, interval_100ms, interval_1s, on_rotation, none
+    #[arg(long, env = "WAL_SYNC_MODE", default_value = "interval_100ms")]
+    wal_sync_mode: String,
+
+    /// WAL max segment size in bytes (default: 64MB)
+    #[arg(long, env = "WAL_MAX_SEGMENT_SIZE", default_value = "67108864")]
+    wal_max_segment_size: usize,
+
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
@@ -92,21 +108,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create metadata client from environment
     let metadata = ComponentFactory::create_metadata_client(object_store.clone()).await?;
 
+    // Parse WAL sync mode
+    let wal_sync_mode: WalSyncMode = args
+        .wal_sync_mode
+        .parse()
+        .map_err(|e| format!("invalid WAL_SYNC_MODE: {e}"))?;
+
     // Create ingester
     let ingester_config = IngesterConfig {
         flush_interval: std::time::Duration::from_secs(args.flush_interval_secs),
+        wal: WalConfig {
+            wal_dir: std::path::PathBuf::from(&args.wal_dir),
+            max_segment_size: args.wal_max_segment_size,
+            sync_mode: wal_sync_mode,
+            enabled: args.wal_enabled,
+        },
         ..Default::default()
     };
 
+    info!(
+        wal_enabled = ingester_config.wal.enabled,
+        wal_dir = %args.wal_dir,
+        wal_sync_mode = %args.wal_sync_mode,
+        wal_max_segment_size = args.wal_max_segment_size,
+        "WAL configuration"
+    );
+
     let schema = MetricSchema::default_metrics();
 
-    let ingester = Arc::new(Ingester::new(
+    let mut ingester = Ingester::new(
         ingester_config,
         object_store,
         metadata,
         storage_config.clone(),
         schema,
-    ));
+    );
+
+    // Initialize WAL and recover any unflushed entries
+    ingester.ensure_wal().await?;
+
+    let ingester = Arc::new(ingester);
 
     // Start flush timer
     let ingester_timer = ingester.clone();

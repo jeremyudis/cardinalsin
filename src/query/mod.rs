@@ -7,6 +7,7 @@
 
 mod cache;
 mod cached_store;
+mod dedup;
 mod engine;
 mod router;
 mod streaming;
@@ -152,6 +153,9 @@ impl QueryNode {
             .get_chunks_with_predicates(time_range, &predicates)
             .await?;
 
+        // Check if any shard is in a dual-write split phase (causes duplicate data)
+        let needs_dedup = self.metadata.has_active_split().await.unwrap_or(false);
+
         // Register chunks with DataFusion
         for chunk in &chunks {
             self.engine.register_chunk(&chunk.chunk_path).await?;
@@ -166,7 +170,12 @@ impl QueryNode {
             self.engine.execute(sql).await?
         };
 
-        Ok(results)
+        // Deduplicate if any shard is in dual-write phase
+        if needs_dedup {
+            dedup::dedup_batches(results)
+        } else {
+            Ok(results)
+        }
     }
 
     /// Execute a streaming query (historical + live) using legacy broadcast

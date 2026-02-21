@@ -194,7 +194,32 @@ impl StreamingQueryExecutor {
 #[derive(Clone, Debug)]
 pub struct QueryFilter {
     /// Parsed predicates from SQL
-    pub predicates: Vec<ColumnPredicate>,
+    pub predicates: Vec<Predicate>,
+}
+
+/// A single predicate condition
+#[derive(Clone, Debug)]
+pub struct Predicate {
+    pub column: String,
+    pub op: PredicateOp,
+    pub value: PredicateValue,
+}
+
+#[derive(Clone, Debug)]
+pub enum PredicateOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PredicateValue {
+    String(String),
+    Int(i64),
+    Float(f64),
 }
 
 impl QueryFilter {
@@ -632,5 +657,24 @@ mod tests {
     fn test_empty_filter() {
         let filter = QueryFilter::from_sql("SELECT * FROM metrics");
         assert!(filter.predicates.is_empty());
+    }
+
+    #[test]
+    fn test_case_sensitive_string_values_preserved() {
+        // Regression: string predicate values must preserve case
+        let filter = QueryFilter::from_sql("SELECT * FROM metrics WHERE service = 'API-Gateway'");
+        assert_eq!(filter.predicates.len(), 1);
+        assert_eq!(filter.predicates[0].column, "service"); // column lowercased (SQL standard)
+        assert_eq!(
+            filter.predicates[0].value,
+            PredicateValue::String("API-Gateway".to_string()) // value preserves case
+        );
+    }
+
+    #[test]
+    fn test_column_name_case_insensitive() {
+        // SQL column names are case-insensitive (lowercased for lookup)
+        let filter = QueryFilter::from_sql("SELECT * FROM metrics WHERE SERVICE = 'running'");
+        assert_eq!(filter.predicates[0].column, "service");
     }
 }
