@@ -305,6 +305,13 @@ impl ShardSplitter {
             .await?
             .ok_or_else(|| crate::Error::Internal("No split in progress".to_string()))?;
 
+        if split_state.new_shards.len() != 2 {
+            return Err(crate::Error::Internal(format!(
+                "Invalid split state: expected 2 new shards, got {}",
+                split_state.new_shards.len()
+            )));
+        }
+
         if split_state.backfill_progress < 1.0 {
             return Err(crate::Error::Internal(format!(
                 "Backfill only {:.1}% complete",
