@@ -642,7 +642,8 @@ mod tests {
         match &filter.predicates[0] {
             ColumnPredicate::Eq(col, val) => {
                 assert_eq!(col, "service"); // column lowercased (SQL standard)
-                assert_eq!(val, &PredicateValue::String("API-Gateway".to_string())); // value preserves case
+                assert_eq!(val, &PredicateValue::String("API-Gateway".to_string()));
+                // value preserves case
             }
             _ => panic!("Expected Eq predicate"),
         }
