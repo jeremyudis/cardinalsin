@@ -57,6 +57,37 @@ pub enum WalSyncMode {
     None,
 }
 
+impl std::str::FromStr for WalSyncMode {
+    type Err = String;
+
+    /// Parse from a string. Accepts:
+    /// - "every_write"
+    /// - "interval_100ms", "interval_1s", "interval_500ms"
+    /// - "on_rotation"
+    /// - "none"
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "every_write" => Ok(Self::EveryWrite),
+            "on_rotation" => Ok(Self::OnRotation),
+            "none" => Ok(Self::None),
+            s if s.starts_with("interval_") => {
+                let suffix = &s["interval_".len()..];
+                let millis = if let Some(ms) = suffix.strip_suffix("ms") {
+                    ms.parse::<u64>().map_err(|e| format!("invalid interval: {e}"))?
+                } else if let Some(secs) = suffix.strip_suffix('s') {
+                    secs.parse::<u64>().map_err(|e| format!("invalid interval: {e}"))? * 1000
+                } else {
+                    return Err(format!("invalid sync mode: {s} (use e.g. interval_100ms)"));
+                };
+                Ok(Self::Interval(Duration::from_millis(millis)))
+            }
+            other => Err(format!(
+                "unknown WAL sync mode: '{other}'. Use: every_write, interval_100ms, on_rotation, none"
+            )),
+        }
+    }
+}
+
 /// WAL entry metadata.
 #[derive(Debug, Clone)]
 pub struct WalEntry {
@@ -446,6 +477,7 @@ mod tests {
     use arrow_array::Int64Array;
     use arrow_schema::{DataType, Field, Schema};
     use std::io::{Seek, SeekFrom, Write};
+    use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -565,5 +597,41 @@ mod tests {
             entries.is_empty(),
             "corrupt entry should be discarded during recovery"
         );
+    }
+
+    #[test]
+    fn test_sync_mode_from_str() {
+        assert!(matches!(
+            WalSyncMode::from_str("every_write").unwrap(),
+            WalSyncMode::EveryWrite
+        ));
+        assert!(matches!(
+            WalSyncMode::from_str("on_rotation").unwrap(),
+            WalSyncMode::OnRotation
+        ));
+        assert!(matches!(
+            WalSyncMode::from_str("none").unwrap(),
+            WalSyncMode::None
+        ));
+        assert!(matches!(
+            WalSyncMode::from_str("EVERY_WRITE").unwrap(),
+            WalSyncMode::EveryWrite
+        ));
+
+        match WalSyncMode::from_str("interval_100ms").unwrap() {
+            WalSyncMode::Interval(d) => assert_eq!(d, Duration::from_millis(100)),
+            other => panic!("expected Interval, got {:?}", other),
+        }
+        match WalSyncMode::from_str("interval_1s").unwrap() {
+            WalSyncMode::Interval(d) => assert_eq!(d, Duration::from_secs(1)),
+            other => panic!("expected Interval, got {:?}", other),
+        }
+        match WalSyncMode::from_str("interval_500ms").unwrap() {
+            WalSyncMode::Interval(d) => assert_eq!(d, Duration::from_millis(500)),
+            other => panic!("expected Interval, got {:?}", other),
+        }
+
+        assert!(WalSyncMode::from_str("invalid").is_err());
+        assert!(WalSyncMode::from_str("interval_abc").is_err());
     }
 }

@@ -75,12 +75,18 @@ impl ObjectStore for CachedObjectStore {
     async fn get(&self, location: &Path) -> ObjectStoreResult<GetResult> {
         let key = location.to_string();
 
-        // Try cache first using get_or_fetch
+        // Side-channel to capture real ObjectMeta on cache miss
+        let fetched_meta = Arc::new(std::sync::OnceLock::<ObjectMeta>::new());
+        let meta_cell = fetched_meta.clone();
+        let inner = self.inner.clone();
+        let loc = location.clone();
+
         let cached_data = self
             .cache
-            .get_or_fetch(&key, || async {
-                // Cache miss - fetch from underlying store
-                let result = self.inner.get(location).await?;
+            .get_or_fetch(&key, || async move {
+                // Cache miss - fetch from underlying store, preserving metadata
+                let result = inner.get(&loc).await?;
+                let _ = meta_cell.set(result.meta.clone());
                 let bytes = result.bytes().await?;
                 Ok::<Bytes, crate::Error>(bytes)
             })
@@ -90,21 +96,24 @@ impl ObjectStore for CachedObjectStore {
                 source: Box::new(e),
             })?;
 
-        // Convert cached bytes to GetResult
         let bytes_clone = cached_data.bytes.clone();
         let size = cached_data.bytes.len();
+
+        // Use real metadata from the fetch if available (cache miss).
+        // On cache hit the OnceLock is empty; construct from known info.
+        let meta = fetched_meta.get().cloned().unwrap_or(ObjectMeta {
+            location: location.clone(),
+            last_modified: chrono::Utc::now(),
+            size,
+            e_tag: None,
+            version: None,
+        });
 
         Ok(GetResult {
             payload: GetResultPayload::Stream(Box::pin(futures::stream::once(async move {
                 Ok(bytes_clone)
             }))),
-            meta: ObjectMeta {
-                location: location.clone(),
-                last_modified: chrono::Utc::now(),
-                size,
-                e_tag: None,
-                version: None,
-            },
+            meta,
             range: 0..size,
             attributes: Default::default(),
         })
