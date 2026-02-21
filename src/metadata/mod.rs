@@ -74,6 +74,9 @@ pub struct CompactionJob {
     pub source_chunks: Vec<String>,
     pub target_level: u32,
     pub status: CompactionStatus,
+    /// Unix timestamp when this job was created (for TTL-based cleanup)
+    #[serde(default)]
+    pub created_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

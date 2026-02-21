@@ -14,6 +14,7 @@ mod merge;
 pub use levels::Level;
 pub use merge::ChunkMerger;
 
+use crate::clock::BoundedClock;
 use crate::ingester::ParquetWriter;
 use crate::metadata::{CompactionJob, CompactionStatus, MetadataClient, TimeRange};
 use crate::sharding::{ShardAction, ShardMonitor, ShardSplitter};
@@ -24,6 +25,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+/// A pending chunk deletion, serializable so it survives compactor restarts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PendingDeletion {
+    path: String,
+    scheduled_at: chrono::DateTime<chrono::Utc>,
+}
 
 /// Compactor configuration
 #[derive(Debug, Clone)]
@@ -101,12 +109,14 @@ pub struct Compactor {
     backpressure_threshold: u64,
     /// Flag indicating compaction is falling behind
     is_behind: AtomicBool,
-    /// Chunks pending deletion (path, deletion_time)
-    pending_deletions: std::sync::RwLock<Vec<(String, std::time::Instant)>>,
+    /// Chunks pending deletion, persisted to S3 to survive restarts
+    pending_deletions: std::sync::RwLock<Vec<PendingDeletion>>,
     /// Shard monitor for detecting hot shards
     shard_monitor: Arc<ShardMonitor>,
     /// Shard splitter for executing splits
     shard_splitter: Arc<ShardSplitter>,
+    /// Bounded clock for skew-safe timestamp operations
+    clock: Arc<BoundedClock>,
 }
 
 impl Compactor {
@@ -146,6 +156,7 @@ impl Compactor {
             backpressure_threshold,
             is_behind: AtomicBool::new(false),
             pending_deletions: std::sync::RwLock::new(Vec::new()),
+            clock: Arc::new(BoundedClock::default()),
         }
     }
 
@@ -196,6 +207,11 @@ impl Compactor {
 
     /// Run the main service loop
     pub async fn run(&self) {
+        // Recover pending deletions from a previous run
+        if let Err(e) = self.load_pending_deletions().await {
+            warn!("Failed to load persisted pending deletions: {}", e);
+        }
+
         let mut interval = tokio::time::interval(self.config.check_interval);
 
         loop {
@@ -325,8 +341,18 @@ impl Compactor {
             _ => {}
         }
 
+        // Clean up completed/failed jobs older than 1 hour
+        if let Err(e) = self.metadata.cleanup_completed_jobs(3600).await {
+            warn!("Failed to clean up compaction jobs: {}", e);
+        }
+
         // Update backpressure state
         self.update_backpressure_state().await?;
+
+        // Persist pending deletions to survive restarts
+        if let Err(e) = self.persist_pending_deletions().await {
+            warn!("Failed to persist pending deletions: {}", e);
+        }
 
         Ok(())
     }
@@ -399,6 +425,7 @@ impl Compactor {
                 source_chunks: group.clone(),
                 target_level: 0,
                 status: CompactionStatus::InProgress,
+                created_at: Some(chrono::Utc::now().timestamp()),
             };
             self.metadata.create_compaction_job(job.clone()).await?;
 
@@ -494,6 +521,7 @@ impl Compactor {
                 source_chunks: group.clone(),
                 target_level: level as u32,
                 status: CompactionStatus::InProgress,
+                created_at: Some(chrono::Utc::now().timestamp()),
             };
             self.metadata.create_compaction_job(job.clone()).await?;
 
@@ -555,16 +583,18 @@ impl Compactor {
 
     /// Garbage collect old chunks with grace period
     async fn garbage_collect(&self) -> Result<()> {
-        let now = std::time::Instant::now();
-        let grace_period = self.config.gc_grace_period;
+        let now = chrono::Utc::now();
+        let grace_period = chrono::Duration::from_std(self.config.gc_grace_period)
+            .unwrap_or_else(|_| chrono::Duration::seconds(300));
+        let cutoff = now - grace_period;
 
         // Process pending deletions that have passed grace period
         let chunks_to_delete: Vec<String> = {
             let pending = self.pending_deletions.read().unwrap();
             pending
                 .iter()
-                .filter(|(_, scheduled_time)| now.duration_since(*scheduled_time) >= grace_period)
-                .map(|(path, _)| path.clone())
+                .filter(|entry| entry.scheduled_at <= cutoff)
+                .map(|entry| entry.path.clone())
                 .collect()
         };
 
@@ -591,7 +621,7 @@ impl Compactor {
         // Remove from pending deletions
         {
             let mut pending = self.pending_deletions.write().unwrap();
-            pending.retain(|(path, _)| !chunks_to_delete.contains(path));
+            pending.retain(|entry| !chunks_to_delete.contains(&entry.path));
         }
 
         info!(
@@ -605,13 +635,16 @@ impl Compactor {
     /// Schedule a chunk for deletion (called after compaction)
     pub fn schedule_deletion(&self, path: &str) {
         let mut pending = self.pending_deletions.write().unwrap();
-        pending.push((path.to_string(), std::time::Instant::now()));
+        pending.push(PendingDeletion {
+            path: path.to_string(),
+            scheduled_at: chrono::Utc::now(),
+        });
     }
 
     /// Enforce data retention policy
     async fn enforce_retention(&self) -> Result<()> {
         let retention_nanos = self.config.retention_days as i64 * 24 * 3600 * 1_000_000_000;
-        let cutoff = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) - retention_nanos;
+        let cutoff = self.clock.retention_cutoff_nanos(retention_nanos);
 
         // Find chunks older than retention period
         let old_chunks = self.metadata.get_chunks(TimeRange::new(0, cutoff)).await?;
@@ -637,6 +670,47 @@ impl Compactor {
         Ok(())
     }
 
+    /// S3 path for persisted pending deletions
+    fn pending_deletions_path(&self) -> object_store::path::Path {
+        format!(
+            "{}/metadata/pending-deletions.json",
+            self.storage_config.tenant_id
+        )
+        .into()
+    }
+
+    /// Load pending deletions from S3, merging with any already in memory.
+    async fn load_pending_deletions(&self) -> Result<()> {
+        let path = self.pending_deletions_path();
+        match self.object_store.get(&path).await {
+            Ok(result) => {
+                let bytes = result.bytes().await?;
+                let loaded: Vec<PendingDeletion> = serde_json::from_slice(&bytes)?;
+                let mut pending = self.pending_deletions.write().unwrap();
+                for entry in loaded {
+                    if !pending.iter().any(|p| p.path == entry.path) {
+                        pending.push(entry);
+                    }
+                }
+                info!(count = pending.len(), "Loaded persisted pending deletions");
+                Ok(())
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Persist pending deletions to S3 so they survive restarts.
+    async fn persist_pending_deletions(&self) -> Result<()> {
+        let path = self.pending_deletions_path();
+        let bytes = {
+            let pending = self.pending_deletions.read().unwrap();
+            serde_json::to_vec(&*pending)?
+        };
+        self.object_store.put(&path, bytes.into()).await?;
+        Ok(())
+    }
+
     /// Get target size for a level
     fn target_size_for_level(&self, level: usize) -> usize {
         match level {
@@ -649,7 +723,7 @@ impl Compactor {
 
     /// Generate path for compacted file
     fn generate_compacted_path(&self, level: Level) -> String {
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let uuid = uuid::Uuid::new_v4();
 
         format!(

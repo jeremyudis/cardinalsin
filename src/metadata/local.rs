@@ -276,6 +276,26 @@ impl MetadataClient for LocalMetadataClient {
         Ok(pending)
     }
 
+    async fn cleanup_completed_jobs(&self, max_age_secs: i64) -> Result<usize> {
+        let now = chrono::Utc::now().timestamp();
+        let cutoff = now - max_age_secs;
+        let mut removed = 0;
+        self.compaction_jobs.retain(|_id, job| {
+            if job.status == CompactionStatus::Completed || job.status == CompactionStatus::Failed {
+                match job.created_at {
+                    Some(ts) if ts > cutoff => true,
+                    _ => {
+                        removed += 1;
+                        false
+                    }
+                }
+            } else {
+                true
+            }
+        });
+        Ok(removed)
+    }
+
     // Shard split methods
     async fn start_split(
         &self,
@@ -465,6 +485,19 @@ impl MetadataClient for LocalMetadataClient {
         });
 
         Ok(original_count - leases.leases.len())
+    }
+
+    async fn has_active_split(&self) -> Result<bool> {
+        use crate::sharding::SplitPhase;
+        for entry in self.split_states.iter() {
+            if matches!(
+                entry.value().phase,
+                SplitPhase::DualWrite | SplitPhase::Backfill
+            ) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 

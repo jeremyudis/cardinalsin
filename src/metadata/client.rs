@@ -81,6 +81,14 @@ pub trait MetadataClient: Send + Sync {
     /// Get pending compaction jobs
     async fn get_pending_compaction_jobs(&self) -> Result<Vec<CompactionJob>>;
 
+    /// Remove completed/failed compaction jobs older than `max_age_secs`.
+    /// Returns the number of jobs removed.
+    async fn cleanup_completed_jobs(&self, max_age_secs: i64) -> Result<usize> {
+        // Default no-op for backward compatibility
+        let _ = max_age_secs;
+        Ok(0)
+    }
+
     // Shard split methods
     /// Start a shard split operation
     async fn start_split(
@@ -169,5 +177,13 @@ pub trait MetadataClient: Send + Sync {
     /// Returns the number of leases removed.
     async fn scavenge_leases(&self) -> Result<usize> {
         Ok(0)
+    }
+
+    /// Check if any shard split is currently in dual-write or backfill phase.
+    ///
+    /// Used by the query engine to enable deduplication when overlapping
+    /// data may exist in both old and new shards.
+    async fn has_active_split(&self) -> Result<bool> {
+        Ok(false) // Default: no splits active
     }
 }
