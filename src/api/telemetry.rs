@@ -10,7 +10,7 @@ use opentelemetry::KeyValue;
 use std::sync::OnceLock;
 use std::time::Instant;
 use tonic::Code;
-use tracing::info_span;
+use tracing::{info_span, Instrument};
 
 struct HttpInstruments {
     request_count: Counter<u64>,
@@ -101,9 +101,7 @@ pub async fn http_observability_middleware(req: Request<axum::body::Body>, next:
         http.request.method = %method,
         http.route = %route
     );
-    let _guard = span.enter();
-
-    let response = next.run(req).await;
+    let response = next.run(req).instrument(span).await;
     let status = response.status().as_u16();
     let elapsed = start.elapsed().as_secs_f64();
     let attrs = http_attributes(&method, &route, status);

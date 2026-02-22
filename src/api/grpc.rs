@@ -31,7 +31,7 @@ use std::time::Instant;
 use tokio::sync::watch;
 use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status, Streaming};
-use tracing::info_span;
+use tracing::{info_span, Instrument};
 
 type GrpcResult<T> = std::result::Result<T, Status>;
 type GrpcStream<T> = Pin<Box<dyn Stream<Item = GrpcResult<T>> + Send + 'static>>;
@@ -127,7 +127,6 @@ impl MetricsService for OtlpGrpcService {
             rpc.service = GRPC_SERVICE_OTLP_METRICS,
             rpc.method = "Export"
         );
-        let _guard = span.enter();
 
         let result = async {
             let batch = export_request_to_arrow(request.get_ref()).map_err(|e| {
@@ -139,6 +138,7 @@ impl MetricsService for OtlpGrpcService {
                 partial_success: None,
             }))
         }
+        .instrument(span)
         .await;
 
         record_grpc_result(GRPC_SERVICE_OTLP_METRICS, "Export", start, &result);
@@ -242,7 +242,6 @@ impl FlightService for FlightIngestGrpcService {
             rpc.service = GRPC_SERVICE_FLIGHT,
             rpc.method = "DoPut"
         );
-        let _guard = span.enter();
 
         let result = async {
             let mut stream = request.into_inner();
@@ -266,6 +265,7 @@ impl FlightService for FlightIngestGrpcService {
                 )]));
             Ok(Response::new(out))
         }
+        .instrument(span)
         .await;
 
         record_grpc_result(GRPC_SERVICE_FLIGHT, "DoPut", start, &result);
@@ -343,7 +343,6 @@ impl FlightSqlService for FlightSqlGrpcService {
             rpc.service = GRPC_SERVICE_FLIGHT_SQL,
             rpc.method = "GetFlightInfoStatement"
         );
-        let _guard = span.enter();
 
         let result = async {
             let ticket = make_statement_ticket(&query.query);
@@ -354,6 +353,7 @@ impl FlightSqlService for FlightSqlGrpcService {
                 .map_err(status_internal)?;
             Ok(Response::new(info))
         }
+        .instrument(span)
         .await;
 
         record_grpc_result(
@@ -378,7 +378,6 @@ impl FlightSqlService for FlightSqlGrpcService {
             rpc.service = GRPC_SERVICE_FLIGHT_SQL,
             rpc.method = "DoGetStatement"
         );
-        let _guard = span.enter();
 
         let result = async {
             let query = String::from_utf8(ticket.statement_handle.to_vec())
@@ -392,6 +391,7 @@ impl FlightSqlService for FlightSqlGrpcService {
                 Box::pin(futures::stream::iter(data.into_iter().map(Ok)));
             Ok(Response::new(stream))
         }
+        .instrument(span)
         .await;
 
         record_grpc_result(GRPC_SERVICE_FLIGHT_SQL, "DoGetStatement", start, &result);
