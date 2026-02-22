@@ -1,0 +1,6 @@
+ingest_rows_total|sum(increase(cardinalsin_ingester_write_rows_total{run_id=~"__RUN_ID__"}[24h]))
+query_errors_total|sum(increase(cardinalsin_query_requests_total{result="error",run_id=~"__RUN_ID__"}[24h]))
+compaction_jobs_total_by_result|sum by (result) (increase(cardinalsin_compaction_jobs_total{run_id=~"__RUN_ID__"}[24h]))
+metadata_cas_attempts_by_result|sum by (result) (increase(cardinalsin_metadata_cas_attempts_total{run_id=~"__RUN_ID__"}[24h]))
+max_l0_pending_24h|max_over_time(cardinalsin_compaction_l0_pending_files{run_id=~"__RUN_ID__"}[24h])
+split_actions_by_result|sum by (result) (increase(cardinalsin_split_actions_total{run_id=~"__RUN_ID__"}[24h]))
