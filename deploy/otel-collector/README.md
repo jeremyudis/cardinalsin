@@ -23,6 +23,7 @@ kubectl apply -f deploy/kubernetes/otel-collector.yaml
 ```
 
 The ingester, query, and compactor deployments export OTLP to `http://otel-collector:4317`.
+Collector export compression is intentionally disabled to match the current ingester OTLP gRPC server settings.
 
 ## Troubleshooting
 

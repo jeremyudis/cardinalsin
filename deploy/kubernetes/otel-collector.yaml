@@ -24,7 +24,6 @@ data:
         endpoint: cardinalsin-ingester:4317
         tls:
           insecure: true
-        compression: gzip
         sending_queue:
           enabled: true
           num_consumers: 4
