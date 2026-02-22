@@ -304,9 +304,13 @@ impl Ingester {
                 }
             };
             self.last_wal_seq.store(seq, Ordering::Release);
-        } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
+        } else if self.config.wal.enabled {
             telemetry::record_wal_append_outcome("uninitialized");
-            warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
+            if !self.wal_warned.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "WAL is enabled but not initialized - call ensure_wal() for crash durability"
+                );
+            }
         }
         let mut buffer = self.buffer.write().await;
 
@@ -363,9 +367,13 @@ impl Ingester {
                 }
             };
             self.last_wal_seq.store(seq, Ordering::Release);
-        } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
+        } else if self.config.wal.enabled {
             telemetry::record_wal_append_outcome("uninitialized");
-            warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
+            if !self.wal_warned.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "WAL is enabled but not initialized - call ensure_wal() for crash durability"
+                );
+            }
         }
 
         // Write to old shard first (for consistency during transition)
