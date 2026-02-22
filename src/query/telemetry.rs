@@ -1,6 +1,5 @@
 //! Query-path telemetry instruments and recording helpers.
 
-use super::CacheStats;
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Histogram};
 use opentelemetry::KeyValue;
@@ -68,15 +67,15 @@ fn instruments() -> &'static QueryInstruments {
                 .init(),
             cache_hits: meter
                 .u64_counter("cardinalsin.query.cache.hits")
-                .with_description("Cache hit delta observed per query")
+                .with_description("Cache hits observed at access time")
                 .init(),
             cache_misses: meter
                 .u64_counter("cardinalsin.query.cache.misses")
-                .with_description("Cache miss delta observed per query")
+                .with_description("Cache misses observed at access time")
                 .init(),
             cache_evictions: meter
                 .u64_counter("cardinalsin.query.cache.evictions")
-                .with_description("Cache eviction delta observed per query")
+                .with_description("Cache evictions observed at removal time")
                 .init(),
             cache_size_bytes: meter
                 .u64_histogram("cardinalsin.query.cache.size_bytes")
@@ -131,38 +130,28 @@ pub fn record_query(metrics: QueryMetrics) {
     i.query_pruning_ratio.record(pruning_ratio, &attrs);
 }
 
-pub fn record_cache_delta(before: &CacheStats, after: &CacheStats) {
+pub fn record_cache_hit(tier: &'static str) {
+    instruments()
+        .cache_hits
+        .add(1, &[KeyValue::new("tier", tier)]);
+}
+
+pub fn record_cache_miss(tier: &'static str) {
+    instruments()
+        .cache_misses
+        .add(1, &[KeyValue::new("tier", tier)]);
+}
+
+pub fn record_cache_eviction(tier: &'static str) {
+    instruments()
+        .cache_evictions
+        .add(1, &[KeyValue::new("tier", tier)]);
+}
+
+pub fn record_cache_size_snapshot(l1_size_bytes: usize, l2_size_bytes: usize) {
     let i = instruments();
-
-    let l1_hit_delta = after.l1_hits.saturating_sub(before.l1_hits);
-    let l2_hit_delta = after.l2_hits.saturating_sub(before.l2_hits);
-    let l1_miss_delta = after.l1_misses.saturating_sub(before.l1_misses);
-    let l2_miss_delta = after.l2_misses.saturating_sub(before.l2_misses);
-    let l1_evict_delta = after.l1_evictions.saturating_sub(before.l1_evictions);
-
-    if l1_hit_delta > 0 {
-        i.cache_hits
-            .add(l1_hit_delta, &[KeyValue::new("tier", "l1")]);
-    }
-    if l2_hit_delta > 0 {
-        i.cache_hits
-            .add(l2_hit_delta, &[KeyValue::new("tier", "l2")]);
-    }
-    if l1_miss_delta > 0 {
-        i.cache_misses
-            .add(l1_miss_delta, &[KeyValue::new("tier", "l1")]);
-    }
-    if l2_miss_delta > 0 {
-        i.cache_misses
-            .add(l2_miss_delta, &[KeyValue::new("tier", "l2")]);
-    }
-    if l1_evict_delta > 0 {
-        i.cache_evictions
-            .add(l1_evict_delta, &[KeyValue::new("tier", "l1")]);
-    }
-
     i.cache_size_bytes
-        .record(after.l1_size_bytes as u64, &[KeyValue::new("tier", "l1")]);
+        .record(l1_size_bytes as u64, &[KeyValue::new("tier", "l1")]);
     i.cache_size_bytes
-        .record(after.l2_size_bytes as u64, &[KeyValue::new("tier", "l2")]);
+        .record(l2_size_bytes as u64, &[KeyValue::new("tier", "l2")]);
 }

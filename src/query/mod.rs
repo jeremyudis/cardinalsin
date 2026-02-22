@@ -167,7 +167,6 @@ impl QueryNode {
             run_id = run_id.as_deref().unwrap_or("none")
         );
         let _guard = span.enter();
-        let cache_before = self.cache.stats();
 
         let result = async {
             // Get time range from query for chunk pruning
@@ -176,14 +175,13 @@ impl QueryNode {
             // Extract column predicates for metadata-level filtering (CRITICAL: reduces S3 costs)
             let predicates = self.engine.extract_column_predicates(sql).await?;
 
-            // Measure metadata pruning effectiveness
-            let candidate_chunks = self.metadata.get_chunks(time_range).await?;
             let chunks = self
                 .metadata
                 .get_chunks_with_predicates(time_range, &predicates)
                 .await?;
-            let chunks_candidate_count = candidate_chunks.len() as u64;
             let chunks_selected_count = chunks.len() as u64;
+            // Avoid a second metadata traversal on the hot path.
+            let chunks_candidate_count = chunks_selected_count;
             let bytes_scanned = chunks.iter().map(|chunk| chunk.size_bytes).sum::<u64>();
 
             // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)
@@ -242,8 +240,8 @@ impl QueryNode {
         .await;
 
         let elapsed = started.elapsed().as_secs_f64();
-        let cache_after = self.cache.stats();
-        telemetry::record_cache_delta(&cache_before, &cache_after);
+        let cache_stats = self.cache.stats();
+        telemetry::record_cache_size_snapshot(cache_stats.l1_size_bytes, cache_stats.l2_size_bytes);
 
         match result {
             Ok((

@@ -1,6 +1,6 @@
 //! Tiered caching system (RAM → NVMe → S3)
 
-use super::CacheStats;
+use super::{telemetry, CacheStats};
 use crate::{Error, Result};
 
 use arrow_array::RecordBatch;
@@ -84,8 +84,11 @@ impl TieredCache {
                     .unwrap_or(0);
                 (bytes_size + batches_size) as u32
             })
-            .eviction_listener(move |_key, _value, _cause| {
-                l1_evictions_listener.fetch_add(1, Ordering::Relaxed);
+            .eviction_listener(move |_key, _value, cause| {
+                if cause.was_evicted() {
+                    l1_evictions_listener.fetch_add(1, Ordering::Relaxed);
+                    telemetry::record_cache_eviction("l1");
+                }
             })
             .build();
 
@@ -130,9 +133,11 @@ impl TieredCache {
         // Try L1 (RAM) - moka's get returns Option directly, not a Future
         if let Some(data) = self.l1.get(key).await {
             self.stats.l1_hits.fetch_add(1, Ordering::Relaxed);
+            telemetry::record_cache_hit("l1");
             return Ok(data);
         }
         self.stats.l1_misses.fetch_add(1, Ordering::Relaxed);
+        telemetry::record_cache_miss("l1");
 
         // Try L2 (NVMe) if available - foyer 0.12 returns Option<HybridCacheEntry>
         if let Some(ref l2) = self.l2 {
@@ -142,6 +147,7 @@ impl TieredCache {
                 .map_err(|e| Error::Internal(format!("L2 cache error: {}", e)))?
             {
                 self.stats.l2_hits.fetch_add(1, Ordering::Relaxed);
+                telemetry::record_cache_hit("l2");
                 let bytes = Bytes::from(entry.value().clone());
                 let data = Arc::new(CachedData {
                     bytes,
@@ -152,6 +158,7 @@ impl TieredCache {
                 return Ok(data);
             }
             self.stats.l2_misses.fetch_add(1, Ordering::Relaxed);
+            telemetry::record_cache_miss("l2");
         }
 
         // Fetch from source (S3)
