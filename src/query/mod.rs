@@ -254,20 +254,29 @@ impl QueryNode {
                 chunks_selected_count,
                 chunks_candidate_count,
             )) => {
-                telemetry::record_query(
-                    "success",
-                    None,
-                    elapsed,
+                telemetry::record_query(telemetry::QueryMetrics {
+                    outcome: "success",
+                    error_class: None,
+                    duration_seconds: elapsed,
                     rows_returned,
                     bytes_scanned,
                     bytes_returned,
-                    chunks_selected_count,
-                    chunks_candidate_count,
-                );
+                    chunks_selected: chunks_selected_count,
+                    chunks_candidate: chunks_candidate_count,
+                });
                 Ok(final_results)
             }
             Err(error) => {
-                telemetry::record_query("error", Some(error_class(&error)), elapsed, 0, 0, 0, 0, 0);
+                telemetry::record_query(telemetry::QueryMetrics {
+                    outcome: "error",
+                    error_class: Some(error_class(&error)),
+                    duration_seconds: elapsed,
+                    rows_returned: 0,
+                    bytes_scanned: 0,
+                    bytes_returned: 0,
+                    chunks_selected: 0,
+                    chunks_candidate: 0,
+                });
                 Err(error)
             }
         }

@@ -93,34 +93,36 @@ pub fn record_chunk_registration(outcome: &'static str) {
         .add(1, &[KeyValue::new("outcome", outcome)]);
 }
 
-pub fn record_query(
-    outcome: &'static str,
-    error_class: Option<&'static str>,
-    duration_seconds: f64,
-    rows_returned: u64,
-    bytes_scanned: u64,
-    bytes_returned: u64,
-    chunks_selected: u64,
-    chunks_candidate: u64,
-) {
+pub struct QueryMetrics {
+    pub outcome: &'static str,
+    pub error_class: Option<&'static str>,
+    pub duration_seconds: f64,
+    pub rows_returned: u64,
+    pub bytes_scanned: u64,
+    pub bytes_returned: u64,
+    pub chunks_selected: u64,
+    pub chunks_candidate: u64,
+}
+
+pub fn record_query(metrics: QueryMetrics) {
     let i = instruments();
-    let mut attrs = vec![KeyValue::new("outcome", outcome)];
-    if let Some(error_class) = error_class {
+    let mut attrs = vec![KeyValue::new("outcome", metrics.outcome)];
+    if let Some(error_class) = metrics.error_class {
         attrs.push(KeyValue::new("error.class", error_class));
     }
 
     i.query_requests.add(1, &attrs);
-    i.query_duration_seconds.record(duration_seconds, &attrs);
-    i.query_rows_returned.record(rows_returned, &attrs);
-    i.query_bytes_scanned.record(bytes_scanned, &attrs);
-    i.query_bytes_returned.record(bytes_returned, &attrs);
-    i.query_chunks_selected.record(chunks_selected, &attrs);
-    i.query_chunks_candidate.record(chunks_candidate, &attrs);
+    i.query_duration_seconds.record(metrics.duration_seconds, &attrs);
+    i.query_rows_returned.record(metrics.rows_returned, &attrs);
+    i.query_bytes_scanned.record(metrics.bytes_scanned, &attrs);
+    i.query_bytes_returned.record(metrics.bytes_returned, &attrs);
+    i.query_chunks_selected.record(metrics.chunks_selected, &attrs);
+    i.query_chunks_candidate.record(metrics.chunks_candidate, &attrs);
 
-    let pruning_ratio = if chunks_candidate == 0 {
+    let pruning_ratio = if metrics.chunks_candidate == 0 {
         0.0
     } else {
-        (1.0 - (chunks_selected as f64 / chunks_candidate as f64)).clamp(0.0, 1.0)
+        (1.0 - (metrics.chunks_selected as f64 / metrics.chunks_candidate as f64)).clamp(0.0, 1.0)
     };
     i.query_pruning_ratio.record(pruning_ratio, &attrs);
 }
