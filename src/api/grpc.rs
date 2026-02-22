@@ -3,6 +3,7 @@
 use crate::api::ingest::flight_ingest::FlightIngestService;
 use crate::api::ingest::otlp::{export_request_to_arrow, OtlpReceiver};
 use crate::api::query::flight_sql::FlightSqlQueryService;
+use crate::api::telemetry::record_grpc_request;
 use crate::ingester::Ingester;
 use crate::query::QueryNode;
 use crate::{Error, Result};
@@ -26,12 +27,31 @@ use prost::Message;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::watch;
 use tonic::transport::Server;
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Code, Request, Response, Status, Streaming};
+use tracing::{info_span, Instrument};
 
 type GrpcResult<T> = std::result::Result<T, Status>;
 type GrpcStream<T> = Pin<Box<dyn Stream<Item = GrpcResult<T>> + Send + 'static>>;
+
+const GRPC_SERVICE_OTLP_METRICS: &str = "opentelemetry.proto.collector.metrics.v1.MetricsService";
+const GRPC_SERVICE_FLIGHT: &str = "arrow.flight.protocol.FlightService";
+const GRPC_SERVICE_FLIGHT_SQL: &str = "arrow.flight.protocol.sql.FlightSqlService";
+
+fn record_grpc_result<T>(
+    service: &'static str,
+    method: &'static str,
+    start: Instant,
+    result: &GrpcResult<Response<T>>,
+) {
+    let code = match result {
+        Ok(_) => Code::Ok,
+        Err(status) => status.code(),
+    };
+    record_grpc_request(service, method, code, start.elapsed().as_secs_f64());
+}
 
 /// Run ingester-side gRPC server (OTLP + Flight ingest).
 pub async fn run_ingester_grpc_server(
@@ -99,13 +119,30 @@ impl MetricsService for OtlpGrpcService {
         &self,
         request: Request<ExportMetricsServiceRequest>,
     ) -> GrpcResult<Response<ExportMetricsServiceResponse>> {
-        let batch = export_request_to_arrow(request.get_ref())
-            .map_err(|e| Status::invalid_argument(format!("Invalid OTLP metrics payload: {e}")))?;
-        self.receiver.ingest(batch).await.map_err(status_internal)?;
+        let start = Instant::now();
+        let span = info_span!(
+            "grpc.request",
+            otel.kind = "server",
+            rpc.system = "grpc",
+            rpc.service = GRPC_SERVICE_OTLP_METRICS,
+            rpc.method = "Export"
+        );
 
-        Ok(Response::new(ExportMetricsServiceResponse {
-            partial_success: None,
-        }))
+        let result = async {
+            let batch = export_request_to_arrow(request.get_ref()).map_err(|e| {
+                Status::invalid_argument(format!("Invalid OTLP metrics payload: {e}"))
+            })?;
+            self.receiver.ingest(batch).await.map_err(status_internal)?;
+
+            Ok(Response::new(ExportMetricsServiceResponse {
+                partial_success: None,
+            }))
+        }
+        .instrument(span)
+        .await;
+
+        record_grpc_result(GRPC_SERVICE_OTLP_METRICS, "Export", start, &result);
+        result
     }
 }
 
@@ -136,85 +173,135 @@ impl FlightService for FlightIngestGrpcService {
         &self,
         _request: Request<Streaming<HandshakeRequest>>,
     ) -> GrpcResult<Response<Self::HandshakeStream>> {
-        Err(Status::unimplemented("Handshake is not implemented"))
+        let start = Instant::now();
+        let result = Err(Status::unimplemented("Handshake is not implemented"));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "Handshake", start, &result);
+        result
     }
 
     async fn list_flights(
         &self,
         _request: Request<Criteria>,
     ) -> GrpcResult<Response<Self::ListFlightsStream>> {
-        Ok(Response::new(Box::pin(futures::stream::empty())))
+        let start = Instant::now();
+        let empty: Self::ListFlightsStream =
+            Box::pin(futures::stream::empty::<GrpcResult<FlightInfo>>());
+        let result: GrpcResult<Response<Self::ListFlightsStream>> = Ok(Response::new(empty));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "ListFlights", start, &result);
+        result
     }
 
     async fn get_flight_info(
         &self,
         _request: Request<FlightDescriptor>,
     ) -> GrpcResult<Response<FlightInfo>> {
-        Err(Status::unimplemented(
+        let start = Instant::now();
+        let result = Err(Status::unimplemented(
             "Flight ingest server supports DoPut only",
-        ))
+        ));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "GetFlightInfo", start, &result);
+        result
     }
 
     async fn poll_flight_info(
         &self,
         _request: Request<FlightDescriptor>,
     ) -> GrpcResult<Response<PollInfo>> {
-        Err(Status::unimplemented("PollFlightInfo is not implemented"))
+        let start = Instant::now();
+        let result = Err(Status::unimplemented("PollFlightInfo is not implemented"));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "PollFlightInfo", start, &result);
+        result
     }
 
     async fn get_schema(
         &self,
         _request: Request<FlightDescriptor>,
     ) -> GrpcResult<Response<SchemaResult>> {
-        Err(Status::unimplemented("GetSchema is not implemented"))
+        let start = Instant::now();
+        let result = Err(Status::unimplemented("GetSchema is not implemented"));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "GetSchema", start, &result);
+        result
     }
 
     async fn do_get(&self, _request: Request<Ticket>) -> GrpcResult<Response<Self::DoGetStream>> {
-        Err(Status::unimplemented("DoGet is not implemented"))
+        let start = Instant::now();
+        let result = Err(Status::unimplemented("DoGet is not implemented"));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "DoGet", start, &result);
+        result
     }
 
     async fn do_put(
         &self,
         request: Request<Streaming<FlightData>>,
     ) -> GrpcResult<Response<Self::DoPutStream>> {
-        let mut stream = request.into_inner();
-        let mut payload = Vec::new();
-        while let Some(frame) = stream.next().await {
-            payload.push(frame?);
+        let start = Instant::now();
+        let span = info_span!(
+            "grpc.request",
+            otel.kind = "server",
+            rpc.system = "grpc",
+            rpc.service = GRPC_SERVICE_FLIGHT,
+            rpc.method = "DoPut"
+        );
+
+        let result = async {
+            let mut stream = request.into_inner();
+            let mut payload = Vec::new();
+            while let Some(frame) = stream.next().await {
+                payload.push(frame?);
+            }
+
+            let row_count = self
+                .ingest
+                .process_stream(payload.into_iter())
+                .await
+                .map_err(status_internal)?;
+
+            let response = PutResult {
+                app_metadata: Bytes::from(row_count.to_string()),
+            };
+            let out: Self::DoPutStream =
+                Box::pin(futures::stream::iter(vec![Ok::<PutResult, Status>(
+                    response,
+                )]));
+            Ok(Response::new(out))
         }
+        .instrument(span)
+        .await;
 
-        let row_count = self
-            .ingest
-            .process_stream(payload.into_iter())
-            .await
-            .map_err(status_internal)?;
-
-        let response = PutResult {
-            app_metadata: Bytes::from(row_count.to_string()),
-        };
-        let out = futures::stream::iter(vec![Ok(response)]);
-        Ok(Response::new(Box::pin(out)))
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "DoPut", start, &result);
+        result
     }
 
     async fn do_exchange(
         &self,
         _request: Request<Streaming<FlightData>>,
     ) -> GrpcResult<Response<Self::DoExchangeStream>> {
-        Err(Status::unimplemented("DoExchange is not implemented"))
+        let start = Instant::now();
+        let result = Err(Status::unimplemented("DoExchange is not implemented"));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "DoExchange", start, &result);
+        result
     }
 
     async fn do_action(
         &self,
         _request: Request<Action>,
     ) -> GrpcResult<Response<Self::DoActionStream>> {
-        Err(Status::unimplemented("DoAction is not implemented"))
+        let start = Instant::now();
+        let result = Err(Status::unimplemented("DoAction is not implemented"));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "DoAction", start, &result);
+        result
     }
 
     async fn list_actions(
         &self,
         _request: Request<Empty>,
     ) -> GrpcResult<Response<Self::ListActionsStream>> {
-        Ok(Response::new(Box::pin(futures::stream::empty())))
+        let start = Instant::now();
+        let empty: Self::ListActionsStream =
+            Box::pin(futures::stream::empty::<GrpcResult<ActionType>>());
+        let result: GrpcResult<Response<Self::ListActionsStream>> = Ok(Response::new(empty));
+        record_grpc_result(GRPC_SERVICE_FLIGHT, "ListActions", start, &result);
+        result
     }
 }
 
@@ -248,13 +335,34 @@ impl FlightSqlService for FlightSqlGrpcService {
         query: CommandStatementQuery,
         _request: Request<FlightDescriptor>,
     ) -> GrpcResult<Response<FlightInfo>> {
-        let ticket = make_statement_ticket(&query.query);
-        let info = self
-            .service
-            .get_flight_info_with_ticket(&query.query, ticket)
-            .await
-            .map_err(status_internal)?;
-        Ok(Response::new(info))
+        let start = Instant::now();
+        let span = info_span!(
+            "grpc.request",
+            otel.kind = "server",
+            rpc.system = "grpc",
+            rpc.service = GRPC_SERVICE_FLIGHT_SQL,
+            rpc.method = "GetFlightInfoStatement"
+        );
+
+        let result = async {
+            let ticket = make_statement_ticket(&query.query);
+            let info = self
+                .service
+                .get_flight_info_with_ticket(&query.query, ticket)
+                .await
+                .map_err(status_internal)?;
+            Ok(Response::new(info))
+        }
+        .instrument(span)
+        .await;
+
+        record_grpc_result(
+            GRPC_SERVICE_FLIGHT_SQL,
+            "GetFlightInfoStatement",
+            start,
+            &result,
+        );
+        result
     }
 
     async fn do_get_statement(
@@ -262,15 +370,32 @@ impl FlightSqlService for FlightSqlGrpcService {
         ticket: TicketStatementQuery,
         _request: Request<Ticket>,
     ) -> GrpcResult<Response<<Self as FlightService>::DoGetStream>> {
-        let query = String::from_utf8(ticket.statement_handle.to_vec())
-            .map_err(|e| Status::invalid_argument(format!("Invalid statement handle: {e}")))?;
-        let data = self
-            .service
-            .do_get(&Ticket::new(query.into_bytes()))
-            .await
-            .map_err(status_internal)?;
-        let stream = futures::stream::iter(data.into_iter().map(Ok));
-        Ok(Response::new(Box::pin(stream)))
+        let start = Instant::now();
+        let span = info_span!(
+            "grpc.request",
+            otel.kind = "server",
+            rpc.system = "grpc",
+            rpc.service = GRPC_SERVICE_FLIGHT_SQL,
+            rpc.method = "DoGetStatement"
+        );
+
+        let result = async {
+            let query = String::from_utf8(ticket.statement_handle.to_vec())
+                .map_err(|e| Status::invalid_argument(format!("Invalid statement handle: {e}")))?;
+            let data = self
+                .service
+                .do_get(&Ticket::new(query.into_bytes()))
+                .await
+                .map_err(status_internal)?;
+            let stream: <Self as FlightService>::DoGetStream =
+                Box::pin(futures::stream::iter(data.into_iter().map(Ok)));
+            Ok(Response::new(stream))
+        }
+        .instrument(span)
+        .await;
+
+        record_grpc_result(GRPC_SERVICE_FLIGHT_SQL, "DoGetStatement", start, &result);
+        result
     }
 
     async fn register_sql_info(&self, _id: i32, _result: &SqlInfo) {}
