@@ -7,6 +7,7 @@ use cardinalsin::config::ComponentFactory;
 use cardinalsin::ingester::{Ingester, IngesterConfig, WalConfig, WalSyncMode};
 use cardinalsin::query::{QueryConfig, QueryNode};
 use cardinalsin::schema::MetricSchema;
+use cardinalsin::telemetry::Telemetry;
 use cardinalsin::{Error, StorageConfig};
 
 use clap::Parser;
@@ -15,8 +16,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::watch;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
 
 /// CardinalSin Ingester
 #[derive(Parser, Debug)]
@@ -75,22 +75,7 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize logging
-    let log_level = match args.log_level.to_lowercase().as_str() {
-        "trace" => Level::TRACE,
-        "debug" => Level::DEBUG,
-        "info" => Level::INFO,
-        "warn" => Level::WARN,
-        "error" => Level::ERROR,
-        _ => Level::INFO,
-    };
-
-    FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_target(true)
-        .with_thread_ids(true)
-        .json()
-        .init();
+    let _telemetry = Telemetry::init_for_component("cardinalsin-ingester", &args.log_level)?;
 
     info!("Starting CardinalSin Ingester");
 

@@ -5,13 +5,13 @@
 use cardinalsin::compactor::{Compactor, CompactorConfig};
 use cardinalsin::config::ComponentFactory;
 use cardinalsin::sharding::{HotShardConfig, ShardMonitor};
+use cardinalsin::telemetry::Telemetry;
 use cardinalsin::StorageConfig;
 
 use clap::Parser;
 use std::sync::Arc;
 use tokio::signal;
-use tracing::{info, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::info;
 
 /// CardinalSin Compactor
 #[derive(Parser, Debug)]
@@ -54,22 +54,7 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize logging
-    let log_level = match args.log_level.to_lowercase().as_str() {
-        "trace" => Level::TRACE,
-        "debug" => Level::DEBUG,
-        "info" => Level::INFO,
-        "warn" => Level::WARN,
-        "error" => Level::ERROR,
-        _ => Level::INFO,
-    };
-
-    FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_target(true)
-        .with_thread_ids(true)
-        .json()
-        .init();
+    let _telemetry = Telemetry::init_for_component("cardinalsin-compactor", &args.log_level)?;
 
     info!("Starting CardinalSin Compactor");
 

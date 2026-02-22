@@ -7,11 +7,11 @@
 //!   cargo run --bin backfill-levels -- --bucket cardinalsin-metadata --prefix metadata/
 
 use cardinalsin::metadata::{S3MetadataClient, S3MetadataConfig};
+use cardinalsin::telemetry::Telemetry;
 use clap::Parser;
 use object_store::aws::AmazonS3Builder;
 use std::sync::Arc;
 use tracing::info;
-use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -39,11 +39,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+    let _telemetry = Telemetry::init_for_component("cardinalsin-backfill-levels", "info")?;
 
     let args = Args::parse();
 
