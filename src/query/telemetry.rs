@@ -112,12 +112,16 @@ pub fn record_query(metrics: QueryMetrics) {
     }
 
     i.query_requests.add(1, &attrs);
-    i.query_duration_seconds.record(metrics.duration_seconds, &attrs);
+    i.query_duration_seconds
+        .record(metrics.duration_seconds, &attrs);
     i.query_rows_returned.record(metrics.rows_returned, &attrs);
     i.query_bytes_scanned.record(metrics.bytes_scanned, &attrs);
-    i.query_bytes_returned.record(metrics.bytes_returned, &attrs);
-    i.query_chunks_selected.record(metrics.chunks_selected, &attrs);
-    i.query_chunks_candidate.record(metrics.chunks_candidate, &attrs);
+    i.query_bytes_returned
+        .record(metrics.bytes_returned, &attrs);
+    i.query_chunks_selected
+        .record(metrics.chunks_selected, &attrs);
+    i.query_chunks_candidate
+        .record(metrics.chunks_candidate, &attrs);
 
     let pruning_ratio = if metrics.chunks_candidate == 0 {
         0.0
