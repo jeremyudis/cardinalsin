@@ -107,6 +107,14 @@ This starts:
 - **Compactor** (background service)
 - **Grafana** on port 3000
 
+Grafana dashboards are provisioned automatically from:
+
+- `deploy/grafana/provisioning/datasources/cardinalsin.yaml`
+- `deploy/grafana/provisioning/dashboards/ingest-health.json`
+- `deploy/grafana/provisioning/dashboards/query-performance.json`
+- `deploy/grafana/provisioning/dashboards/compactor-metadata-health.json`
+- `deploy/grafana/provisioning/dashboards/run-overview.json`
+
 ### Building from Source
 
 ```bash

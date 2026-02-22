@@ -1,0 +1,65 @@
+{
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard"}]},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"},
+      "fieldConfig": {"defaults": {"unit": "rows/s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [{"expr": "sum(rate(cardinalsin_ingester_write_rows_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "ingest", "refId": "A"}],
+      "title": "Ingest Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"ok\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "query", "refId": "A"}],
+      "title": "Query Throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "targets": [{"expr": "max(cardinalsin_compaction_l0_pending_files{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "pending L0", "refId": "A"}],
+      "title": "Compaction Backlog",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_ingester_wal_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_metadata_cas_attempts_total{result=\"conflict\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "error-like events/sec", "refId": "A"}],
+      "title": "Error Pressure",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["cardinalsin", "telemetry", "run"],
+  "templating": {
+    "list": [
+      {"name": "run_id", "type": "query", "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"}, "query": "label_values(cardinalsin_compaction_cycle_duration_seconds, run_id)", "includeAll": true, "allValue": ".*", "multi": false, "refresh": 1, "current": {"text": "All", "value": ".*"}},
+      {"name": "service", "type": "query", "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"}, "query": "label_values(cardinalsin_compaction_cycle_duration_seconds, service)", "includeAll": true, "allValue": ".*", "multi": true, "refresh": 1, "current": {"text": "All", "value": [".*"]}},
+      {"name": "tenant", "type": "query", "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"}, "query": "label_values(cardinalsin_compaction_cycle_duration_seconds, tenant)", "includeAll": true, "allValue": ".*", "multi": true, "refresh": 1, "current": {"text": "All", "value": [".*"]}}
+    ]
+  },
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "CardinalSin - Benchmark Run Overview",
+  "uid": "cardinalsin-run-overview",
+  "version": 1,
+  "weekStart": ""
+}
