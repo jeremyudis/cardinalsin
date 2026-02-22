@@ -1,6 +1,6 @@
 //! Tiered caching system (RAM → NVMe → S3)
 
-use super::CacheStats;
+use super::{telemetry, CacheStats};
 use crate::{Error, Result};
 
 use arrow_array::RecordBatch;
@@ -62,11 +62,15 @@ struct CacheStatistics {
     l1_misses: AtomicU64,
     l2_hits: AtomicU64,
     l2_misses: AtomicU64,
+    l1_evictions: Arc<AtomicU64>,
 }
 
 impl TieredCache {
     /// Create a new tiered cache
     pub async fn new(config: CacheConfig) -> Result<Self> {
+        let l1_evictions = Arc::new(AtomicU64::new(0));
+        let l1_evictions_listener = Arc::clone(&l1_evictions);
+
         // Build L1 cache with moka's automatic eviction
         let l1 = Cache::builder()
             .max_capacity(config.l1_size as u64)
@@ -79,6 +83,12 @@ impl TieredCache {
                     .map(|b| b.iter().map(|rb| rb.get_array_memory_size()).sum::<usize>())
                     .unwrap_or(0);
                 (bytes_size + batches_size) as u32
+            })
+            .eviction_listener(move |_key, _value, cause| {
+                if cause.was_evicted() {
+                    l1_evictions_listener.fetch_add(1, Ordering::Relaxed);
+                    telemetry::record_cache_eviction("l1");
+                }
             })
             .build();
 
@@ -109,6 +119,7 @@ impl TieredCache {
                 l1_misses: AtomicU64::new(0),
                 l2_hits: AtomicU64::new(0),
                 l2_misses: AtomicU64::new(0),
+                l1_evictions,
             },
         })
     }
@@ -122,9 +133,11 @@ impl TieredCache {
         // Try L1 (RAM) - moka's get returns Option directly, not a Future
         if let Some(data) = self.l1.get(key).await {
             self.stats.l1_hits.fetch_add(1, Ordering::Relaxed);
+            telemetry::record_cache_hit("l1");
             return Ok(data);
         }
         self.stats.l1_misses.fetch_add(1, Ordering::Relaxed);
+        telemetry::record_cache_miss("l1");
 
         // Try L2 (NVMe) if available - foyer 0.12 returns Option<HybridCacheEntry>
         if let Some(ref l2) = self.l2 {
@@ -134,6 +147,7 @@ impl TieredCache {
                 .map_err(|e| Error::Internal(format!("L2 cache error: {}", e)))?
             {
                 self.stats.l2_hits.fetch_add(1, Ordering::Relaxed);
+                telemetry::record_cache_hit("l2");
                 let bytes = Bytes::from(entry.value().clone());
                 let data = Arc::new(CachedData {
                     bytes,
@@ -144,6 +158,7 @@ impl TieredCache {
                 return Ok(data);
             }
             self.stats.l2_misses.fetch_add(1, Ordering::Relaxed);
+            telemetry::record_cache_miss("l2");
         }
 
         // Fetch from source (S3)
@@ -170,6 +185,7 @@ impl TieredCache {
             l1_misses: self.stats.l1_misses.load(Ordering::Relaxed),
             l2_hits: self.stats.l2_hits.load(Ordering::Relaxed),
             l2_misses: self.stats.l2_misses.load(Ordering::Relaxed),
+            l1_evictions: self.stats.l1_evictions.load(Ordering::Relaxed),
             l1_size_bytes: self.l1.weighted_size() as usize,
             l2_size_bytes: 0, // foyer 0.12 doesn't expose store_bytes directly
         }

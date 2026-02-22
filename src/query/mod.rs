@@ -11,6 +11,7 @@ mod dedup;
 mod engine;
 mod router;
 mod streaming;
+mod telemetry;
 
 pub use cache::{CacheConfig, TieredCache};
 pub use cached_store::CachedObjectStore;
@@ -26,7 +27,9 @@ use crate::{Error, Result, StorageConfig};
 use arrow_array::RecordBatch;
 use object_store::ObjectStore;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::broadcast;
+use tracing::info_span;
 
 /// Configuration for the query node
 #[derive(Debug, Clone)]
@@ -154,44 +157,126 @@ impl QueryNode {
 
     /// Execute a SQL query for a specific tenant with optional adaptive indexing
     pub async fn query_for_tenant(&self, sql: &str, tenant_id: &str) -> Result<Vec<RecordBatch>> {
-        // Get time range from query for chunk pruning
-        let time_range = self.engine.extract_time_range(sql).await?;
+        let started = Instant::now();
+        let run_id = std::env::var("CARDINALSIN_TELEMETRY_RUN_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let span = info_span!(
+            "query.execute",
+            tenant_id = %tenant_id,
+            run_id = run_id.as_deref().unwrap_or("none")
+        );
+        let _guard = span.enter();
 
-        // Extract column predicates for metadata-level filtering (CRITICAL: reduces S3 costs)
-        let predicates = self.engine.extract_column_predicates(sql).await?;
+        let result = async {
+            // Get time range from query for chunk pruning
+            let time_range = self.engine.extract_time_range(sql).await?;
 
-        // Get relevant chunks from metadata with predicate pushdown
-        let chunks = self
-            .metadata
-            .get_chunks_with_predicates(time_range, &predicates)
-            .await?;
+            // Extract column predicates for metadata-level filtering (CRITICAL: reduces S3 costs)
+            let predicates = self.engine.extract_column_predicates(sql).await?;
 
-        // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)
-        let chunk_paths: Vec<String> = chunks.iter().map(|c| c.chunk_path.clone()).collect();
-        let _pin_guard = self.pin_registry.as_ref().map(|r| r.pin(chunk_paths));
+            let chunks = self
+                .metadata
+                .get_chunks_with_predicates(time_range, &predicates)
+                .await?;
+            let chunks_selected_count = chunks.len() as u64;
+            // Avoid a second metadata traversal on the hot path.
+            let chunks_candidate_count = chunks_selected_count;
+            let bytes_scanned = chunks.iter().map(|chunk| chunk.size_bytes).sum::<u64>();
 
-        // Check if any shard is in a dual-write split phase (causes duplicate data)
-        let needs_dedup = self.metadata.has_active_split().await.unwrap_or(false);
+            // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)
+            let chunk_paths: Vec<String> = chunks.iter().map(|c| c.chunk_path.clone()).collect();
+            let _pin_guard = self.pin_registry.as_ref().map(|r| r.pin(chunk_paths));
 
-        // Register chunks with DataFusion
-        for chunk in &chunks {
-            self.engine.register_chunk(&chunk.chunk_path).await?;
+            // Check if any shard is in a dual-write split phase (causes duplicate data)
+            let needs_dedup = self.metadata.has_active_split().await.unwrap_or(false);
+
+            // Register chunks with DataFusion
+            for chunk in &chunks {
+                match self.engine.register_chunk(&chunk.chunk_path).await {
+                    Ok(true) => telemetry::record_chunk_registration("new"),
+                    Ok(false) => telemetry::record_chunk_registration("already_registered"),
+                    Err(e) => {
+                        telemetry::record_chunk_registration("error");
+                        return Err(e);
+                    }
+                }
+            }
+
+            // Execute query with or without adaptive indexing
+            let results = if let Some(ref controller) = self.adaptive_index_controller {
+                self.engine
+                    .execute_with_indexes(sql, tenant_id, controller.clone())
+                    .await?
+            } else {
+                self.engine.execute(sql).await?
+            };
+
+            // Deduplicate if any shard is in dual-write phase
+            let final_results = if needs_dedup {
+                dedup::dedup_batches(results)?
+            } else {
+                results
+            };
+
+            let rows_returned = final_results
+                .iter()
+                .map(|batch| batch.num_rows() as u64)
+                .sum();
+            let bytes_returned = final_results
+                .iter()
+                .map(|batch| batch.get_array_memory_size() as u64)
+                .sum();
+
+            Ok((
+                final_results,
+                rows_returned,
+                bytes_returned,
+                bytes_scanned,
+                chunks_selected_count,
+                chunks_candidate_count,
+            ))
         }
+        .await;
 
-        // Execute query with or without adaptive indexing
-        let results = if let Some(ref controller) = self.adaptive_index_controller {
-            self.engine
-                .execute_with_indexes(sql, tenant_id, controller.clone())
-                .await?
-        } else {
-            self.engine.execute(sql).await?
-        };
+        let elapsed = started.elapsed().as_secs_f64();
+        let cache_stats = self.cache.stats();
+        telemetry::record_cache_size_snapshot(cache_stats.l1_size_bytes, cache_stats.l2_size_bytes);
 
-        // Deduplicate if any shard is in dual-write phase
-        if needs_dedup {
-            dedup::dedup_batches(results)
-        } else {
-            Ok(results)
+        match result {
+            Ok((
+                final_results,
+                rows_returned,
+                bytes_returned,
+                bytes_scanned,
+                chunks_selected_count,
+                chunks_candidate_count,
+            )) => {
+                telemetry::record_query(telemetry::QueryMetrics {
+                    outcome: "success",
+                    error_class: None,
+                    duration_seconds: elapsed,
+                    rows_returned,
+                    bytes_scanned,
+                    bytes_returned,
+                    chunks_selected: chunks_selected_count,
+                    chunks_candidate: chunks_candidate_count,
+                });
+                Ok(final_results)
+            }
+            Err(error) => {
+                telemetry::record_query(telemetry::QueryMetrics {
+                    outcome: "error",
+                    error_class: Some(error_class(&error)),
+                    duration_seconds: elapsed,
+                    rows_returned: 0,
+                    bytes_scanned: 0,
+                    bytes_returned: 0,
+                    chunks_selected: 0,
+                    chunks_candidate: 0,
+                });
+                Err(error)
+            }
         }
     }
 
@@ -260,6 +345,37 @@ pub struct CacheStats {
     pub l1_misses: u64,
     pub l2_hits: u64,
     pub l2_misses: u64,
+    pub l1_evictions: u64,
     pub l1_size_bytes: usize,
     pub l2_size_bytes: usize,
+}
+
+fn error_class(error: &Error) -> &'static str {
+    match error {
+        Error::Arrow(_) => "arrow",
+        Error::Parquet(_) => "parquet",
+        Error::ObjectStore(_) => "object_store",
+        Error::DataFusion(_) => "datafusion",
+        Error::Io(_) => "io",
+        Error::Serialization(_) => "serialization",
+        Error::Config(_) => "config",
+        Error::InvalidSchema(_) => "invalid_schema",
+        Error::MissingMetricName => "missing_metric_name",
+        Error::BufferFull => "buffer_full",
+        Error::WalFull => "wal_full",
+        Error::Query(_) => "query",
+        Error::Metadata(_) => "metadata",
+        Error::Shard(_) => "shard",
+        Error::Cache(_) => "cache",
+        Error::Timeout => "timeout",
+        Error::Internal(_) => "internal",
+        Error::StaleGeneration { .. } => "stale_generation",
+        Error::ShardMoved { .. } => "shard_moved",
+        Error::RateLimitExceeded { .. } => "rate_limit",
+        Error::TooManySubscriptions => "too_many_subscriptions",
+        Error::Conflict => "conflict",
+        Error::TooManyRetries => "too_many_retries",
+        Error::ShardNotFound(_) => "shard_not_found",
+        Error::ChunksAlreadyLeased(_) => "chunks_already_leased",
+    }
 }

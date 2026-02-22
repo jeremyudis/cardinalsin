@@ -71,12 +71,12 @@ impl QueryEngine {
     }
 
     /// Register a chunk file as a table
-    pub async fn register_chunk(&self, path: &str) -> Result<()> {
+    pub async fn register_chunk(&self, path: &str) -> Result<bool> {
         // Check if already registered
         {
             let registered = self.registered_paths.read();
             if registered.contains(path) {
-                return Ok(());
+                return Ok(false);
             }
         }
 
@@ -116,7 +116,7 @@ impl QueryEngine {
         let mut registered = self.registered_paths.write();
         registered.insert(path.to_string());
 
-        Ok(())
+        Ok(true)
     }
 
     /// Execute a SQL query
