@@ -91,7 +91,7 @@ impl StreamingQueryExecutor {
 
         // Register chunks
         for chunk in &chunks {
-            self.engine.register_chunk(&chunk.chunk_path).await?;
+            let _ = self.engine.register_chunk(&chunk.chunk_path).await?;
         }
 
         let sql_owned = sql.to_string();

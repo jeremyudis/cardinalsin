@@ -62,11 +62,15 @@ struct CacheStatistics {
     l1_misses: AtomicU64,
     l2_hits: AtomicU64,
     l2_misses: AtomicU64,
+    l1_evictions: Arc<AtomicU64>,
 }
 
 impl TieredCache {
     /// Create a new tiered cache
     pub async fn new(config: CacheConfig) -> Result<Self> {
+        let l1_evictions = Arc::new(AtomicU64::new(0));
+        let l1_evictions_listener = Arc::clone(&l1_evictions);
+
         // Build L1 cache with moka's automatic eviction
         let l1 = Cache::builder()
             .max_capacity(config.l1_size as u64)
@@ -79,6 +83,9 @@ impl TieredCache {
                     .map(|b| b.iter().map(|rb| rb.get_array_memory_size()).sum::<usize>())
                     .unwrap_or(0);
                 (bytes_size + batches_size) as u32
+            })
+            .eviction_listener(move |_key, _value, _cause| {
+                l1_evictions_listener.fetch_add(1, Ordering::Relaxed);
             })
             .build();
 
@@ -109,6 +116,7 @@ impl TieredCache {
                 l1_misses: AtomicU64::new(0),
                 l2_hits: AtomicU64::new(0),
                 l2_misses: AtomicU64::new(0),
+                l1_evictions,
             },
         })
     }
@@ -170,6 +178,7 @@ impl TieredCache {
             l1_misses: self.stats.l1_misses.load(Ordering::Relaxed),
             l2_hits: self.stats.l2_hits.load(Ordering::Relaxed),
             l2_misses: self.stats.l2_misses.load(Ordering::Relaxed),
+            l1_evictions: self.stats.l1_evictions.load(Ordering::Relaxed),
             l1_size_bytes: self.l1.weighted_size() as usize,
             l2_size_bytes: 0, // foyer 0.12 doesn't expose store_bytes directly
         }
