@@ -18,6 +18,7 @@ use crate::sharding::SplitPhase;
 use crate::{Error, Result};
 
 use async_trait::async_trait;
+use metrics::{counter, gauge, histogram};
 use object_store::path::Path;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::collections::{BTreeMap, HashMap};
@@ -47,6 +48,22 @@ macro_rules! cas_retry {
                 }
                 Err(Error::Conflict) => {
                     let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(__cas_attempt);
+                    metrics::counter!(
+                        "cardinalsin_metadata_cas_retries_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "cas_retry"
+                    )
+                    .increment(1);
+                    metrics::histogram!(
+                        "cardinalsin_metadata_cas_backoff_seconds",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "cas_retry"
+                    )
+                    .record(backoff_ms as f64 / 1000.0);
                     debug!(
                         "CAS conflict on attempt {}, retrying after {}ms",
                         __cas_attempt + 1,
@@ -168,6 +185,8 @@ impl S3MetadataClient {
         expected_etag: &str,
         context: &str,
     ) -> Result<()> {
+        let cas_start = Instant::now();
+        let operation = context.to_string();
         let opts = if expected_etag == "none" {
             // First write: use Create to prevent racing with another process
             PutOptions {
@@ -189,15 +208,80 @@ impl S3MetadataClient {
             .put_opts(path, payload.clone(), opts)
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(_) => {
+                counter!(
+                    "cardinalsin_metadata_cas_attempts_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => operation.clone(),
+                    "result" => "ok"
+                )
+                .increment(1);
+                histogram!(
+                    "cardinalsin_metadata_cas_duration_seconds",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => operation.clone(),
+                    "result" => "ok"
+                )
+                .record(cas_start.elapsed().as_secs_f64());
+                Ok(())
+            }
             Err(object_store::Error::AlreadyExists { .. }) => {
                 // Another process created the file first - treat as conflict so caller retries
+                counter!(
+                    "cardinalsin_metadata_cas_attempts_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => operation.clone(),
+                    "result" => "conflict"
+                )
+                .increment(1);
+                counter!(
+                    "cardinalsin_metadata_cas_retries_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => operation.clone()
+                )
+                .increment(1);
                 Err(Error::Conflict)
             }
-            Err(object_store::Error::Precondition { .. }) => Err(Error::Conflict),
+            Err(object_store::Error::Precondition { .. }) => {
+                counter!(
+                    "cardinalsin_metadata_cas_attempts_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => operation.clone(),
+                    "result" => "conflict"
+                )
+                .increment(1);
+                counter!(
+                    "cardinalsin_metadata_cas_retries_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => operation.clone()
+                )
+                .increment(1);
+                Err(Error::Conflict)
+            }
             Err(object_store::Error::NotImplemented)
             | Err(object_store::Error::NotSupported { .. }) => {
                 if !self.config.allow_unsafe_overwrite {
+                    counter!(
+                        "cardinalsin_metadata_cas_attempts_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => operation.clone(),
+                        "result" => "error"
+                    )
+                    .increment(1);
                     return Err(Error::Metadata(format!(
                         "CAS conditional writes are required for {} at {} but are not supported by the object store. Set allow_unsafe_overwrite=true only for local development with MinIO.",
                         context, path
@@ -217,10 +301,40 @@ impl S3MetadataClient {
                 self.object_store
                     .put_opts(path, payload, overwrite)
                     .await
-                    .map(|_| ())
+                    .map(|_| {
+                        counter!(
+                            "cardinalsin_metadata_cas_attempts_total",
+                            "service" => crate::telemetry::service(),
+                            "run_id" => crate::telemetry::run_id(),
+                            "tenant" => crate::telemetry::tenant(),
+                            "operation" => operation.clone(),
+                            "result" => "unsafe_overwrite"
+                        )
+                        .increment(1);
+                        histogram!(
+                            "cardinalsin_metadata_cas_duration_seconds",
+                            "service" => crate::telemetry::service(),
+                            "run_id" => crate::telemetry::run_id(),
+                            "tenant" => crate::telemetry::tenant(),
+                            "operation" => operation.clone(),
+                            "result" => "unsafe_overwrite"
+                        )
+                        .record(cas_start.elapsed().as_secs_f64());
+                    })
                     .map_err(Error::ObjectStore)
             }
-            Err(e) => Err(Error::ObjectStore(e)),
+            Err(e) => {
+                counter!(
+                    "cardinalsin_metadata_cas_attempts_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => operation,
+                    "result" => "error"
+                )
+                .increment(1);
+                Err(Error::ObjectStore(e))
+            }
         }
     }
 
@@ -1355,11 +1469,23 @@ impl MetadataClient for S3MetadataClient {
         progress: f64,
         phase: SplitPhase,
     ) -> Result<()> {
+        let phase_name = format!("{:?}", phase);
         cas_retry!({
             let (mut states, etag) = self.load_split_states_with_etag().await?;
             if let Some(state) = states.get_mut(shard_id) {
+                let previous_phase = format!("{:?}", state.phase);
                 state.backfill_progress = progress;
-                state.phase = phase;
+                state.phase = phase.clone();
+                if previous_phase != phase_name {
+                    counter!(
+                        "cardinalsin_split_phase_transitions_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "phase" => phase_name.clone()
+                    )
+                    .increment(1);
+                }
             } else {
                 warn!(
                     "No split state found for shard {} during progress update",
@@ -1525,6 +1651,27 @@ impl MetadataClient for S3MetadataClient {
 
             match self.atomic_save_leases(&leases, etag).await {
                 Ok(_) => {
+                    let active_leases = leases
+                        .leases
+                        .values()
+                        .filter(|l| l.status == LeaseStatus::Active && l.expires_at > now)
+                        .count();
+                    gauge!(
+                        "cardinalsin_metadata_lease_active",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant()
+                    )
+                    .set(active_leases as f64);
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "acquire",
+                        "result" => "ok"
+                    )
+                    .increment(1);
                     info!(
                         "Acquired lease {} for {} chunks at level {} after {} retries",
                         lease.lease_id,
@@ -1535,6 +1682,15 @@ impl MetadataClient for S3MetadataClient {
                     return Ok(lease);
                 }
                 Err(Error::Conflict) => {
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "acquire",
+                        "result" => "conflict"
+                    )
+                    .increment(1);
                     let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
                     debug!(
                         "Conflict on acquire_lease attempt {}, retrying after {}ms",
@@ -1548,6 +1704,15 @@ impl MetadataClient for S3MetadataClient {
             }
         }
 
+        counter!(
+            "cardinalsin_metadata_lease_operations_total",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant(),
+            "operation" => "acquire",
+            "result" => "error"
+        )
+        .increment(1);
         Err(Error::TooManyRetries)
     }
 
@@ -1562,15 +1727,55 @@ impl MetadataClient for S3MetadataClient {
                     "Lease {} not found during completion -- may have expired",
                     lease_id
                 );
+                counter!(
+                    "cardinalsin_metadata_lease_operations_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => "complete",
+                    "result" => "skipped"
+                )
+                .increment(1);
                 return Ok(());
             }
 
             match self.atomic_save_leases(&leases, etag).await {
                 Ok(_) => {
+                    let now = chrono::Utc::now();
+                    let active_leases = leases
+                        .leases
+                        .values()
+                        .filter(|l| l.status == LeaseStatus::Active && l.expires_at > now)
+                        .count();
+                    gauge!(
+                        "cardinalsin_metadata_lease_active",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant()
+                    )
+                    .set(active_leases as f64);
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "complete",
+                        "result" => "ok"
+                    )
+                    .increment(1);
                     info!("Completed lease {} after {} retries", lease_id, retry);
                     return Ok(());
                 }
                 Err(Error::Conflict) => {
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "complete",
+                        "result" => "conflict"
+                    )
+                    .increment(1);
                     let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     continue;
@@ -1579,6 +1784,15 @@ impl MetadataClient for S3MetadataClient {
             }
         }
 
+        counter!(
+            "cardinalsin_metadata_lease_operations_total",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant(),
+            "operation" => "complete",
+            "result" => "error"
+        )
+        .increment(1);
         Err(Error::TooManyRetries)
     }
 
@@ -1593,11 +1807,42 @@ impl MetadataClient for S3MetadataClient {
                     "Lease {} not found during failure marking -- may have expired",
                     lease_id
                 );
+                counter!(
+                    "cardinalsin_metadata_lease_operations_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => "fail",
+                    "result" => "skipped"
+                )
+                .increment(1);
                 return Ok(());
             }
 
             match self.atomic_save_leases(&leases, etag).await {
                 Ok(_) => {
+                    let now = chrono::Utc::now();
+                    let active_leases = leases
+                        .leases
+                        .values()
+                        .filter(|l| l.status == LeaseStatus::Active && l.expires_at > now)
+                        .count();
+                    gauge!(
+                        "cardinalsin_metadata_lease_active",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant()
+                    )
+                    .set(active_leases as f64);
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "fail",
+                        "result" => "ok"
+                    )
+                    .increment(1);
                     info!(
                         "Marked lease {} as failed after {} retries",
                         lease_id, retry
@@ -1605,6 +1850,15 @@ impl MetadataClient for S3MetadataClient {
                     return Ok(());
                 }
                 Err(Error::Conflict) => {
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "fail",
+                        "result" => "conflict"
+                    )
+                    .increment(1);
                     let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     continue;
@@ -1613,6 +1867,15 @@ impl MetadataClient for S3MetadataClient {
             }
         }
 
+        counter!(
+            "cardinalsin_metadata_lease_operations_total",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant(),
+            "operation" => "fail",
+            "result" => "error"
+        )
+        .increment(1);
         Err(Error::TooManyRetries)
     }
 
@@ -1624,6 +1887,15 @@ impl MetadataClient for S3MetadataClient {
 
             if let Some(lease) = leases.leases.get_mut(lease_id) {
                 if lease.status != LeaseStatus::Active {
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "renew",
+                        "result" => "error"
+                    )
+                    .increment(1);
                     return Err(Error::Internal(format!(
                         "Cannot renew non-active lease {}",
                         lease_id
@@ -1632,15 +1904,55 @@ impl MetadataClient for S3MetadataClient {
                 lease.expires_at =
                     chrono::Utc::now() + chrono::Duration::from_std(extension).unwrap();
             } else {
+                counter!(
+                    "cardinalsin_metadata_lease_operations_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "operation" => "renew",
+                    "result" => "error"
+                )
+                .increment(1);
                 return Err(Error::Internal(format!("Lease {} not found", lease_id)));
             }
 
             match self.atomic_save_leases(&leases, etag).await {
                 Ok(_) => {
+                    let now = chrono::Utc::now();
+                    let active_leases = leases
+                        .leases
+                        .values()
+                        .filter(|l| l.status == LeaseStatus::Active && l.expires_at > now)
+                        .count();
+                    gauge!(
+                        "cardinalsin_metadata_lease_active",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant()
+                    )
+                    .set(active_leases as f64);
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "renew",
+                        "result" => "ok"
+                    )
+                    .increment(1);
                     debug!("Renewed lease {} after {} retries", lease_id, retry);
                     return Ok(());
                 }
                 Err(Error::Conflict) => {
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "renew",
+                        "result" => "conflict"
+                    )
+                    .increment(1);
                     let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     continue;
@@ -1649,6 +1961,15 @@ impl MetadataClient for S3MetadataClient {
             }
         }
 
+        counter!(
+            "cardinalsin_metadata_lease_operations_total",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant(),
+            "operation" => "renew",
+            "result" => "error"
+        )
+        .increment(1);
         Err(Error::TooManyRetries)
     }
 
@@ -1675,15 +1996,47 @@ impl MetadataClient for S3MetadataClient {
 
             let removed = original_count - leases.leases.len();
             if removed == 0 {
+                gauge!(
+                    "cardinalsin_metadata_lease_active",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant()
+                )
+                .set(leases.leases.len() as f64);
                 return Ok(0);
             }
 
             match self.atomic_save_leases(&leases, etag).await {
                 Ok(_) => {
+                    gauge!(
+                        "cardinalsin_metadata_lease_active",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant()
+                    )
+                    .set(leases.leases.len() as f64);
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "scavenge",
+                        "result" => "ok"
+                    )
+                    .increment(1);
                     info!("Scavenged {} compaction leases", removed);
                     return Ok(removed);
                 }
                 Err(Error::Conflict) => {
+                    counter!(
+                        "cardinalsin_metadata_lease_operations_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "operation" => "scavenge",
+                        "result" => "conflict"
+                    )
+                    .increment(1);
                     let backoff_ms = BASE_BACKOFF_MS * 2_u64.pow(retry);
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                     continue;
@@ -1692,6 +2045,15 @@ impl MetadataClient for S3MetadataClient {
             }
         }
 
+        counter!(
+            "cardinalsin_metadata_lease_operations_total",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant(),
+            "operation" => "scavenge",
+            "result" => "error"
+        )
+        .increment(1);
         Err(Error::TooManyRetries)
     }
 

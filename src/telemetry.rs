@@ -9,6 +9,7 @@ use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{self, Sampler, TracerProvider};
 use opentelemetry_sdk::Resource;
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -294,6 +295,35 @@ fn parse_resource_attributes(raw: &str) -> Result<Vec<(String, String)>> {
         attrs.push((key.to_string(), value.trim().to_string()));
     }
     Ok(attrs)
+}
+
+fn env_label(key: &str, default: &str, cache: &'static OnceLock<String>) -> &'static str {
+    cache
+        .get_or_init(|| {
+            std::env::var(key)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| default.to_string())
+        })
+        .as_str()
+}
+
+/// Service label for internal runtime metrics.
+pub fn service() -> &'static str {
+    static SERVICE: OnceLock<String> = OnceLock::new();
+    env_label("OTEL_SERVICE_NAME", "cardinalsin", &SERVICE)
+}
+
+/// Benchmark run correlation label for internal runtime metrics.
+pub fn run_id() -> &'static str {
+    static RUN_ID: OnceLock<String> = OnceLock::new();
+    env_label("CARDINALSIN_TELEMETRY_RUN_ID", "default", &RUN_ID)
+}
+
+/// Tenant label for internal runtime metrics.
+pub fn tenant() -> &'static str {
+    static TENANT: OnceLock<String> = OnceLock::new();
+    env_label("TENANT_ID", "default", &TENANT)
 }
 
 #[cfg(test)]

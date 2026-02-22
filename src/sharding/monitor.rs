@@ -2,6 +2,7 @@
 
 use super::ShardId;
 use dashmap::DashMap;
+use metrics::{counter, gauge};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -183,28 +184,64 @@ impl ShardMonitor {
     /// Evaluate shards and return recommended actions
     pub fn evaluate_shards(&self) -> Vec<ShardAction> {
         let mut actions = Vec::new();
+        let mut max_write_rate = 0.0f64;
+        let mut max_p99_latency = 0.0f64;
 
         for mut entry in self.metrics.iter_mut() {
             let shard_id = entry.key().clone();
             let metrics = entry.value_mut();
+            let write_rate = metrics.write_qps.rate_per_second();
+            let p99_latency = metrics.p99_latency.avg();
+            max_write_rate = max_write_rate.max(write_rate);
+            max_p99_latency = max_p99_latency.max(p99_latency);
 
             // Use rate_per_second for QPS, avg for other metrics
-            let is_hot = metrics.write_qps.rate_per_second()
-                > self.config.write_qps_threshold as f64
+            let is_hot = write_rate > self.config.write_qps_threshold as f64
                 || metrics.bytes_per_sec.avg() > self.config.bytes_threshold as f64
                 || metrics.cpu_utilization.avg() > self.config.cpu_threshold
-                || metrics.p99_latency.avg() > self.config.latency_threshold.as_secs_f64();
+                || p99_latency > self.config.latency_threshold.as_secs_f64();
 
             if is_hot {
                 metrics.mark_hot();
+                counter!(
+                    "cardinalsin_shard_hot_evaluations_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "result" => "hot"
+                )
+                .increment(1);
 
                 if metrics.duration_hot() > self.config.detection_window {
                     actions.push(ShardAction::Split(shard_id));
                 }
             } else {
                 metrics.mark_cool();
+                counter!(
+                    "cardinalsin_shard_hot_evaluations_total",
+                    "service" => crate::telemetry::service(),
+                    "run_id" => crate::telemetry::run_id(),
+                    "tenant" => crate::telemetry::tenant(),
+                    "result" => "cool"
+                )
+                .increment(1);
             }
         }
+
+        gauge!(
+            "cardinalsin_shard_write_rate",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant()
+        )
+        .set(max_write_rate);
+        gauge!(
+            "cardinalsin_shard_latency_p99_seconds",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant()
+        )
+        .set(max_p99_latency);
 
         actions
     }
