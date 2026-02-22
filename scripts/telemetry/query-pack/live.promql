@@ -1,0 +1,7 @@
+ingest_throughput_rps|sum(rate(cardinalsin_ingester_write_rows_total{run_id=~"__RUN_ID__"}[5m]))
+ingest_error_rps|sum(rate(cardinalsin_ingester_wal_operations_total{result="error",run_id=~"__RUN_ID__"}[5m]))
+query_latency_p99_seconds|histogram_quantile(0.99, sum(rate(cardinalsin_query_latency_seconds_bucket{run_id=~"__RUN_ID__"}[5m])) by (le))
+query_error_rps|sum(rate(cardinalsin_query_requests_total{result="error",run_id=~"__RUN_ID__"}[5m]))
+compaction_backlog_l0|max(cardinalsin_compaction_l0_pending_files{run_id=~"__RUN_ID__"})
+metadata_cas_conflict_rps|sum(rate(cardinalsin_metadata_cas_attempts_total{result="conflict",run_id=~"__RUN_ID__"}[5m]))
+cache_hit_ratio|sum(rate(cardinalsin_query_cache_hits_total{run_id=~"__RUN_ID__"}[5m])) / clamp_min(sum(rate(cardinalsin_query_cache_hits_total{run_id=~"__RUN_ID__"}[5m])) + sum(rate(cardinalsin_query_cache_misses_total{run_id=~"__RUN_ID__"}[5m])), 1)
