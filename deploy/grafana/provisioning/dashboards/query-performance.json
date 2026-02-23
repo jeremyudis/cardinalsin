@@ -1,0 +1,65 @@
+{
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard"}]},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [{"expr": "histogram_quantile(0.99, sum(rate(cardinalsin_query_latency_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "p99", "refId": "A"}],
+      "title": "Query Latency p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"},
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "errors/sec", "refId": "A"}],
+      "title": "Query Error Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "id": 3,
+      "targets": [{"expr": "sum(rate(cardinalsin_query_cache_hits_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) / clamp_min(sum(rate(cardinalsin_query_cache_hits_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_query_cache_misses_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])), 1)", "legendFormat": "hit ratio", "refId": "A"}],
+      "title": "Cache Hit Ratio",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"},
+      "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "id": 4,
+      "targets": [{"expr": "sum(rate(cardinalsin_query_bytes_scanned_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "bytes scanned/sec", "refId": "A"}],
+      "title": "Scan Throughput",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["cardinalsin", "telemetry", "query"],
+  "templating": {
+    "list": [
+      {"name": "run_id", "type": "query", "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"}, "query": "label_values(cardinalsin_compaction_cycle_duration_seconds, run_id)", "includeAll": true, "allValue": ".*", "multi": false, "refresh": 1, "current": {"text": "All", "value": ".*"}},
+      {"name": "service", "type": "query", "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"}, "query": "label_values(cardinalsin_compaction_cycle_duration_seconds, service)", "includeAll": true, "allValue": ".*", "multi": true, "refresh": 1, "current": {"text": "All", "value": [".*"]}},
+      {"name": "tenant", "type": "query", "datasource": {"type": "prometheus", "uid": "cardinalsin-prom"}, "query": "label_values(cardinalsin_compaction_cycle_duration_seconds, tenant)", "includeAll": true, "allValue": ".*", "multi": true, "refresh": 1, "current": {"text": "All", "value": [".*"]}}
+    ]
+  },
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "CardinalSin - Query Performance",
+  "uid": "cardinalsin-query-performance",
+  "version": 1,
+  "weekStart": ""
+}
