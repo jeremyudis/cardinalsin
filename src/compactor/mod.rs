@@ -22,6 +22,7 @@ use crate::metadata::{CompactionJob, CompactionStatus, MetadataClient, TimeRange
 use crate::sharding::{ShardAction, ShardMonitor, ShardSplitter};
 use crate::{Error, Result, StorageConfig};
 
+use metrics::{counter, gauge, histogram};
 use object_store::ObjectStore;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -270,12 +271,30 @@ impl Compactor {
         let actions = self.shard_monitor.evaluate_shards();
         if actions.is_empty() {
             info!("No hot shards detected");
+            counter!(
+                "cardinalsin_split_actions_total",
+                "service" => crate::telemetry::service(),
+                "run_id" => crate::telemetry::run_id(),
+                "tenant" => crate::telemetry::tenant(),
+                "action" => "evaluate",
+                "result" => "none"
+            )
+            .increment(1);
             return Ok(());
         }
 
         for action in actions {
             match action {
                 ShardAction::Split(shard_id) => {
+                    counter!(
+                        "cardinalsin_split_actions_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "action" => "split",
+                        "result" => "requested"
+                    )
+                    .increment(1);
                     info!(
                         "Hot shard detected: {}. Attempting to initiate split.",
                         shard_id
@@ -290,6 +309,15 @@ impl Compactor {
                                 Ok(Some(meta)) => meta,
                                 Ok(None) => {
                                     error!("Cannot split shard {}: metadata not found.", shard_id);
+                                    counter!(
+                                        "cardinalsin_split_actions_total",
+                                        "service" => crate::telemetry::service(),
+                                        "run_id" => crate::telemetry::run_id(),
+                                        "tenant" => crate::telemetry::tenant(),
+                                        "action" => "split",
+                                        "result" => "error"
+                                    )
+                                    .increment(1);
                                     return;
                                 }
                                 Err(e) => {
@@ -297,6 +325,15 @@ impl Compactor {
                                         "Cannot split shard {}: failed to get metadata: {}",
                                         shard_id, e
                                     );
+                                    counter!(
+                                        "cardinalsin_split_actions_total",
+                                        "service" => crate::telemetry::service(),
+                                        "run_id" => crate::telemetry::run_id(),
+                                        "tenant" => crate::telemetry::tenant(),
+                                        "action" => "split",
+                                        "result" => "error"
+                                    )
+                                    .increment(1);
                                     return;
                                 }
                             };
@@ -307,6 +344,15 @@ impl Compactor {
                                 "Skipping split for shard {}: already in non-active state ({:?}).",
                                 shard_id, shard_metadata.state
                             );
+                            counter!(
+                                "cardinalsin_split_actions_total",
+                                "service" => crate::telemetry::service(),
+                                "run_id" => crate::telemetry::run_id(),
+                                "tenant" => crate::telemetry::tenant(),
+                                "action" => "split",
+                                "result" => "skipped"
+                            )
+                            .increment(1);
                             return;
                         }
 
@@ -315,6 +361,25 @@ impl Compactor {
                             .await
                         {
                             error!("Failed to execute split for shard {}: {}", shard_id, e);
+                            counter!(
+                                "cardinalsin_split_actions_total",
+                                "service" => crate::telemetry::service(),
+                                "run_id" => crate::telemetry::run_id(),
+                                "tenant" => crate::telemetry::tenant(),
+                                "action" => "split",
+                                "result" => "error"
+                            )
+                            .increment(1);
+                        } else {
+                            counter!(
+                                "cardinalsin_split_actions_total",
+                                "service" => crate::telemetry::service(),
+                                "run_id" => crate::telemetry::run_id(),
+                                "tenant" => crate::telemetry::tenant(),
+                                "action" => "split",
+                                "result" => "ok"
+                            )
+                            .increment(1);
                         }
                     });
                 }
@@ -323,6 +388,15 @@ impl Compactor {
                         "Lease transfer requested for shard {} to node {}",
                         shard_id, target_node
                     );
+                    counter!(
+                        "cardinalsin_split_actions_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "action" => "transfer_lease",
+                        "result" => "noop"
+                    )
+                    .increment(1);
                     // TODO: Implement lease transfer when cluster mode is enabled
                 }
                 ShardAction::MoveReplica(shard_id, from_node, to_node) => {
@@ -330,6 +404,15 @@ impl Compactor {
                         "Replica move requested for shard {} from {} to {}",
                         shard_id, from_node, to_node
                     );
+                    counter!(
+                        "cardinalsin_split_actions_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "action" => "move_replica",
+                        "result" => "noop"
+                    )
+                    .increment(1);
                     // TODO: Implement replica movement when cluster mode is enabled
                 }
             }
@@ -339,53 +422,69 @@ impl Compactor {
 
     /// Run a single compaction cycle
     pub async fn run_compaction_cycle(&self) -> Result<()> {
-        // Update L0 pending count for backpressure calculation
-        self.update_l0_pending_count().await?;
+        let cycle_start = std::time::Instant::now();
+        let result = async {
+            // Update L0 pending count for backpressure calculation
+            self.update_l0_pending_count().await?;
 
-        // Level 0: Size-tiered compaction for recent data
-        self.compact_l0().await?;
+            // Level 0: Size-tiered compaction for recent data
+            self.compact_l0().await?;
 
-        // Level 1+: Leveled compaction for older data
-        for level in 1..=self.config.max_levels {
-            // Check capacity before starting more work
-            if !self.has_capacity() {
-                debug!("Compaction at capacity, skipping higher levels");
-                break;
+            // Level 1+: Leveled compaction for older data
+            for level in 1..=self.config.max_levels {
+                // Check capacity before starting more work
+                if !self.has_capacity() {
+                    debug!("Compaction at capacity, skipping higher levels");
+                    break;
+                }
+                self.compact_level(level).await?;
             }
-            self.compact_level(level).await?;
-        }
 
-        // Garbage collection - process pending deletions
-        self.garbage_collect().await?;
+            // Garbage collection - process pending deletions
+            self.garbage_collect().await?;
 
-        // Enforce retention policy
-        self.enforce_retention().await?;
+            // Enforce retention policy
+            self.enforce_retention().await?;
 
-        // Scavenge expired/terminal compaction leases
-        match self.metadata.scavenge_leases().await {
-            Ok(removed) if removed > 0 => {
-                info!(removed, "Scavenged expired compaction leases");
+            // Scavenge expired/terminal compaction leases
+            match self.metadata.scavenge_leases().await {
+                Ok(removed) if removed > 0 => {
+                    info!(removed, "Scavenged expired compaction leases");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to scavenge compaction leases");
+                }
+                _ => {}
             }
-            Err(e) => {
-                warn!(error = %e, "Failed to scavenge compaction leases");
+
+            // Clean up completed/failed jobs older than 1 hour
+            if let Err(e) = self.metadata.cleanup_completed_jobs(3600).await {
+                warn!("Failed to clean up compaction jobs: {}", e);
             }
-            _ => {}
+
+            // Update backpressure state
+            self.update_backpressure_state().await?;
+
+            // Persist pending deletions to survive restarts
+            if let Err(e) = self.persist_pending_deletions().await {
+                warn!("Failed to persist pending deletions: {}", e);
+            }
+
+            Ok(())
         }
+        .await;
 
-        // Clean up completed/failed jobs older than 1 hour
-        if let Err(e) = self.metadata.cleanup_completed_jobs(3600).await {
-            warn!("Failed to clean up compaction jobs: {}", e);
-        }
+        let result_label = if result.is_ok() { "ok" } else { "error" };
+        histogram!(
+            "cardinalsin_compaction_cycle_duration_seconds",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant(),
+            "result" => result_label
+        )
+        .record(cycle_start.elapsed().as_secs_f64());
 
-        // Update backpressure state
-        self.update_backpressure_state().await?;
-
-        // Persist pending deletions to survive restarts
-        if let Err(e) = self.persist_pending_deletions().await {
-            warn!("Failed to persist pending deletions: {}", e);
-        }
-
-        Ok(())
+        result
     }
 
     /// Update the count of L0 files pending compaction
@@ -394,6 +493,13 @@ impl Compactor {
         let total_files: usize = candidates.iter().map(|g| g.len()).sum();
         self.l0_pending_count
             .store(total_files as u64, Ordering::Relaxed);
+        gauge!(
+            "cardinalsin_compaction_l0_pending_files",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant()
+        )
+        .set(total_files as f64);
         Ok(())
     }
 
@@ -402,6 +508,13 @@ impl Compactor {
         let l0_pending = self.l0_pending_count.load(Ordering::Relaxed);
         let is_behind = l0_pending > self.backpressure_threshold;
         self.is_behind.store(is_behind, Ordering::Relaxed);
+        gauge!(
+            "cardinalsin_compaction_backpressure",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant()
+        )
+        .set(if is_behind { 1.0 } else { 0.0 });
 
         if is_behind {
             warn!(
@@ -439,7 +552,14 @@ impl Compactor {
             };
 
             // Track active compaction
-            self.active_compactions.fetch_add(1, Ordering::Relaxed);
+            let active = self.active_compactions.fetch_add(1, Ordering::Relaxed) + 1;
+            gauge!(
+                "cardinalsin_compaction_active",
+                "service" => crate::telemetry::service(),
+                "run_id" => crate::telemetry::run_id(),
+                "tenant" => crate::telemetry::tenant()
+            )
+            .set(active as f64);
 
             // Spawn lease renewal task for long-running compactions
             let renewal_handle = self.spawn_lease_renewal(lease.lease_id.clone());
@@ -477,6 +597,15 @@ impl Compactor {
                     }
 
                     info!(target = %target_path, "L0 compaction completed");
+                    counter!(
+                        "cardinalsin_compaction_jobs_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "level" => "0",
+                        "result" => "ok"
+                    )
+                    .increment(1);
                 }
                 Err(e) => {
                     self.metadata
@@ -484,12 +613,28 @@ impl Compactor {
                         .await?;
                     self.metadata.fail_lease(&lease.lease_id).await?;
                     error!("L0 compaction failed: {}", e);
+                    counter!(
+                        "cardinalsin_compaction_jobs_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "level" => "0",
+                        "result" => "error"
+                    )
+                    .increment(1);
                 }
             }
 
             renewal_handle.abort();
             // Track compaction completion
-            self.active_compactions.fetch_sub(1, Ordering::Relaxed);
+            let active = self.active_compactions.fetch_sub(1, Ordering::Relaxed) - 1;
+            gauge!(
+                "cardinalsin_compaction_active",
+                "service" => crate::telemetry::service(),
+                "run_id" => crate::telemetry::run_id(),
+                "tenant" => crate::telemetry::tenant()
+            )
+            .set(active as f64);
         }
 
         Ok(())
@@ -535,7 +680,14 @@ impl Compactor {
             };
 
             // Track active compaction
-            self.active_compactions.fetch_add(1, Ordering::Relaxed);
+            let active = self.active_compactions.fetch_add(1, Ordering::Relaxed) + 1;
+            gauge!(
+                "cardinalsin_compaction_active",
+                "service" => crate::telemetry::service(),
+                "run_id" => crate::telemetry::run_id(),
+                "tenant" => crate::telemetry::tenant()
+            )
+            .set(active as f64);
 
             // Spawn lease renewal task
             let renewal_handle = self.spawn_lease_renewal(lease.lease_id.clone());
@@ -555,6 +707,7 @@ impl Compactor {
                 created_at: Some(chrono::Utc::now().timestamp()),
             };
             self.metadata.create_compaction_job(job.clone()).await?;
+            let level_label = level.to_string();
 
             match self.merge_chunks(&group, Level::L(level)).await {
                 Ok(target_path) => {
@@ -572,6 +725,15 @@ impl Compactor {
                     }
 
                     info!(level = level, target = %target_path, "Level compaction completed");
+                    counter!(
+                        "cardinalsin_compaction_jobs_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "level" => level_label.clone(),
+                        "result" => "ok"
+                    )
+                    .increment(1);
                 }
                 Err(e) => {
                     self.metadata
@@ -579,12 +741,28 @@ impl Compactor {
                         .await?;
                     self.metadata.fail_lease(&lease.lease_id).await?;
                     error!(level = level, "Level compaction failed: {}", e);
+                    counter!(
+                        "cardinalsin_compaction_jobs_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "level" => level_label.clone(),
+                        "result" => "error"
+                    )
+                    .increment(1);
                 }
             }
 
             renewal_handle.abort();
             // Track compaction completion
-            self.active_compactions.fetch_sub(1, Ordering::Relaxed);
+            let active = self.active_compactions.fetch_sub(1, Ordering::Relaxed) - 1;
+            gauge!(
+                "cardinalsin_compaction_active",
+                "service" => crate::telemetry::service(),
+                "run_id" => crate::telemetry::run_id(),
+                "tenant" => crate::telemetry::tenant()
+            )
+            .set(active as f64);
         }
 
         Ok(())
@@ -614,6 +792,7 @@ impl Compactor {
 
     /// Garbage collect old chunks with grace period
     async fn garbage_collect(&self) -> Result<()> {
+        let gc_start = std::time::Instant::now();
         let now = chrono::Utc::now();
         let grace_period = chrono::Duration::from_std(self.config.gc_grace_period)
             .unwrap_or_else(|_| chrono::Duration::seconds(300));
@@ -641,20 +820,46 @@ impl Compactor {
 
         if chunks_to_delete.is_empty() {
             debug!("No chunks ready for garbage collection");
+            histogram!(
+                "cardinalsin_compaction_gc_duration_seconds",
+                "service" => crate::telemetry::service(),
+                "run_id" => crate::telemetry::run_id(),
+                "tenant" => crate::telemetry::tenant(),
+                "result" => "ok"
+            )
+            .record(gc_start.elapsed().as_secs_f64());
             return Ok(());
         }
 
         info!(count = chunks_to_delete.len(), "Garbage collecting chunks");
 
         // Delete from object storage
+        let mut failures = 0u64;
         for path in &chunks_to_delete {
             match self.object_store.delete(&path.clone().into()).await {
                 Ok(_) => {
                     debug!(path = %path, "Deleted chunk from object storage");
+                    counter!(
+                        "cardinalsin_compaction_gc_deletions_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "result" => "ok"
+                    )
+                    .increment(1);
                 }
                 Err(e) => {
                     // Log error but continue - chunk may already be deleted
                     warn!(path = %path, error = %e, "Failed to delete chunk");
+                    failures += 1;
+                    counter!(
+                        "cardinalsin_compaction_gc_deletions_total",
+                        "service" => crate::telemetry::service(),
+                        "run_id" => crate::telemetry::run_id(),
+                        "tenant" => crate::telemetry::tenant(),
+                        "result" => "error"
+                    )
+                    .increment(1);
                 }
             }
         }
@@ -669,6 +874,14 @@ impl Compactor {
             deleted = chunks_to_delete.len(),
             "Garbage collection completed"
         );
+        histogram!(
+            "cardinalsin_compaction_gc_duration_seconds",
+            "service" => crate::telemetry::service(),
+            "run_id" => crate::telemetry::run_id(),
+            "tenant" => crate::telemetry::tenant(),
+            "result" => if failures == 0 { "ok" } else { "partial" }
+        )
+        .record(gc_start.elapsed().as_secs_f64());
 
         Ok(())
     }

@@ -139,6 +139,13 @@ Telemetry metric names, labels, semantic mappings, and cardinality rules are def
 - `docs/telemetry/metric-catalog.md`
 
 When adding or changing instrumentation, keep dashboards and query-pack assets aligned with this contract.
+### Mixed Telemetry Workload
+
+```bash
+scripts/telemetry/run_mixed_workload.sh --duration 30m
+```
+
+Runbook: `docs/telemetry/mixed-workload-runner.md`
 
 ---
 
