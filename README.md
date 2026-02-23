@@ -140,6 +140,17 @@ scripts/telemetry/run_query_pack.sh --mode all --run-id "run-20260222T190000Z"
 
 Guide: `docs/telemetry/query-pack.md`
 
+### Real-Time Observability Dogfooding
+
+```bash
+RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)"
+scripts/telemetry/run_mixed_workload.sh --duration 30m --run-id "$RUN_ID"
+scripts/telemetry/run_query_pack.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/query-pack"
+```
+
+Operator runbook: `docs/observability-dogfooding-runbook.md`
+Script reference: `docs/telemetry/mixed-workload-runner.md`
+
 ## Telemetry Contract
 
 Telemetry metric names, labels, semantic mappings, and cardinality rules are defined in:
@@ -147,13 +158,6 @@ Telemetry metric names, labels, semantic mappings, and cardinality rules are def
 - `docs/telemetry/metric-catalog.md`
 
 When adding or changing instrumentation, keep dashboards and query-pack assets aligned with this contract.
-### Mixed Telemetry Workload
-
-```bash
-scripts/telemetry/run_mixed_workload.sh --duration 30m
-```
-
-Runbook: `docs/telemetry/mixed-workload-runner.md`
 
 ---
 
