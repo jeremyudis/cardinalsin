@@ -140,6 +140,13 @@ scripts/telemetry/run_query_pack.sh --mode all --run-id "run-20260222T190000Z"
 
 Guide: `docs/telemetry/query-pack.md`
 
+## Telemetry Contract
+
+Telemetry metric names, labels, semantic mappings, and cardinality rules are defined in:
+
+- `docs/telemetry/metric-catalog.md`
+
+When adding or changing instrumentation, keep dashboards and query-pack assets aligned with this contract.
 ### Mixed Telemetry Workload
 
 ```bash
