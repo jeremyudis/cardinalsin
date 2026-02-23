@@ -20,8 +20,21 @@ Outputs:
 - `benchmarks/results/<run_id>/query.log`
 - `benchmarks/results/<run_id>/summary.json`
 
+`summary.json` includes overhead tracking fields used by CI guardrails:
+
+- `query_latency_p99_seconds`
+- `cpu_seconds_per_second`
+
 Tunable KPI thresholds:
 
 - `KPI_MIN_INGEST_RPS` (default: `1000`)
 - `KPI_MAX_QUERY_ERROR_RPS` (default: `5`)
 - `KPI_MAX_L0_PENDING` (default: `500`)
+
+Compare a candidate run against the checked-in baseline budget:
+
+```bash
+scripts/telemetry/check_overhead_budget.sh \
+  --baseline docs/telemetry/overhead-baseline.json \
+  --candidate benchmarks/results/<run_id>/summary.json
+```

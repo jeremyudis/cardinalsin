@@ -6,6 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **If an implementation is incorrect, FIX IT! Do NOT modify tests to match broken code.**
 
+## Epic Delivery Workflow
+
+When executing an Epic from GitHub issues:
+
+1. Identify and pick up the first five sub-items unless the request specifies a different slice.
+2. Run work in parallel agents/worktrees where possible.
+3. Map each sub-item to its Beads issue and mark/update the associated Beads entries as work progresses.
+4. Prefer one PR per sub-item when file changes do not conflict; if there are conflicts, condense into fewer PRs.
+5. Ensure every PR is attached to its issue with an explicit closing keyword in the PR body (for example, `Closes #123`) so merge auto-closes the issue.
+6. Include epic linkage in each PR (for example, `Refs: #<epic>`).
+
 ## Project Overview
 
 CardinalSin is a high-cardinality time-series database built on object storage (S3/GCS/Azure) that solves the cardinality explosion problem through columnar storage instead of per-tag-combination indexing.

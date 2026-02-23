@@ -1,0 +1,37 @@
+name: Telemetry Overhead Budget
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_summary:
+        description: "Path to baseline summary.json in repo/workspace"
+        required: true
+        default: "docs/telemetry/overhead-baseline.json"
+      candidate_summary:
+        description: "Path to candidate summary.json in repo/workspace"
+        required: true
+      cpu_budget_pct:
+        description: "Max allowed CPU regression (%)"
+        required: true
+        default: "5"
+      p99_budget_pct:
+        description: "Max allowed p99 latency regression (%)"
+        required: true
+        default: "10"
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare candidate vs baseline overhead
+        env:
+          CPU_BUDGET_PCT: ${{ github.event.inputs.cpu_budget_pct }}
+          P99_BUDGET_PCT: ${{ github.event.inputs.p99_budget_pct }}
+        run: |
+          bash scripts/telemetry/check_overhead_budget.sh \
+            --baseline "${{ github.event.inputs.baseline_summary }}" \
+            --candidate "${{ github.event.inputs.candidate_summary }}"

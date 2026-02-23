@@ -1,0 +1,17 @@
+{
+  "run_id": "baseline-20260222T190000Z",
+  "duration": "30m",
+  "ingest_rps_last_5m": 2100.0,
+  "query_error_rps_last_5m": 0.2,
+  "l0_pending_max": 120.0,
+  "query_latency_p99_seconds": 0.18,
+  "cpu_seconds_per_second": 1.35,
+  "kpi": {
+    "ingest_process_ok": true,
+    "query_process_ok": true,
+    "ingest_rps_pass": true,
+    "query_error_rps_pass": true,
+    "l0_pending_pass": true,
+    "overall_pass": true
+  }
+}
