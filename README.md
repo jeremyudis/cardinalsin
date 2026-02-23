@@ -132,6 +132,14 @@ scripts/telemetry/run_query_pack.sh --mode all --run-id "run-20260222T190000Z"
 
 Guide: `docs/telemetry/query-pack.md`
 
+### Mixed Telemetry Workload
+
+```bash
+scripts/telemetry/run_mixed_workload.sh --duration 30m
+```
+
+Runbook: `docs/telemetry/mixed-workload-runner.md`
+
 ---
 
 ## API Interfaces
