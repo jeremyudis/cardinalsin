@@ -51,6 +51,7 @@ use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 
 type GrpcResult<T> = std::result::Result<T, Status>;
+type HelperResult<T> = std::result::Result<T, Box<Status>>;
 type GrpcStream<T> = Pin<Box<dyn Stream<Item = GrpcResult<T>> + Send + 'static>>;
 
 const DEFAULT_FLIGHT_SQL_CATALOG: &str = "default";
@@ -106,29 +107,26 @@ fn flight_data_stream_response(data: Vec<FlightData>) -> Response<GrpcStream<Fli
     Response::new(Box::pin(stream))
 }
 
-#[allow(clippy::result_large_err)]
-fn schema_result(schema: &Schema) -> GrpcResult<SchemaResult> {
+fn schema_result(schema: &Schema) -> HelperResult<SchemaResult> {
     let options = arrow_ipc::writer::IpcWriteOptions::default();
     SchemaAsIpc::new(schema, &options)
         .try_into()
-        .map_err(status_internal)
+        .map_err(|e| Box::new(status_internal(e)))
 }
 
-#[allow(clippy::result_large_err)]
-fn schema_bytes(schema: &Schema) -> GrpcResult<Bytes> {
+fn schema_bytes(schema: &Schema) -> HelperResult<Bytes> {
     let options = arrow_ipc::writer::IpcWriteOptions::default();
     let ipc: arrow_flight::IpcMessage = SchemaAsIpc::new(schema, &options)
         .try_into()
-        .map_err(status_internal)?;
+        .map_err(|e| Box::new(status_internal(e)))?;
     Ok(ipc.0)
 }
 
-#[allow(clippy::result_large_err)]
-fn flight_info_for_schema(schema: &Schema, ticket: Ticket) -> GrpcResult<FlightInfo> {
+fn flight_info_for_schema(schema: &Schema, ticket: Ticket) -> HelperResult<FlightInfo> {
     FlightInfo::new()
         .try_with_schema(schema)
         .map(|info| info.with_endpoint(FlightEndpoint::new().with_ticket(ticket)))
-        .map_err(status_internal)
+        .map_err(|e| Box::new(status_internal(e)))
 }
 
 fn command_ticket(command: Command) -> Ticket {
@@ -152,10 +150,12 @@ fn string_value(array: &dyn Array, row: usize) -> Option<String> {
     }
 }
 
-#[allow(clippy::result_large_err)]
-fn decode_handle(bytes: &[u8], kind: &str) -> GrpcResult<String> {
-    String::from_utf8(bytes.to_vec())
-        .map_err(|e| Status::invalid_argument(format!("Invalid {kind} handle: {e}")))
+fn decode_handle(bytes: &[u8], kind: &str) -> HelperResult<String> {
+    String::from_utf8(bytes.to_vec()).map_err(|e| {
+        Box::new(Status::invalid_argument(format!(
+            "Invalid {kind} handle: {e}"
+        )))
+    })
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
@@ -244,7 +244,8 @@ impl FlightService for FlightIngestGrpcService {
         _request: Request<Criteria>,
     ) -> GrpcResult<Response<Self::ListFlightsStream>> {
         let ticket = Ticket::new(Bytes::from_static(b"ingest:doput"));
-        let mut info = flight_info_for_schema(&Schema::empty(), ticket)?;
+        let mut info =
+            flight_info_for_schema(&Schema::empty(), ticket).map_err(|status| *status)?;
         info.flight_descriptor = Some(Self::ingest_descriptor());
         let stream = futures::stream::iter(vec![Ok(info)]);
         Ok(Response::new(Box::pin(stream)))
@@ -257,7 +258,8 @@ impl FlightService for FlightIngestGrpcService {
         let mut info = flight_info_for_schema(
             &Schema::empty(),
             Ticket::new(Bytes::from_static(b"ingest:doput")),
-        )?;
+        )
+        .map_err(|status| *status)?;
         info.flight_descriptor = Some(request.into_inner());
         Ok(Response::new(info))
     }
@@ -269,7 +271,8 @@ impl FlightService for FlightIngestGrpcService {
         let mut info = flight_info_for_schema(
             &Schema::empty(),
             Ticket::new(Bytes::from_static(b"ingest:doput")),
-        )?;
+        )
+        .map_err(|status| *status)?;
         info.flight_descriptor = Some(request.get_ref().clone());
         Ok(Response::new(PollInfo {
             info: Some(info),
@@ -283,7 +286,9 @@ impl FlightService for FlightIngestGrpcService {
         &self,
         _request: Request<FlightDescriptor>,
     ) -> GrpcResult<Response<SchemaResult>> {
-        Ok(Response::new(schema_result(&Schema::empty())?))
+        Ok(Response::new(
+            schema_result(&Schema::empty()).map_err(|status| *status)?,
+        ))
     }
 
     async fn do_get(&self, _request: Request<Ticket>) -> GrpcResult<Response<Self::DoGetStream>> {
@@ -367,7 +372,7 @@ impl FlightSqlGrpcService {
     }
 
     async fn resolve_prepared_query(&self, handle: &[u8]) -> GrpcResult<String> {
-        let key = decode_handle(handle, "prepared statement")?;
+        let key = decode_handle(handle, "prepared statement").map_err(|status| *status)?;
         self.prepared_statements
             .read()
             .await
@@ -431,8 +436,7 @@ impl FlightSqlGrpcService {
         builder.build().map_err(status_internal)
     }
 
-    #[allow(clippy::result_large_err)]
-    fn build_xdbc_type_info_data() -> GrpcResult<XdbcTypeInfoData> {
+    fn build_xdbc_type_info_data() -> HelperResult<XdbcTypeInfoData> {
         let mut builder = XdbcTypeInfoDataBuilder::new();
         builder.append(XdbcTypeInfo {
             type_name: "VARCHAR".to_string(),
@@ -497,7 +501,7 @@ impl FlightSqlGrpcService {
             num_prec_radix: Some(2),
             interval_precision: None,
         });
-        builder.build().map_err(status_internal)
+        builder.build().map_err(|e| Box::new(status_internal(e)))
     }
 }
 
@@ -606,12 +610,11 @@ impl FlightService for FlightSqlFlightService {
                 let info_data = self.inner.build_sql_info_data().await?;
                 query.into_builder(&info_data).schema().as_ref().clone()
             }
-            Command::CommandGetXdbcTypeInfo(_) => {
-                FlightSqlGrpcService::build_xdbc_type_info_data()?
-                    .schema()
-                    .as_ref()
-                    .clone()
-            }
+            Command::CommandGetXdbcTypeInfo(_) => FlightSqlGrpcService::build_xdbc_type_info_data()
+                .map_err(|status| *status)?
+                .schema()
+                .as_ref()
+                .clone(),
             Command::CommandGetPrimaryKeys(_)
             | Command::CommandGetExportedKeys(_)
             | Command::CommandGetImportedKeys(_)
@@ -626,7 +629,9 @@ impl FlightService for FlightSqlFlightService {
             }
         };
 
-        Ok(Response::new(schema_result(&schema)?))
+        Ok(Response::new(
+            schema_result(&schema).map_err(|status| *status)?,
+        ))
     }
 
     async fn do_get(&self, request: Request<Ticket>) -> GrpcResult<Response<Self::DoGetStream>> {
@@ -733,10 +738,9 @@ impl FlightSqlService for FlightSqlGrpcService {
     ) -> GrpcResult<Response<FlightInfo>> {
         let schema = query.into_builder().schema();
         let ticket = command_ticket(Command::CommandGetCatalogs(query));
-        Ok(Response::new(flight_info_for_schema(
-            schema.as_ref(),
-            ticket,
-        )?))
+        Ok(Response::new(
+            flight_info_for_schema(schema.as_ref(), ticket).map_err(|status| *status)?,
+        ))
     }
 
     async fn get_flight_info_schemas(
@@ -746,10 +750,9 @@ impl FlightSqlService for FlightSqlGrpcService {
     ) -> GrpcResult<Response<FlightInfo>> {
         let schema = query.clone().into_builder().schema();
         let ticket = command_ticket(Command::CommandGetDbSchemas(query));
-        Ok(Response::new(flight_info_for_schema(
-            schema.as_ref(),
-            ticket,
-        )?))
+        Ok(Response::new(
+            flight_info_for_schema(schema.as_ref(), ticket).map_err(|status| *status)?,
+        ))
     }
 
     async fn get_flight_info_tables(
@@ -759,10 +762,9 @@ impl FlightSqlService for FlightSqlGrpcService {
     ) -> GrpcResult<Response<FlightInfo>> {
         let schema = query.clone().into_builder().schema();
         let ticket = command_ticket(Command::CommandGetTables(query));
-        Ok(Response::new(flight_info_for_schema(
-            schema.as_ref(),
-            ticket,
-        )?))
+        Ok(Response::new(
+            flight_info_for_schema(schema.as_ref(), ticket).map_err(|status| *status)?,
+        ))
     }
 
     async fn get_flight_info_table_types(
@@ -772,10 +774,9 @@ impl FlightSqlService for FlightSqlGrpcService {
     ) -> GrpcResult<Response<FlightInfo>> {
         let schema = query.into_builder().schema();
         let ticket = command_ticket(Command::CommandGetTableTypes(query));
-        Ok(Response::new(flight_info_for_schema(
-            schema.as_ref(),
-            ticket,
-        )?))
+        Ok(Response::new(
+            flight_info_for_schema(schema.as_ref(), ticket).map_err(|status| *status)?,
+        ))
     }
 
     async fn get_flight_info_sql_info(
@@ -786,10 +787,9 @@ impl FlightSqlService for FlightSqlGrpcService {
         let info_data = self.build_sql_info_data().await?;
         let schema = query.clone().into_builder(&info_data).schema();
         let ticket = command_ticket(Command::CommandGetSqlInfo(query));
-        Ok(Response::new(flight_info_for_schema(
-            schema.as_ref(),
-            ticket,
-        )?))
+        Ok(Response::new(
+            flight_info_for_schema(schema.as_ref(), ticket).map_err(|status| *status)?,
+        ))
     }
 
     async fn get_flight_info_primary_keys(
@@ -829,13 +829,12 @@ impl FlightSqlService for FlightSqlGrpcService {
         query: CommandGetXdbcTypeInfo,
         _request: Request<FlightDescriptor>,
     ) -> GrpcResult<Response<FlightInfo>> {
-        let data = Self::build_xdbc_type_info_data()?;
+        let data = Self::build_xdbc_type_info_data().map_err(|status| *status)?;
         let schema = data.schema();
         let ticket = command_ticket(Command::CommandGetXdbcTypeInfo(query));
-        Ok(Response::new(flight_info_for_schema(
-            schema.as_ref(),
-            ticket,
-        )?))
+        Ok(Response::new(
+            flight_info_for_schema(schema.as_ref(), ticket).map_err(|status| *status)?,
+        ))
     }
 
     async fn get_flight_info_fallback(
@@ -854,7 +853,8 @@ impl FlightSqlService for FlightSqlGrpcService {
         ticket: TicketStatementQuery,
         _request: Request<Ticket>,
     ) -> GrpcResult<Response<<Self as FlightService>::DoGetStream>> {
-        let query = decode_handle(&ticket.statement_handle, "statement")?;
+        let query =
+            decode_handle(&ticket.statement_handle, "statement").map_err(|status| *status)?;
         let batches = self
             .service
             .execute_batches(&query)
@@ -1071,7 +1071,7 @@ impl FlightSqlService for FlightSqlGrpcService {
         query: CommandGetXdbcTypeInfo,
         _request: Request<Ticket>,
     ) -> GrpcResult<Response<<Self as FlightService>::DoGetStream>> {
-        let data = Self::build_xdbc_type_info_data()?;
+        let data = Self::build_xdbc_type_info_data().map_err(|status| *status)?;
         let batch = data
             .record_batch(query.data_type)
             .map_err(status_internal)?;
@@ -1190,8 +1190,8 @@ impl FlightSqlService for FlightSqlGrpcService {
 
         Ok(ActionCreatePreparedStatementResult {
             prepared_statement_handle: Bytes::from(prepared.handle),
-            dataset_schema: schema_bytes(&dataset_schema)?,
-            parameter_schema: schema_bytes(&Schema::empty())?,
+            dataset_schema: schema_bytes(&dataset_schema).map_err(|status| *status)?,
+            parameter_schema: schema_bytes(&Schema::empty()).map_err(|status| *status)?,
         })
     }
 
@@ -1200,7 +1200,8 @@ impl FlightSqlService for FlightSqlGrpcService {
         query: ActionClosePreparedStatementRequest,
         _request: Request<Action>,
     ) -> GrpcResult<()> {
-        let handle = decode_handle(&query.prepared_statement_handle, "prepared statement")?;
+        let handle = decode_handle(&query.prepared_statement_handle, "prepared statement")
+            .map_err(|status| *status)?;
         self.prepared_statements.write().await.remove(&handle);
         Ok(())
     }
@@ -1230,7 +1231,8 @@ impl FlightSqlService for FlightSqlGrpcService {
         query: ActionEndTransactionRequest,
         _request: Request<Action>,
     ) -> GrpcResult<()> {
-        let tx_id = decode_handle(&query.transaction_id, "transaction")?;
+        let tx_id =
+            decode_handle(&query.transaction_id, "transaction").map_err(|status| *status)?;
         let removed = self.transactions.write().await.remove(&tx_id);
         if !removed {
             return Err(Status::invalid_argument("Unknown transaction handle"));
@@ -1247,7 +1249,8 @@ impl FlightSqlService for FlightSqlGrpcService {
         query: ActionBeginSavepointRequest,
         _request: Request<Action>,
     ) -> GrpcResult<ActionBeginSavepointResult> {
-        let tx_id = decode_handle(&query.transaction_id, "transaction")?;
+        let tx_id =
+            decode_handle(&query.transaction_id, "transaction").map_err(|status| *status)?;
         if !self.transactions.read().await.contains(&tx_id) {
             return Err(Status::invalid_argument("Unknown transaction handle"));
         }
@@ -1271,7 +1274,8 @@ impl FlightSqlService for FlightSqlGrpcService {
         query: ActionEndSavepointRequest,
         _request: Request<Action>,
     ) -> GrpcResult<()> {
-        let savepoint = decode_handle(&query.savepoint_id, "savepoint")?;
+        let savepoint =
+            decode_handle(&query.savepoint_id, "savepoint").map_err(|status| *status)?;
         let removed = self.savepoints.write().await.remove(&savepoint);
         if removed.is_none() {
             return Err(Status::invalid_argument("Unknown savepoint handle"));
