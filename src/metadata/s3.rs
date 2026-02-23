@@ -1475,7 +1475,7 @@ impl MetadataClient for S3MetadataClient {
             if let Some(state) = states.get_mut(shard_id) {
                 let previous_phase = format!("{:?}", state.phase);
                 state.backfill_progress = progress;
-                state.phase = phase.clone();
+                state.phase = phase;
                 if previous_phase != phase_name {
                     counter!(
                         "cardinalsin_split_phase_transitions_total",
