@@ -12,7 +12,7 @@
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "id": 1,
-      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(cardinalsin_compaction_cycle_duration_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "p95", "refId": "A"}],
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(cardinalsin_compaction_cycle_duration_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "cardinalsin p95", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "histogram_quantile(0.95, sum(rate(cardinalsin_compaction_cycle_duration_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "prometheus p95", "refId": "B"}],
       "title": "Compaction Cycle Duration p95",
       "type": "timeseries"
     },
@@ -21,7 +21,7 @@
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "id": 2,
-      "targets": [{"expr": "max(cardinalsin_compaction_l0_pending_files{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "pending L0", "refId": "A"}],
+      "targets": [{"expr": "max(cardinalsin_compaction_l0_pending_files{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "cardinalsin pending L0", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "max(cardinalsin_compaction_l0_pending_files{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "prometheus pending L0", "refId": "B"}],
       "title": "L0 Backlog",
       "type": "timeseries"
     },
@@ -30,7 +30,7 @@
       "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "id": 3,
-      "targets": [{"expr": "sum(rate(cardinalsin_metadata_cas_attempts_total{result=\"conflict\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "conflicts/sec", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_metadata_cas_attempts_total{result=\"conflict\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "cardinalsin conflicts/sec", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_metadata_cas_attempts_total{result=\"conflict\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "prometheus conflicts/sec", "refId": "B"}],
       "title": "Metadata CAS Conflicts",
       "type": "timeseries"
     },
@@ -39,7 +39,7 @@
       "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "id": 4,
-      "targets": [{"expr": "sum(rate(cardinalsin_metadata_lease_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "lease errors/sec", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_metadata_lease_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "cardinalsin lease errors/sec", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_metadata_lease_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "prometheus lease errors/sec", "refId": "B"}],
       "title": "Lease Error Rate",
       "type": "timeseries"
     }

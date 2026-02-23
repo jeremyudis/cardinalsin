@@ -50,12 +50,20 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       RUST_LOG: info
+      OTEL_SERVICE_NAME: cardinalsin-ingester
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=local,tenant=default
+      CARDINALSIN_TELEMETRY_ENABLED: "true"
+      CARDINALSIN_TELEMETRY_RUN_ID: ${CARDINALSIN_TELEMETRY_RUN_ID:-local-compose}
     ports:
       - "8081:8080"   # HTTP
       - "4317:4317"   # OTLP gRPC + Arrow Flight ingest
     depends_on:
       minio-init:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
 
   # Query node
   query:
@@ -74,12 +82,20 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       RUST_LOG: info
+      OTEL_SERVICE_NAME: cardinalsin-query
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=local,tenant=default
+      CARDINALSIN_TELEMETRY_ENABLED: "true"
+      CARDINALSIN_TELEMETRY_RUN_ID: ${CARDINALSIN_TELEMETRY_RUN_ID:-local-compose}
     ports:
       - "8080:8080"   # HTTP (SQL, Prometheus API)
       - "8815:8815"   # Arrow Flight SQL gRPC
     depends_on:
       minio-init:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
 
   # Compactor
   compactor:
@@ -98,9 +114,45 @@ services:
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       RUST_LOG: info
+      OTEL_SERVICE_NAME: cardinalsin-compactor
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment=local,tenant=default
+      CARDINALSIN_TELEMETRY_ENABLED: "true"
+      CARDINALSIN_TELEMETRY_RUN_ID: ${CARDINALSIN_TELEMETRY_RUN_ID:-local-compose}
     depends_on:
       minio-init:
         condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+
+  # OpenTelemetry collector fanout
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.118.0
+    container_name: cardinalsin-otel-collector
+    command: ["--config=/etc/otel-collector/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otel-collector/config.yaml:ro
+    ports:
+      - "4318:4318"   # OTLP HTTP ingest
+      - "13133:13133" # Collector health
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Prometheus baseline for dual-publish comparison
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: cardinalsin-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus_data:/prometheus
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
 
   # Grafana for dashboards
   grafana:
@@ -118,7 +170,9 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - query
+      - prometheus
 
 volumes:
   minio_data:
+  prometheus_data:
   grafana_data:

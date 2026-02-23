@@ -12,7 +12,7 @@
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "id": 1,
-      "targets": [{"expr": "histogram_quantile(0.99, sum(rate(cardinalsin_query_latency_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "p99", "refId": "A"}],
+      "targets": [{"expr": "histogram_quantile(0.99, sum(rate(cardinalsin_query_latency_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "cardinalsin p99", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "histogram_quantile(0.99, sum(rate(cardinalsin_query_latency_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "prometheus p99", "refId": "B"}],
       "title": "Query Latency p99",
       "type": "timeseries"
     },
@@ -21,7 +21,7 @@
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "id": 2,
-      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "errors/sec", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "cardinalsin errors/sec", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "prometheus errors/sec", "refId": "B"}],
       "title": "Query Error Rate",
       "type": "timeseries"
     },
@@ -30,7 +30,7 @@
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "id": 3,
-      "targets": [{"expr": "sum(rate(cardinalsin_query_cache_hits_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) / clamp_min(sum(rate(cardinalsin_query_cache_hits_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_query_cache_misses_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])), 1)", "legendFormat": "hit ratio", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_query_cache_hits_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) / clamp_min(sum(rate(cardinalsin_query_cache_hits_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_query_cache_misses_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])), 1)", "legendFormat": "cardinalsin hit ratio", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_query_cache_hits_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) / clamp_min(sum(rate(cardinalsin_query_cache_hits_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_query_cache_misses_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])), 1)", "legendFormat": "prometheus hit ratio", "refId": "B"}],
       "title": "Cache Hit Ratio",
       "type": "timeseries"
     },
@@ -39,7 +39,7 @@
       "fieldConfig": {"defaults": {"unit": "Bps"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "id": 4,
-      "targets": [{"expr": "sum(rate(cardinalsin_query_bytes_scanned_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "bytes scanned/sec", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_query_bytes_scanned_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "cardinalsin bytes scanned/sec", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_query_bytes_scanned_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "prometheus bytes scanned/sec", "refId": "B"}],
       "title": "Scan Throughput",
       "type": "timeseries"
     }

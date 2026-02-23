@@ -4,12 +4,15 @@ use crate::{Error, Result};
 
 use opentelemetry::global;
 use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::runtime;
 use opentelemetry_sdk::trace::{self, Sampler, TracerProvider};
 use opentelemetry_sdk::Resource;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -160,9 +163,10 @@ impl Telemetry {
             .build();
         let _ = global::set_tracer_provider(tracer_provider.clone());
 
-        let meter_provider = SdkMeterProvider::builder().with_resource(resource).build();
+        let meter_provider = build_meter_provider(&config, resource)?;
         global::set_meter_provider(meter_provider.clone());
         global::set_text_map_propagator(TraceContextPropagator::new());
+        emit_bootstrap_metric(&config);
 
         info!(
             service_name = %config.service_name,
@@ -199,6 +203,64 @@ impl Drop for Telemetry {
         let _ = self.meter_provider.shutdown();
         let _ = self.tracer_provider.shutdown();
     }
+}
+
+fn build_meter_provider(config: &TelemetryConfig, resource: Resource) -> Result<SdkMeterProvider> {
+    let builder = SdkMeterProvider::builder().with_resource(resource.clone());
+    if config.mode != TelemetryMode::Otlp {
+        return Ok(builder.build());
+    }
+
+    let endpoint = config.otlp_endpoint.as_deref().ok_or_else(|| {
+        Error::Config("OTLP mode requires OTEL_EXPORTER_OTLP_ENDPOINT".to_string())
+    })?;
+
+    match config.otlp_protocol.as_str() {
+        OTEL_PROTOCOL_GRPC => opentelemetry_otlp::new_pipeline()
+            .metrics(runtime::Tokio)
+            .with_exporter(
+                opentelemetry_otlp::new_exporter()
+                    .tonic()
+                    .with_endpoint(endpoint),
+            )
+            .with_resource(resource)
+            .with_period(Duration::from_secs(5))
+            .build()
+            .map_err(|e| Error::Config(format!("failed to build OTLP gRPC meter provider: {e}"))),
+        OTEL_PROTOCOL_HTTP_PROTOBUF => opentelemetry_otlp::new_pipeline()
+            .metrics(runtime::Tokio)
+            .with_exporter(
+                opentelemetry_otlp::new_exporter()
+                    .http()
+                    .with_endpoint(endpoint),
+            )
+            .with_resource(resource)
+            .with_period(Duration::from_secs(5))
+            .build()
+            .map_err(|e| {
+                Error::Config(format!(
+                    "failed to build OTLP HTTP/protobuf meter provider: {e}"
+                ))
+            }),
+        other => Err(Error::Config(format!(
+            "unsupported OTLP protocol for metrics exporter: {other}"
+        ))),
+    }
+}
+
+fn emit_bootstrap_metric(config: &TelemetryConfig) {
+    let meter = global::meter("cardinalsin.telemetry");
+    let counter = meter
+        .u64_counter("cardinalsin_otel_bootstrap_total")
+        .with_description("Telemetry bootstrap initialization count")
+        .init();
+    counter.add(
+        1,
+        &[
+            KeyValue::new("service", config.service_name.clone()),
+            KeyValue::new("mode", config.mode.as_str().to_string()),
+        ],
+    );
 }
 
 fn parse_otlp_protocol(raw: &str) -> Result<&'static str> {
