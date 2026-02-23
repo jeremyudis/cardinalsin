@@ -130,6 +130,8 @@ prom_query() {
 INGEST_RPS="$(prom_query "sum(rate(cardinalsin_ingester_write_rows_total{run_id=\"$RUN_ID\"}[5m]))")"
 QUERY_ERROR_RPS="$(prom_query "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=\"$RUN_ID\"}[5m]))")"
 L0_PENDING="$(prom_query "max(cardinalsin_compaction_l0_pending_files{run_id=\"$RUN_ID\"})")"
+QUERY_P99_SECONDS="$(prom_query "histogram_quantile(0.99, sum(rate(cardinalsin_query_latency_seconds_bucket{run_id=\"$RUN_ID\"}[5m])) by (le))")"
+CPU_SECONDS_PER_SECOND="$(prom_query "sum(rate(process_cpu_time_seconds_total{service=~\"cardinalsin.*\"}[5m]))")"
 
 ingest_pass=$(awk -v x="$INGEST_RPS" -v min="$MIN_INGEST_RPS" 'BEGIN{if ((x+0) >= (min+0)) print "true"; else print "false"}')
 query_err_pass=$(awk -v x="$QUERY_ERROR_RPS" -v max="$MAX_QUERY_ERROR_RPS" 'BEGIN{if ((x+0) <= (max+0)) print "true"; else print "false"}')
@@ -147,6 +149,8 @@ jq -n \
   --arg ingest_rps "$INGEST_RPS" \
   --arg query_error_rps "$QUERY_ERROR_RPS" \
   --arg l0_pending "$L0_PENDING" \
+  --arg query_p99_seconds "$QUERY_P99_SECONDS" \
+  --arg cpu_seconds_per_second "$CPU_SECONDS_PER_SECOND" \
   --argjson ingest_process_ok "$( [[ "$INGEST_RC" == "0" ]] && echo true || echo false )" \
   --argjson query_process_ok "$( [[ "$QUERY_RC" == "0" ]] && echo true || echo false )" \
   --argjson ingest_pass "$ingest_pass" \
@@ -159,6 +163,8 @@ jq -n \
     ingest_rps_last_5m: ($ingest_rps | tonumber),
     query_error_rps_last_5m: ($query_error_rps | tonumber),
     l0_pending_max: ($l0_pending | tonumber),
+    query_latency_p99_seconds: ($query_p99_seconds | tonumber),
+    cpu_seconds_per_second: ($cpu_seconds_per_second | tonumber),
     kpi: {
       ingest_process_ok: $ingest_process_ok,
       query_process_ok: $query_process_ok,

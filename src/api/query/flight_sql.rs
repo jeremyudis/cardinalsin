@@ -5,6 +5,7 @@
 use crate::query::QueryNode;
 use crate::Result;
 
+use arrow_array::RecordBatch;
 use arrow_flight::{FlightData, FlightEndpoint, FlightInfo, Ticket};
 use arrow_schema::Schema;
 use std::sync::Arc;
@@ -32,11 +33,7 @@ impl FlightSqlQueryService {
         query: &str,
         ticket: Ticket,
     ) -> Result<FlightInfo> {
-        // Analyze query to get schema without executing
-        let plan = self.query_node.engine.analyze(query).await?;
-        // Convert DFSchema to Arrow Schema
-        let df_schema = plan.schema();
-        let schema: Schema = df_schema.as_ref().into();
+        let schema = self.analyze_schema(query).await?;
 
         let info = FlightInfo::new()
             .try_with_schema(&schema)?
@@ -45,22 +42,25 @@ impl FlightSqlQueryService {
         Ok(info)
     }
 
+    /// Analyze query and return Arrow schema.
+    pub async fn analyze_schema(&self, query: &str) -> Result<Schema> {
+        let plan = self.query_node.engine.analyze(query).await?;
+        let df_schema = plan.schema();
+        Ok(df_schema.as_ref().into())
+    }
+
+    /// Execute query and return record batches.
+    pub async fn execute_batches(&self, query: &str) -> Result<Vec<RecordBatch>> {
+        self.query_node.query(query).await
+    }
+
     /// Execute a query and return results as Flight data
     pub async fn do_get(&self, ticket: &Ticket) -> Result<Vec<FlightData>> {
         let query = String::from_utf8(ticket.ticket.to_vec())
             .map_err(|e| crate::Error::Query(e.to_string()))?;
 
-        let batches = self.query_node.query(&query).await?;
-
-        let schema = batches
-            .first()
-            .map(|b| b.schema())
-            .unwrap_or_else(|| Arc::new(Schema::empty()));
-        let stream = arrow_flight::utils::batches_to_flight_data(schema.as_ref(), batches)
-            .map_err(|e| {
-                crate::Error::InvalidSchema(format!("Failed to encode Flight stream: {e}"))
-            })?;
-        Ok(stream)
+        let batches = self.execute_batches(&query).await?;
+        batches_to_flight_data(batches)
     }
 
     /// Create a prepared statement
@@ -72,6 +72,17 @@ impl FlightSqlQueryService {
             query: query.to_string(),
         })
     }
+}
+
+/// Encode record batches to a FlightData stream (schema message + data messages).
+pub fn batches_to_flight_data(batches: Vec<RecordBatch>) -> Result<Vec<FlightData>> {
+    let schema = batches
+        .first()
+        .map(|b| b.schema())
+        .unwrap_or_else(|| Arc::new(Schema::empty()));
+    let stream = arrow_flight::utils::batches_to_flight_data(schema.as_ref(), batches)
+        .map_err(|e| crate::Error::InvalidSchema(format!("Failed to encode Flight stream: {e}")))?;
+    Ok(stream)
 }
 
 /// Prepared statement handle

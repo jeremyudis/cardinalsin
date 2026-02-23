@@ -36,5 +36,8 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Validate telemetry contract
+        run: cargo test --test telemetry_contract_tests
+
       - name: Run tests
         run: cargo test --workspace --all-targets --all-features

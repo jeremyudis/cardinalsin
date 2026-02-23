@@ -176,6 +176,11 @@ Runbook: `docs/telemetry/mixed-workload-runner.md`
 | **Arrow Flight SQL** | 8815 | gRPC | Arrow IPC | Analytics tools, DuckDB |
 | **WebSocket/SSE** | 8080 | WS/HTTP | JSON | Live dashboards, alerting |
 
+Flight protocol notes:
+- Ingest-side Flight (`:4317`) is write-focused: `DoPut` is fully supported for bulk ingestion.
+- Non-ingest Flight calls on the ingest service (for example `DoGet`/`DoExchange`) return explicit capability errors (`FAILED_PRECONDITION`) instead of generic unimplemented stubs.
+- Query-side Flight SQL (`:8815`) supports statement queries, prepared statement lifecycle actions, SQL info metadata, catalogs/schemas/tables/table types, and XDBC type info.
+
 ### Usage Examples
 
 **SQL Query:**

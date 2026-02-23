@@ -70,7 +70,21 @@ Prohibited labels (unbounded/high churn):
 | `process.cpu.time` | counter / s | `service` | runtime exporter | OTel process metric | used in overhead checks |
 | `process.memory.usage` | gauge / By | `service` | runtime exporter | OTel process metric | used in overhead checks |
 
-### B. Compactor + Metadata + Sharding (Custom)
+### B. Ingester + Query Path Metrics (Custom)
+
+| Metric | Type / Unit | Required Labels | Source | Semantic Mapping | Custom Justification |
+| --- | --- | --- | --- | --- | --- |
+| `cardinalsin_ingester_write_rows_total` | counter / 1 | `service`, `result` | `src/ingester/mod.rs` | operation counter | write throughput is CardinalSin domain signal |
+| `cardinalsin_ingester_write_latency_seconds` | histogram / s | `service`, `result` | `src/ingester/mod.rs` | operation duration | ingest write latency is core SLO signal |
+| `cardinalsin_ingester_wal_operations_total` | counter / 1 | `service`, `operation`, `result` | `src/ingester/mod.rs` | operation counter | WAL lifecycle outcomes are durability-specific |
+| `cardinalsin_ingester_buffer_fullness_ratio` | gauge / 1 | `service` | `src/ingester/mod.rs` | saturation gauge | ingest backpressure signal is CardinalSin-specific |
+| `cardinalsin_query_requests_total` | counter / 1 | `service`, `result` | `src/query/mod.rs` | operation counter | query success/error rate for operator triage |
+| `cardinalsin_query_latency_seconds` | histogram / s | `service`, `result` | `src/query/mod.rs` | operation duration | query latency SLO metric |
+| `cardinalsin_query_bytes_scanned_total` | counter / By | `service` | `src/query/engine.rs` | data scanned counter | query efficiency signal not covered by OTel default |
+| `cardinalsin_query_cache_hits_total` | counter / 1 | `service` | `src/query/mod.rs` | cache counter | cache effectiveness for query path |
+| `cardinalsin_query_cache_misses_total` | counter / 1 | `service` | `src/query/mod.rs` | cache counter | cache miss pressure and tuning signal |
+
+### C. Compactor + Metadata + Sharding (Custom)
 
 | Metric | Type / Unit | Required Labels | Source | Semantic Mapping | Custom Justification |
 | --- | --- | --- | --- | --- | --- |
