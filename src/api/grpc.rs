@@ -106,6 +106,7 @@ fn flight_data_stream_response(data: Vec<FlightData>) -> Response<GrpcStream<Fli
     Response::new(Box::pin(stream))
 }
 
+#[allow(clippy::result_large_err)]
 fn schema_result(schema: &Schema) -> GrpcResult<SchemaResult> {
     let options = arrow_ipc::writer::IpcWriteOptions::default();
     SchemaAsIpc::new(schema, &options)
@@ -113,6 +114,7 @@ fn schema_result(schema: &Schema) -> GrpcResult<SchemaResult> {
         .map_err(status_internal)
 }
 
+#[allow(clippy::result_large_err)]
 fn schema_bytes(schema: &Schema) -> GrpcResult<Bytes> {
     let options = arrow_ipc::writer::IpcWriteOptions::default();
     let ipc: arrow_flight::IpcMessage = SchemaAsIpc::new(schema, &options)
@@ -121,6 +123,7 @@ fn schema_bytes(schema: &Schema) -> GrpcResult<Bytes> {
     Ok(ipc.0)
 }
 
+#[allow(clippy::result_large_err)]
 fn flight_info_for_schema(schema: &Schema, ticket: Ticket) -> GrpcResult<FlightInfo> {
     FlightInfo::new()
         .try_with_schema(schema)
@@ -149,6 +152,7 @@ fn string_value(array: &dyn Array, row: usize) -> Option<String> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn decode_handle(bytes: &[u8], kind: &str) -> GrpcResult<String> {
     String::from_utf8(bytes.to_vec())
         .map_err(|e| Status::invalid_argument(format!("Invalid {kind} handle: {e}")))
@@ -427,6 +431,7 @@ impl FlightSqlGrpcService {
         builder.build().map_err(status_internal)
     }
 
+    #[allow(clippy::result_large_err)]
     fn build_xdbc_type_info_data() -> GrpcResult<XdbcTypeInfoData> {
         let mut builder = XdbcTypeInfoDataBuilder::new();
         builder.append(XdbcTypeInfo {
