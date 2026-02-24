@@ -105,11 +105,14 @@ This starts:
 - **Ingester** on port 8081 (HTTP) and 4317 (OTLP gRPC + Arrow Flight ingest)
 - **Query node** on port 8080 (HTTP/SQL/Prometheus API) and 8815 (Arrow Flight SQL)
 - **Compactor** (background service)
+- **OTel Collector** on ports 4318 (OTLP HTTP ingest) and 13133 (health)
+- **Prometheus** baseline on port 9090 (remote-write receiver enabled)
 - **Grafana** on port 3000
 
 Grafana dashboards are provisioned automatically from:
 
 - `deploy/grafana/provisioning/datasources/cardinalsin.yaml`
+- `deploy/grafana/provisioning/datasources/prometheus-baseline.yaml`
 - `deploy/grafana/provisioning/dashboards/ingest-health.json`
 - `deploy/grafana/provisioning/dashboards/query-performance.json`
 - `deploy/grafana/provisioning/dashboards/compactor-metadata-health.json`
@@ -140,12 +143,19 @@ scripts/telemetry/run_query_pack.sh --mode all --run-id "run-20260222T190000Z"
 
 Guide: `docs/telemetry/query-pack.md`
 
+Dual-publish parity check:
+
+```bash
+scripts/telemetry/compare_dual_publish.sh --mode all --run-id "run-20260222T190000Z"
+```
+
 ### Real-Time Observability Dogfooding
 
 ```bash
 RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)"
 scripts/telemetry/run_mixed_workload.sh --duration 30m --run-id "$RUN_ID"
 scripts/telemetry/run_query_pack.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/query-pack"
+scripts/telemetry/compare_dual_publish.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/parity"
 ```
 
 Operator runbook: `docs/observability-dogfooding-runbook.md`

@@ -12,7 +12,7 @@
       "fieldConfig": {"defaults": {"unit": "rows/s"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "id": 1,
-      "targets": [{"expr": "sum(rate(cardinalsin_ingester_write_rows_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "rows/sec", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_ingester_write_rows_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "cardinalsin rows/sec", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_ingester_write_rows_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "prometheus rows/sec", "refId": "B"}],
       "title": "Ingest Throughput",
       "type": "timeseries"
     },
@@ -21,7 +21,7 @@
       "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "id": 2,
-      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(cardinalsin_ingester_write_latency_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "p95", "refId": "A"}],
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(cardinalsin_ingester_write_latency_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "cardinalsin p95", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "histogram_quantile(0.95, sum(rate(cardinalsin_ingester_write_latency_seconds_bucket{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) by (le))", "legendFormat": "prometheus p95", "refId": "B"}],
       "title": "Write Latency p95",
       "type": "timeseries"
     },
@@ -30,7 +30,7 @@
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "id": 3,
-      "targets": [{"expr": "max(cardinalsin_ingester_buffer_fullness_ratio{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "buffer fullness", "refId": "A"}],
+      "targets": [{"expr": "max(cardinalsin_ingester_buffer_fullness_ratio{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "cardinalsin buffer fullness", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "max(cardinalsin_ingester_buffer_fullness_ratio{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "prometheus buffer fullness", "refId": "B"}],
       "title": "Buffer Fullness",
       "type": "timeseries"
     },
@@ -39,7 +39,7 @@
       "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "id": 4,
-      "targets": [{"expr": "sum(rate(cardinalsin_ingester_wal_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "wal errors/sec", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_ingester_wal_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "cardinalsin wal errors/sec", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_ingester_wal_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "prometheus wal errors/sec", "refId": "B"}],
       "title": "WAL Error Rate",
       "type": "timeseries"
     }

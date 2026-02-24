@@ -29,3 +29,16 @@ Output artifacts are written to:
 
 - `benchmarks/results/query-pack-<timestamp>/promql/*.json`
 - `benchmarks/results/query-pack-<timestamp>/sql/*.json`
+
+## Dual-Publish Parity Check
+
+Compare CardinalSin Prometheus API results against baseline Prometheus:
+
+```bash
+scripts/telemetry/compare_dual_publish.sh --mode all --run-id "run-20260222T190000Z"
+```
+
+Parity artifacts are written to:
+
+- `benchmarks/results/<run_id>/parity/summary.json`
+- `benchmarks/results/<run_id>/parity/summary.md`

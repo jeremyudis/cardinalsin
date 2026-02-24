@@ -74,8 +74,9 @@ prost-types = "0.13"
 
 # OpenTelemetry
 opentelemetry = "0.24"
+opentelemetry-otlp = { version = "0.17", features = ["grpc-tonic", "http-proto", "metrics"] }
 opentelemetry-proto = { version = "0.7", features = ["gen-tonic-messages", "metrics"] }
-opentelemetry_sdk = "0.24"
+opentelemetry_sdk = { version = "0.24", features = ["rt-tokio"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

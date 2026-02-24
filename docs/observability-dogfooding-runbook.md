@@ -13,7 +13,7 @@ This runbook covers the full operator loop for CardinalSin self-observability:
 - Docker with Compose plugin (`docker compose`)
 - Rust toolchain (`cargo`)
 - `curl` and `jq`
-- open ports `3000`, `8080`, `8081`, `4317`, `8815`, `9000`, `9001`
+- open ports `3000`, `8080`, `8081`, `4317`, `4318`, `8815`, `9000`, `9001`, `9090`, `13133`
 
 ## Signal Map (Step -> Dashboard -> Queries)
 
@@ -50,6 +50,8 @@ Sanity checks:
 curl -fsS http://localhost:8080/health
 curl -fsS http://localhost:8081/health
 curl -fsS http://localhost:8080/ready
+curl -fsS http://localhost:9090/-/healthy
+curl -fsS http://localhost:13133/
 ```
 
 Use run overview dashboard to confirm baseline health before load:
@@ -120,6 +122,13 @@ Inspect summary fields used for pass/fail:
 
 ```bash
 jq '.' "benchmarks/results/$RUN_ID/summary.json"
+```
+
+Run dual-publish parity checks (CardinalSin vs Prometheus baseline):
+
+```bash
+scripts/telemetry/compare_dual_publish.sh --mode all --run-id "$RUN_ID" \
+  --out-dir "benchmarks/results/$RUN_ID/parity"
 ```
 
 ## 5) Query Pack Usage Reference
@@ -196,13 +205,31 @@ docker compose -f deploy/docker-compose.yml logs --tail=200 grafana
 curl -fsS http://localhost:3000/api/health
 curl -fsS --get http://localhost:8080/api/v1/query \
   --data-urlencode 'query=sum(rate(cardinalsin_query_requests_total[5m]))'
+curl -fsS --get http://localhost:9090/api/v1/query \
+  --data-urlencode 'query=sum(rate(cardinalsin_query_requests_total[5m]))'
 ```
 
 If Grafana is running but dashboards are missing, verify provisioning mounts and files:
 
 - `deploy/grafana/provisioning/datasources/cardinalsin.yaml`
+- `deploy/grafana/provisioning/datasources/prometheus-baseline.yaml`
 - `deploy/grafana/provisioning/dashboards/dashboards.yaml`
 - `deploy/grafana/provisioning/dashboards/*.json`
+
+### D) Fanout Pipeline Failures (Collector -> CardinalSin + Prometheus)
+
+Symptoms:
+
+- CardinalSin panels have data but Prometheus overlay is empty (or vice-versa)
+- parity script fails with `missing_series`
+
+Checks:
+
+```bash
+docker compose -f deploy/docker-compose.yml ps otel-collector prometheus ingester
+docker compose -f deploy/docker-compose.yml logs --tail=200 otel-collector | rg -i 'error|retry|export'
+curl -fsS http://localhost:13133/
+```
 
 ## Related Docs
 

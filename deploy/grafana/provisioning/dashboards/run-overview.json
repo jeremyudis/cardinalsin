@@ -12,7 +12,7 @@
       "fieldConfig": {"defaults": {"unit": "rows/s"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "id": 1,
-      "targets": [{"expr": "sum(rate(cardinalsin_ingester_write_rows_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "ingest", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_ingester_write_rows_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "cardinalsin ingest", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_ingester_write_rows_total{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "prometheus ingest", "refId": "B"}],
       "title": "Ingest Throughput",
       "type": "timeseries"
     },
@@ -21,7 +21,7 @@
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "id": 2,
-      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"ok\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "query", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"ok\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "cardinalsin query", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_query_requests_total{result=\"ok\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[1m]))", "legendFormat": "prometheus query", "refId": "B"}],
       "title": "Query Throughput",
       "type": "timeseries"
     },
@@ -30,7 +30,7 @@
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "id": 3,
-      "targets": [{"expr": "max(cardinalsin_compaction_l0_pending_files{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "pending L0", "refId": "A"}],
+      "targets": [{"expr": "max(cardinalsin_compaction_l0_pending_files{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "cardinalsin pending L0", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "max(cardinalsin_compaction_l0_pending_files{run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"})", "legendFormat": "prometheus pending L0", "refId": "B"}],
       "title": "Compaction Backlog",
       "type": "timeseries"
     },
@@ -39,7 +39,7 @@
       "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "id": 4,
-      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_ingester_wal_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_metadata_cas_attempts_total{result=\"conflict\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "error-like events/sec", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_ingester_wal_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_metadata_cas_attempts_total{result=\"conflict\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "cardinalsin error-like events/sec", "refId": "A"}, {"datasource": {"type": "prometheus", "uid": "prom-baseline"}, "expr": "sum(rate(cardinalsin_query_requests_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_ingester_wal_operations_total{result=\"error\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m])) + sum(rate(cardinalsin_metadata_cas_attempts_total{result=\"conflict\",run_id=~\"$run_id\",service=~\"$service\",tenant=~\"$tenant\"}[5m]))", "legendFormat": "prometheus error-like events/sec", "refId": "B"}],
       "title": "Error Pressure",
       "type": "timeseries"
     }
