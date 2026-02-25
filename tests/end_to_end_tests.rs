@@ -320,15 +320,9 @@ async fn test_complete_query_pipeline() {
     .await
     .unwrap();
 
-    // Step 3: Execute a simple query via the engine directly
-    // Note: query_node.query() tries to register a metrics table from s3://,
-    // which doesn't work with InMemory stores in tests. Use engine.execute() instead.
-    let results = query_node.engine.execute("SELECT 1 AS test_col").await;
-    assert!(
-        results.is_ok(),
-        "Simple query should succeed: {:?}",
-        results.err()
-    );
+    // Step 3: Execute a query through QueryNode (exercises chunk registration path)
+    let results = query_node.query_for_tenant("SELECT 1 AS ok", "default").await;
+    assert!(results.is_ok(), "QueryNode query should succeed: {:?}", results.err());
     let batches = results.unwrap();
     assert_eq!(batches.len(), 1, "Should return 1 batch");
     assert_eq!(batches[0].num_rows(), 1, "Should return 1 row");

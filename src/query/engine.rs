@@ -3,7 +3,7 @@
 use super::cache::TieredCache;
 use super::cached_store::CachedObjectStore;
 use crate::metadata::TimeRange;
-use crate::{Error, Result};
+use crate::{Error, Result, StorageConfig};
 
 use arrow_array::RecordBatch;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
@@ -27,11 +27,17 @@ pub struct QueryEngine {
     ctx: SessionContext,
     /// Registered table paths
     registered_paths: Arc<RwLock<HashSet<String>>>,
+    /// S3 bucket used for chunk URLs
+    s3_bucket: String,
 }
 
 impl QueryEngine {
     /// Create a new query engine
-    pub async fn new(object_store: Arc<dyn ObjectStore>, cache: Arc<TieredCache>) -> Result<Self> {
+    pub async fn new(
+        object_store: Arc<dyn ObjectStore>,
+        cache: Arc<TieredCache>,
+        storage_config: &StorageConfig,
+    ) -> Result<Self> {
         // Wrap object store with caching layer
         let cached_store = Arc::new(CachedObjectStore::new(object_store.clone(), cache.clone()));
 
@@ -42,7 +48,7 @@ impl QueryEngine {
 
         // Register object store with DataFusion for s3:// URLs
         // DataFusion uses the URL scheme to look up the appropriate ObjectStore
-        let s3_url = url::Url::parse("s3://bucket")
+        let s3_url = url::Url::parse(&format!("s3://{}", storage_config.bucket))
             .map_err(|e| Error::Config(format!("Failed to parse S3 URL: {}", e)))?;
         runtime_env.register_object_store(&s3_url, cached_store.clone());
 
@@ -67,6 +73,7 @@ impl QueryEngine {
         Ok(Self {
             ctx,
             registered_paths: Arc::new(RwLock::new(HashSet::new())),
+            s3_bucket: storage_config.bucket.clone(),
         })
     }
 
@@ -90,12 +97,16 @@ impl QueryEngine {
             .with_file_extension(".parquet")
             .with_collect_stat(true);
 
-        // Use S3 URL directly (DataFusion recognizes s3:// scheme)
-        // Path from metadata already has format: bucket/tenant/data/year=.../chunk.parquet
+        // Path from metadata is object-store-relative (tenant/data/.../chunk.parquet).
+        // Build an explicit bucket URL so DataFusion resolves the registered store.
         let url = if path.starts_with("s3://") {
             path.to_string()
         } else {
-            format!("s3://{}", path) // Add s3:// if not present
+            format!(
+                "s3://{}/{}",
+                self.s3_bucket,
+                path.trim_start_matches('/')
+            )
         };
 
         let table_url = ListingTableUrl::parse(&url)
@@ -568,7 +579,7 @@ mod tests {
         };
         let cache = Arc::new(TieredCache::new(config).await.unwrap());
 
-        let engine = QueryEngine::new(object_store, cache).await;
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default()).await;
         assert!(engine.is_ok());
     }
 
