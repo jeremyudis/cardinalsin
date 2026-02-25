@@ -241,6 +241,11 @@ impl Ingester {
                                     if !buffer.schema_compatible(incoming) {
                                         let existing = buffer.take();
                                         drop(buffer);
+                                        // Advance WAL seq before flush so flush_batches persists
+                                        // the correct sequence. Without this, a crash after the
+                                        // flush but before line `self.last_wal_seq.store(max_seq)`
+                                        // would replay already-flushed entries on next recovery.
+                                        self.last_wal_seq.store(max_seq, Ordering::Release);
                                         self.flush_batches(existing).await?;
                                         continue;
                                     }

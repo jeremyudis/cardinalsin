@@ -94,10 +94,11 @@ impl QueryEngine {
         Ok(engine)
     }
 
-    /// Execute an operation while `metrics` is bound to the provided chunk paths.
+    /// Register `metrics` for the given chunk paths, then execute the operation.
     ///
-    /// This prevents concurrent requests from racing on the shared SessionContext
-    /// table mapping.
+    /// The registration lock is released before `operation` runs so that slow
+    /// queries do not block other concurrent requests from registering their
+    /// own chunk sets.
     pub async fn with_metrics_table<F, Fut, T>(
         &self,
         chunk_paths: &[String],
@@ -107,9 +108,7 @@ impl QueryEngine {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<T>>,
     {
-        let _guard = self.metrics_table_query_lock.lock().await;
-        self.register_metrics_table_for_chunks_locked(chunk_paths)
-            .await?;
+        self.register_metrics_table_for_chunks(chunk_paths).await?;
         operation().await
     }
 
