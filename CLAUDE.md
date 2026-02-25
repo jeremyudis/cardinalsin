@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **If an implementation is incorrect, FIX IT! Do NOT modify tests to match broken code.**
 
+**Always create a PR after committing and pushing.** Beads issues cannot be closed until the full PR lifecycle is complete: opened → comments addressed → merged.
+
 ## Epic Delivery Workflow
 
 When executing an Epic from GitHub issues:
