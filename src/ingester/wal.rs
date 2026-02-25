@@ -140,10 +140,9 @@ impl WriteAheadLog {
 
         let file = open_segment(&segment_path).await?;
         let current_size = file.metadata().await.map_err(map_io_error)?.len();
-        let next_seq = if current_size == 0 {
-            1
-        } else {
-            last_sequence_for_segment(&segment_path)?.unwrap_or(0) + 1
+        let next_seq = match last_sequence_in_segments(&segments)? {
+            Some(last_seq) => last_seq + 1,
+            None => 1,
         };
 
         Ok(Self {
@@ -264,6 +263,15 @@ impl WriteAheadLog {
         self.last_sync = Instant::now();
         Ok(())
     }
+}
+
+fn last_sequence_in_segments(segments: &[SegmentInfo]) -> Result<Option<u64>> {
+    for segment in segments.iter().rev() {
+        if let Some(last_seq) = last_sequence_for_segment(&segment.path)? {
+            return Ok(Some(last_seq));
+        }
+    }
+    Ok(None)
 }
 
 fn encode_record_batch(batch: &RecordBatch) -> Result<Vec<u8>> {
@@ -597,6 +605,27 @@ mod tests {
             entries.is_empty(),
             "corrupt entry should be discarded during recovery"
         );
+    }
+
+    #[tokio::test]
+    async fn test_reopen_after_rotation_with_empty_tail_preserves_sequence() {
+        let dir = TempDir::new().unwrap();
+        let batch = make_batch();
+        let entry_size = HEADER_LEN + encode_record_batch(&batch).unwrap().len();
+
+        // Force rotation so we end with an empty tail segment.
+        let mut wal = WriteAheadLog::open(make_config(&dir, entry_size + 1))
+            .await
+            .unwrap();
+        let first_seq = wal.append(&batch).await.unwrap();
+        wal.rotate().await.unwrap();
+        drop(wal);
+
+        // Reopening should continue from the highest persisted sequence, not reset to 1.
+        let wal = WriteAheadLog::open(make_config(&dir, entry_size + 1))
+            .await
+            .unwrap();
+        assert_eq!(wal.next_seq(), first_seq + 1);
     }
 
     #[test]
