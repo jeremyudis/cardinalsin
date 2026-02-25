@@ -102,11 +102,7 @@ impl QueryEngine {
         let url = if path.starts_with("s3://") {
             path.to_string()
         } else {
-            format!(
-                "s3://{}/{}",
-                self.s3_bucket,
-                path.trim_start_matches('/')
-            )
+            format!("s3://{}/{}", self.s3_bucket, path.trim_start_matches('/'))
         };
 
         let table_url = ListingTableUrl::parse(&url)
