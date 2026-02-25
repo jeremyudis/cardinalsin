@@ -82,10 +82,8 @@ pub async fn instant_query(
     let results = match state.query_node.query(&sql).await {
         Ok(results) => results,
         Err(e) => {
-            // For Prometheus compatibility, return success with empty results
-            // when the table doesn't exist (no data yet) or similar non-fatal errors.
-            // This matches Prometheus behavior where querying a non-existent metric
-            // returns empty results, not an error.
+            // Note: metrics table now always exists (registered at startup, issue #97).
+            // This error handling is kept as defensive fallback for edge cases.
             let error_msg = e.to_string();
             if error_msg.contains("table") && error_msg.contains("not found") {
                 return Json(PrometheusResponse {
@@ -135,8 +133,8 @@ pub async fn range_query(
     let results = match state.query_node.query(&sql).await {
         Ok(results) => results,
         Err(e) => {
-            // For Prometheus compatibility, return success with empty results
-            // when the table doesn't exist (no data yet)
+            // Note: metrics table now always exists (registered at startup, issue #97).
+            // This error handling is kept as defensive fallback for edge cases.
             let error_msg = e.to_string();
             if error_msg.contains("table") && error_msg.contains("not found") {
                 return Json(PrometheusResponse {

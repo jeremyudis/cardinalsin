@@ -356,7 +356,11 @@ async fn test_schema_mismatch_flush_boundary() {
     assert_eq!(stats.row_count, 0, "all rows should flush successfully");
 
     let chunks = metadata.list_chunks().await.unwrap();
-    assert_eq!(chunks.len(), 2, "batches should flush in schema-homogeneous groups");
+    assert_eq!(
+        chunks.len(),
+        2,
+        "batches should flush in schema-homogeneous groups"
+    );
 }
 
 // =========================================================================

@@ -154,11 +154,30 @@ impl QueryNode {
 
     /// Execute a SQL query for a specific tenant with optional adaptive indexing
     pub async fn query_for_tenant(&self, sql: &str, tenant_id: &str) -> Result<Vec<RecordBatch>> {
-        // Get time range from query for chunk pruning
-        let time_range = self.engine.extract_time_range(sql).await?;
+        // Parse query for pruning inputs. If the logical `metrics` table has not
+        // been registered yet, bootstrap with all known chunks and retry parsing.
+        let (time_range, predicates) = match (
+            self.engine.extract_time_range(sql).await,
+            self.engine.extract_column_predicates(sql).await,
+        ) {
+            (Ok(time_range), Ok(predicates)) => (time_range, predicates),
+            (Err(e), _) | (_, Err(e)) if is_table_not_found_error(&e) => {
+                let bootstrap_chunks = self.metadata.list_chunks().await?;
+                let bootstrap_paths: Vec<String> = bootstrap_chunks
+                    .iter()
+                    .map(|chunk| chunk.chunk_path.clone())
+                    .collect();
+                self.engine
+                    .register_metrics_table_for_chunks(&bootstrap_paths)
+                    .await?;
 
-        // Extract column predicates for metadata-level filtering (CRITICAL: reduces S3 costs)
-        let predicates = self.engine.extract_column_predicates(sql).await?;
+                (
+                    self.engine.extract_time_range(sql).await?,
+                    self.engine.extract_column_predicates(sql).await?,
+                )
+            }
+            (Err(e), _) | (_, Err(e)) => return Err(e),
+        };
 
         // Get relevant chunks from metadata with predicate pushdown
         let chunks = self
@@ -168,24 +187,29 @@ impl QueryNode {
 
         // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)
         let chunk_paths: Vec<String> = chunks.iter().map(|c| c.chunk_path.clone()).collect();
-        let _pin_guard = self.pin_registry.as_ref().map(|r| r.pin(chunk_paths));
+        let _pin_guard = self
+            .pin_registry
+            .as_ref()
+            .map(|r| r.pin(chunk_paths.clone()));
 
         // Check if any shard is in a dual-write split phase (causes duplicate data)
         let needs_dedup = self.metadata.has_active_split().await.unwrap_or(false);
 
-        // Register chunks with DataFusion
-        for chunk in &chunks {
-            self.engine.register_chunk(&chunk.chunk_path).await?;
-        }
-
-        // Execute query with or without adaptive indexing
-        let results = if let Some(ref controller) = self.adaptive_index_controller {
-            self.engine
-                .execute_with_indexes(sql, tenant_id, controller.clone())
-                .await?
-        } else {
-            self.engine.execute(sql).await?
-        };
+        // Map metadata-selected chunks into the logical `metrics` table used by SQL.
+        // Execute query with or without adaptive indexing while holding a stable
+        // `metrics` table binding for this request.
+        let results = self
+            .engine
+            .with_metrics_table(&chunk_paths, || async {
+                if let Some(ref controller) = self.adaptive_index_controller {
+                    self.engine
+                        .execute_with_indexes(sql, tenant_id, controller.clone())
+                        .await
+                } else {
+                    self.engine.execute(sql).await
+                }
+            })
+            .await?;
 
         // Deduplicate if any shard is in dual-write phase
         if needs_dedup {
@@ -250,6 +274,16 @@ impl QueryNode {
     /// Get cache statistics
     pub fn cache_stats(&self) -> CacheStats {
         self.cache.stats()
+    }
+}
+
+fn is_table_not_found_error(error: &Error) -> bool {
+    match error {
+        Error::DataFusion(df_error) => {
+            let msg = df_error.to_string().to_lowercase();
+            msg.contains("table") && msg.contains("not found")
+        }
+        _ => false,
     }
 }
 
