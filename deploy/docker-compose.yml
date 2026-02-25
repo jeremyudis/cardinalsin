@@ -46,6 +46,7 @@ services:
       S3_BUCKET: cardinalsin-data
       S3_REGION: us-east-1
       S3_ENDPOINT: http://minio:9000
+      S3_METADATA_ALLOW_UNSAFE_OVERWRITE: "true"
       TENANT_ID: default
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
@@ -79,6 +80,7 @@ services:
       S3_BUCKET: cardinalsin-data
       S3_REGION: us-east-1
       S3_ENDPOINT: http://minio:9000
+      S3_METADATA_ALLOW_UNSAFE_OVERWRITE: "true"
       TENANT_ID: default
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
@@ -111,6 +113,7 @@ services:
       S3_BUCKET: cardinalsin-data
       S3_REGION: us-east-1
       S3_ENDPOINT: http://minio:9000
+      S3_METADATA_ALLOW_UNSAFE_OVERWRITE: "true"
       TENANT_ID: default
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
