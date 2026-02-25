@@ -22,7 +22,7 @@ use cardinalsin::metadata::{
 use cardinalsin::sharding::{HotShardConfig, ShardMonitor};
 use cardinalsin::Error;
 
-use arrow_array::{Float64Array, RecordBatch, StringArray, TimestampNanosecondArray};
+use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use object_store::memory::InMemory;
 use object_store::ObjectStore;
@@ -51,6 +51,33 @@ fn create_ts_batch(n: usize, start_ts: i64) -> RecordBatch {
             Arc::new(TimestampNanosecondArray::from(timestamps).with_timezone("UTC")),
             Arc::new(StringArray::from(names)),
             Arc::new(Float64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Helper: create a batch with an intentionally different value column type.
+fn create_mixed_type_batch(n: usize, start_ts: i64) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            false,
+        ),
+        Field::new("metric_name", DataType::Utf8, false),
+        Field::new("value_f64", DataType::Int64, true),
+    ]));
+
+    let timestamps: Vec<i64> = (0..n as i64).map(|i| start_ts + i * 1_000_000).collect();
+    let names: Vec<&str> = (0..n).map(|_| "test_metric").collect();
+    let values: Vec<i64> = (0..n as i64).collect();
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(TimestampNanosecondArray::from(timestamps).with_timezone("UTC")),
+            Arc::new(StringArray::from(names)),
+            Arc::new(Int64Array::from(values)),
         ],
     )
     .unwrap()
@@ -300,6 +327,40 @@ async fn test_multiple_flush_cycles() {
     for chunk in &chunks {
         assert_eq!(chunk.row_count, 25);
     }
+}
+
+#[tokio::test]
+async fn test_schema_mismatch_flush_boundary() {
+    let (ingester, _, metadata) = create_test_ingester(
+        2, // flush when 2 rows are buffered
+        100_000_000,
+    );
+
+    let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+
+    // First batch uses value_f64 as Float64.
+    ingester.write(create_ts_batch(1, now)).await.unwrap();
+
+    // Second/third batches use value_f64 as Int64. Previously this caused
+    // concat failures when mixed with the first batch in one flush.
+    ingester
+        .write(create_mixed_type_batch(1, now + 10_000_000))
+        .await
+        .unwrap();
+    ingester
+        .write(create_mixed_type_batch(1, now + 20_000_000))
+        .await
+        .unwrap();
+
+    let stats = ingester.buffer_stats().await;
+    assert_eq!(stats.row_count, 0, "all rows should flush successfully");
+
+    let chunks = metadata.list_chunks().await.unwrap();
+    assert_eq!(
+        chunks.len(),
+        2,
+        "batches should flush in schema-homogeneous groups"
+    );
 }
 
 // =========================================================================

@@ -224,14 +224,38 @@ impl Ingester {
             // Recover unflushed entries
             let entries = wal.read_entries_after(flushed_seq)?;
             if !entries.is_empty() {
-                let mut buffer = self.buffer.write().await;
                 let mut replayed = 0u64;
                 let mut max_seq = flushed_seq;
                 for entry in &entries {
                     match entry.batches() {
                         Ok(batches) => {
                             for batch in batches {
-                                buffer.append(batch)?;
+                                let mut pending_batch = Some(batch);
+                                loop {
+                                    let mut buffer = self.buffer.write().await;
+                                    let incoming = pending_batch.as_ref().ok_or_else(|| {
+                                        Error::Internal("Missing pending batch".to_string())
+                                    })?;
+
+                                    // Keep recovery buffer schema-homogeneous so future flushes do not fail.
+                                    if !buffer.schema_compatible(incoming) {
+                                        let existing = buffer.take();
+                                        drop(buffer);
+                                        // Advance WAL seq before flush so flush_batches persists
+                                        // the correct sequence. Without this, a crash after the
+                                        // flush but before line `self.last_wal_seq.store(max_seq)`
+                                        // would replay already-flushed entries on next recovery.
+                                        self.last_wal_seq.store(max_seq, Ordering::Release);
+                                        self.flush_batches(existing).await?;
+                                        continue;
+                                    }
+
+                                    let incoming = pending_batch.take().ok_or_else(|| {
+                                        Error::Internal("Missing pending batch".to_string())
+                                    })?;
+                                    buffer.append(incoming)?;
+                                    break;
+                                }
                                 replayed += 1;
                             }
                             if entry.seq > max_seq {
@@ -244,9 +268,10 @@ impl Ingester {
                     }
                 }
                 self.last_wal_seq.store(max_seq, Ordering::Release);
+                let buffer_rows = self.buffer.read().await.row_count();
                 info!(
                     replayed_entries = replayed,
-                    buffer_rows = buffer.row_count(),
+                    buffer_rows,
                     wal_seq_range = format!("({}, {}]", flushed_seq, max_seq),
                     "WAL recovery complete"
                 );
@@ -296,27 +321,13 @@ impl Ingester {
         } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
             warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
         }
-        let mut buffer = self.buffer.write().await;
-
-        // Check if buffer is too full
-        if buffer.size_bytes() + batch_size > self.config.max_buffer_size_bytes {
-            return Err(Error::BufferFull);
-        }
-
-        buffer.append(batch.clone())?;
+        self.append_to_buffer_and_maybe_flush(batch.clone(), batch_size)
+            .await?;
 
         // Record write metrics for hot shard detection
         let write_latency = start_time.elapsed();
         self.shard_monitor
             .record_write(&shard_id, batch_size, write_latency);
-
-        // Check if flush is needed (whichever threshold comes first)
-        if self.should_flush(&buffer) {
-            let batches = buffer.take();
-            drop(buffer); // Release lock before I/O
-
-            self.flush_batches(batches).await?;
-        }
 
         Ok(())
     }
@@ -337,9 +348,8 @@ impl Ingester {
         }
 
         // Write to old shard first (for consistency during transition)
-        let mut buffer = self.buffer.write().await;
-        buffer.append(batch.clone())?;
-        drop(buffer);
+        self.append_to_buffer_and_maybe_flush(batch.clone(), batch.get_array_memory_size())
+            .await?;
 
         // Split batch by key range and write to new shards
         let (batch_a, batch_b) = self.split_batch_by_key(&batch, &split_state.split_point)?;
@@ -534,6 +544,50 @@ impl Ingester {
     fn should_flush(&self, buffer: &WriteBuffer) -> bool {
         buffer.row_count() >= self.config.flush_row_count
             || buffer.size_bytes() >= self.config.flush_size_bytes
+    }
+
+    /// Append a batch, flushing existing buffered data first when schemas differ.
+    ///
+    /// This prevents heterogeneous RecordBatch concatenation failures during flush.
+    async fn append_to_buffer_and_maybe_flush(
+        &self,
+        batch: RecordBatch,
+        batch_size: usize,
+    ) -> Result<()> {
+        let mut pending_batch = Some(batch);
+
+        loop {
+            let mut buffer = self.buffer.write().await;
+
+            let incoming = pending_batch
+                .as_ref()
+                .ok_or_else(|| Error::Internal("Missing pending batch".to_string()))?;
+
+            // If schemas differ, flush current buffer before appending.
+            if !buffer.schema_compatible(incoming) {
+                let existing = buffer.take();
+                drop(buffer);
+                self.flush_batches(existing).await?;
+                continue;
+            }
+
+            if buffer.size_bytes() + batch_size > self.config.max_buffer_size_bytes {
+                return Err(Error::BufferFull);
+            }
+
+            let incoming = pending_batch
+                .take()
+                .ok_or_else(|| Error::Internal("Missing pending batch".to_string()))?;
+            buffer.append(incoming)?;
+
+            if self.should_flush(&buffer) {
+                let batches = buffer.take();
+                drop(buffer);
+                self.flush_batches(batches).await?;
+            }
+
+            return Ok(());
+        }
     }
 
     /// Flush batches to object storage

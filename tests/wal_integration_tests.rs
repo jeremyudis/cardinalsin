@@ -8,7 +8,7 @@
 //! - Flushed sequence number persistence
 
 use arrow_array::types::TimestampNanosecondType;
-use arrow_array::{Int64Array, RecordBatch};
+use arrow_array::{Float64Array, Int64Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use cardinalsin::ingester::{
     load_flushed_seq, persist_flushed_seq, IngesterConfig, WalConfig, WalSyncMode, WriteAheadLog,
@@ -52,6 +52,27 @@ fn make_timestamp_batch(values: &[i64]) -> RecordBatch {
         vec![
             Arc::new(arrow_array::PrimitiveArray::<TimestampNanosecondType>::from(values.to_vec())),
             Arc::new(Int64Array::from(values.to_vec())),
+        ],
+    )
+    .unwrap()
+}
+
+fn make_timestamp_batch_f64(values: &[i64]) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Nanosecond, None),
+            false,
+        ),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(arrow_array::PrimitiveArray::<TimestampNanosecondType>::from(values.to_vec())),
+            Arc::new(Float64Array::from(
+                values.iter().map(|v| *v as f64).collect::<Vec<f64>>(),
+            )),
         ],
     )
     .unwrap()
@@ -201,6 +222,41 @@ async fn test_wal_recovery_skips_flushed_entries() {
     assert_eq!(
         stats.row_count, 2,
         "should only recover the 2 rows from the unflushed entry"
+    );
+}
+
+#[tokio::test]
+async fn test_wal_recovery_mixed_schemas_do_not_break_next_write_flush() {
+    let dir = TempDir::new().unwrap();
+    let wal_config = make_wal_config(&dir);
+
+    // Phase 1: Simulate crash with mixed-schema WAL entries.
+    {
+        let mut wal = WriteAheadLog::open(wal_config.clone()).await.unwrap();
+        wal.append(&make_timestamp_batch(&[1_000_000_000]))
+            .await
+            .unwrap();
+        wal.append(&make_timestamp_batch_f64(&[2_000_000_000]))
+            .await
+            .unwrap();
+    }
+
+    // Phase 2: Recover and write one more float batch to trigger a flush boundary.
+    // Without schema-aware recovery, this write attempts to flush a mixed buffer and fails.
+    let mut config = make_ingester_config(make_wal_config(&dir));
+    config.flush_row_count = 2;
+    let mut ingester = make_ingester(config);
+    ingester.ensure_wal().await.unwrap();
+
+    ingester
+        .write(make_timestamp_batch_f64(&[3_000_000_000]))
+        .await
+        .unwrap();
+
+    let stats = ingester.buffer_stats().await;
+    assert_eq!(
+        stats.row_count, 0,
+        "post-recovery write should flush cleanly without mixed-schema concat errors"
     );
 }
 

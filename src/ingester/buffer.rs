@@ -36,6 +36,14 @@ impl WriteBuffer {
         Ok(())
     }
 
+    /// Check whether a batch schema can be buffered with existing batches.
+    pub fn schema_compatible(&self, batch: &RecordBatch) -> bool {
+        self.batches
+            .first()
+            .map(|existing| existing.schema().as_ref() == batch.schema().as_ref())
+            .unwrap_or(true)
+    }
+
     /// Take all batches from the buffer, leaving it empty
     pub fn take(&mut self) -> Vec<RecordBatch> {
         self.row_count = 0;

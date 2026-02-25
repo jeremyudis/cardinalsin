@@ -6,6 +6,8 @@ use crate::metadata::TimeRange;
 use crate::{Error, Result, StorageConfig};
 
 use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
+use datafusion::datasource::empty::EmptyTable;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
@@ -17,8 +19,10 @@ use datafusion::prelude::*;
 use datafusion::scalar::ScalarValue;
 use object_store::ObjectStore;
 use parking_lot::RwLock;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+use std::future::Future;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Query engine powered by DataFusion
 #[derive(Clone)]
@@ -27,6 +31,10 @@ pub struct QueryEngine {
     ctx: SessionContext,
     /// Registered table paths
     registered_paths: Arc<RwLock<HashSet<String>>>,
+    /// Paths currently backing the logical "metrics" table
+    registered_metrics_paths: Arc<RwLock<BTreeSet<String>>>,
+    /// Serialize operations that mutate and query the logical `metrics` table
+    metrics_table_query_lock: Arc<Mutex<()>>,
     /// S3 bucket used for chunk URLs
     s3_bucket: String,
 }
@@ -70,11 +78,122 @@ impl QueryEngine {
         // object_store and cache are used indirectly through CachedObjectStore
         let _ = (&object_store, &cache);
 
-        Ok(Self {
+        let engine = Self {
             ctx,
             registered_paths: Arc::new(RwLock::new(HashSet::new())),
+            registered_metrics_paths: Arc::new(RwLock::new(BTreeSet::new())),
+            metrics_table_query_lock: Arc::new(Mutex::new(())),
             s3_bucket: storage_config.bucket.clone(),
-        })
+        };
+
+        // Register empty metrics table at startup for Grafana compatibility (issue #97).
+        // This ensures `SELECT ... FROM metrics` returns empty results instead of
+        // "table not found" errors before any data has been ingested.
+        engine.register_empty_metrics_table().await?;
+
+        Ok(engine)
+    }
+
+    /// Register `metrics` for the given chunk paths, then execute the operation.
+    ///
+    /// The registration lock is released before `operation` runs so that slow
+    /// queries do not block other concurrent requests from registering their
+    /// own chunk sets.
+    pub async fn with_metrics_table<F, Fut, T>(
+        &self,
+        chunk_paths: &[String],
+        operation: F,
+    ) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        self.register_metrics_table_for_chunks(chunk_paths).await?;
+        operation().await
+    }
+
+    /// Register the logical `metrics` table over a set of chunk paths.
+    ///
+    /// This resolves the model mismatch between SQL queries (`FROM metrics`) and
+    /// metadata-selected chunk files by mapping the selected chunks into one table.
+    pub async fn register_metrics_table_for_chunks(&self, chunk_paths: &[String]) -> Result<()> {
+        let _guard = self.metrics_table_query_lock.lock().await;
+        self.register_metrics_table_for_chunks_locked(chunk_paths)
+            .await
+    }
+
+    async fn register_metrics_table_for_chunks_locked(&self, chunk_paths: &[String]) -> Result<()> {
+        let normalized_paths: BTreeSet<String> = chunk_paths
+            .iter()
+            .map(|p| p.trim_start_matches('/').to_string())
+            .collect();
+
+        if normalized_paths.is_empty() {
+            self.register_empty_metrics_table().await?;
+            *self.registered_metrics_paths.write() = normalized_paths;
+            return Ok(());
+        }
+
+        {
+            let registered = self.registered_metrics_paths.read();
+            if *registered == normalized_paths {
+                return Ok(());
+            }
+        }
+
+        let table_urls: Result<Vec<_>> = normalized_paths
+            .iter()
+            .map(|path| {
+                let url = self.path_to_object_store_url(path);
+                ListingTableUrl::parse(&url).map_err(|e| {
+                    Error::Config(format!(
+                        "Failed to parse metrics table URL '{}': {}",
+                        url, e
+                    ))
+                })
+            })
+            .collect();
+        let table_urls = table_urls?;
+
+        let file_format = ParquetFormat::default().with_enable_pruning(true);
+        let listing_options = ListingOptions::new(Arc::new(file_format))
+            .with_file_extension(".parquet")
+            .with_collect_stat(true);
+
+        let config = ListingTableConfig::new_with_multi_paths(table_urls)
+            .with_listing_options(listing_options)
+            .infer_schema(&self.ctx.state())
+            .await
+            .map_err(|e| {
+                Error::Internal(format!("Failed to infer schema for metrics table: {}", e))
+            })?;
+
+        let table = ListingTable::try_new(config)?;
+
+        let _ = self.ctx.deregister_table("metrics");
+        self.ctx.register_table("metrics", Arc::new(table))?;
+
+        *self.registered_metrics_paths.write() = normalized_paths;
+
+        Ok(())
+    }
+
+    async fn register_empty_metrics_table(&self) -> Result<()> {
+        let schema = self.metrics_table_schema().await;
+        let empty_table = EmptyTable::new(schema);
+
+        let _ = self.ctx.deregister_table("metrics");
+        self.ctx
+            .register_table("metrics", Arc::new(empty_table))
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
+    async fn metrics_table_schema(&self) -> SchemaRef {
+        match self.ctx.table("metrics").await {
+            Ok(df) => df.schema().inner().clone(),
+            Err(_) => crate::schema::MetricSchema::default_metrics().arrow_schema(),
+        }
     }
 
     /// Register a chunk file as a table
@@ -97,13 +216,8 @@ impl QueryEngine {
             .with_file_extension(".parquet")
             .with_collect_stat(true);
 
-        // Path from metadata is object-store-relative (tenant/data/.../chunk.parquet).
-        // Build an explicit bucket URL so DataFusion resolves the registered store.
-        let url = if path.starts_with("s3://") {
-            path.to_string()
-        } else {
-            format!("s3://{}/{}", self.s3_bucket, path.trim_start_matches('/'))
-        };
+        // Normalize chunk paths to the object-store URL registered in QueryEngine::new
+        let url = self.path_to_object_store_url(path);
 
         let table_url = ListingTableUrl::parse(&url)
             .map_err(|e| Error::Config(format!("Failed to parse table URL '{}': {}", url, e)))?;
@@ -556,6 +670,15 @@ impl QueryEngine {
             .trim_start_matches('_')
             .to_string()
     }
+
+    /// Normalize a chunk path to an object-store URL for DataFusion
+    fn path_to_object_store_url(&self, path: &str) -> String {
+        if path.starts_with("s3://") {
+            path.to_string()
+        } else {
+            format!("s3://{}/{}", self.s3_bucket, path.trim_start_matches('/'))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -584,6 +707,90 @@ mod tests {
         assert_eq!(
             QueryEngine::path_to_table_name("data/2024/chunk.parquet"),
             "data_2024_chunk_parquet"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_empty_metrics_table_query() {
+        let object_store = Arc::new(InMemory::new());
+        let dir = tempdir().unwrap();
+        let config = super::super::CacheConfig {
+            l1_size: 10 * 1024 * 1024,
+            l2_size: 50 * 1024 * 1024,
+            l2_dir: Some(dir.path().to_str().unwrap().to_string()),
+        };
+        let cache = Arc::new(TieredCache::new(config).await.unwrap());
+
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default())
+            .await
+            .unwrap();
+
+        // Metrics table should be registered at startup - query should return empty, not error
+        let results = engine
+            .execute("SELECT * FROM metrics WHERE metric_name = 'cpu_usage'")
+            .await
+            .unwrap();
+
+        assert!(
+            results.is_empty() || results[0].num_rows() == 0,
+            "Empty metrics table should return 0 rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_register_metrics_table_empty_paths() {
+        let object_store = Arc::new(InMemory::new());
+        let dir = tempdir().unwrap();
+        let config = super::super::CacheConfig {
+            l1_size: 10 * 1024 * 1024,
+            l2_size: 50 * 1024 * 1024,
+            l2_dir: Some(dir.path().to_str().unwrap().to_string()),
+        };
+        let cache = Arc::new(TieredCache::new(config).await.unwrap());
+
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default())
+            .await
+            .unwrap();
+
+        // Re-register with empty paths should succeed and preserve empty table
+        engine.register_metrics_table_for_chunks(&[]).await.unwrap();
+
+        let results = engine.execute("SELECT * FROM metrics").await.unwrap();
+
+        assert!(
+            results.is_empty() || results[0].num_rows() == 0,
+            "Should return 0 rows after re-registering with empty paths"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_path_to_object_store_url() {
+        let object_store = Arc::new(InMemory::new());
+        let dir = tempdir().unwrap();
+        let config = super::super::CacheConfig {
+            l1_size: 10 * 1024 * 1024,
+            l2_size: 50 * 1024 * 1024,
+            l2_dir: Some(dir.path().to_str().unwrap().to_string()),
+        };
+        let cache = Arc::new(TieredCache::new(config).await.unwrap());
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default())
+            .await
+            .unwrap();
+
+        // Bare path gets s3://{bucket}/ prefix (default bucket is "cardinalsin-data")
+        let url = engine.path_to_object_store_url("tenant/data/chunk.parquet");
+        assert!(url.starts_with("s3://"));
+        assert!(url.ends_with("/tenant/data/chunk.parquet"));
+
+        // Leading slash is stripped
+        let url = engine.path_to_object_store_url("/tenant/data/chunk.parquet");
+        assert!(url.ends_with("/tenant/data/chunk.parquet"));
+        assert!(!url.contains("//tenant"));
+
+        // Already has s3:// prefix - returned as-is
+        assert_eq!(
+            engine.path_to_object_store_url("s3://mybucket/data/chunk.parquet"),
+            "s3://mybucket/data/chunk.parquet"
         );
     }
 }

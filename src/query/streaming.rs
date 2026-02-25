@@ -4,7 +4,7 @@ use super::QueryEngine;
 use crate::ingester::FilteredReceiver;
 use crate::metadata::predicates::{ColumnPredicate, PredicateValue};
 use crate::metadata::MetadataClient;
-use crate::Result;
+use crate::{Error, Result};
 
 use arrow::compute::filter_record_batch;
 use arrow_array::cast::AsArray;
@@ -73,15 +73,35 @@ impl StreamingQueryExecutor {
     pub async fn execute(self, sql: &str) -> Result<mpsc::Receiver<Result<RecordBatch>>> {
         let (tx, rx) = mpsc::channel(100);
 
-        // Extract time range and set merge point to now
-        let time_range = self.engine.extract_time_range(sql).await?;
+        // Extract pruning inputs. If metrics table is not yet registered, bootstrap
+        // with all known chunks and retry parsing.
+        let (time_range, predicates) = match (
+            self.engine.extract_time_range(sql).await,
+            self.engine.extract_column_predicates(sql).await,
+        ) {
+            (Ok(time_range), Ok(predicates)) => (time_range, predicates),
+            (Err(e), _) | (_, Err(e)) if is_table_not_found_error(&e) => {
+                let bootstrap_chunks = self.metadata.list_chunks().await?;
+                let bootstrap_paths: Vec<String> = bootstrap_chunks
+                    .iter()
+                    .map(|chunk| chunk.chunk_path.clone())
+                    .collect();
+                self.engine
+                    .register_metrics_table_for_chunks(&bootstrap_paths)
+                    .await?;
+
+                (
+                    self.engine.extract_time_range(sql).await?,
+                    self.engine.extract_column_predicates(sql).await?,
+                )
+            }
+            (Err(e), _) | (_, Err(e)) => return Err(e),
+        };
+
         let merge_timestamp = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         // Parse SQL to extract predicates for live filtering
         let query_filter = QueryFilter::from_sql(sql);
-
-        // Extract column predicates for metadata-level filtering
-        let predicates = self.engine.extract_column_predicates(sql).await?;
 
         // Get historical chunks with predicate pushdown
         let chunks = self
@@ -89,29 +109,23 @@ impl StreamingQueryExecutor {
             .get_chunks_with_predicates(time_range, &predicates)
             .await?;
 
-        // Register chunks
-        for chunk in &chunks {
-            self.engine.register_chunk(&chunk.chunk_path).await?;
-        }
+        let chunk_paths: Vec<String> = chunks
+            .iter()
+            .map(|chunk| chunk.chunk_path.clone())
+            .collect();
+        let historical_batches = self
+            .engine
+            .with_metrics_table(&chunk_paths, || async { self.engine.execute(sql).await })
+            .await?;
 
-        let sql_owned = sql.to_string();
-        let engine = self.engine.clone();
         let receiver = self.receiver;
 
         // Spawn task to stream results
         tokio::spawn(async move {
             // First, stream historical data
-            match engine.execute(&sql_owned).await {
-                Ok(batches) => {
-                    for batch in batches {
-                        if tx.send(Ok(batch)).await.is_err() {
-                            return; // Receiver dropped
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e)).await;
-                    return;
+            for batch in historical_batches {
+                if tx.send(Ok(batch)).await.is_err() {
+                    return; // Receiver dropped
                 }
             }
 
@@ -185,6 +199,16 @@ impl StreamingQueryExecutor {
         });
 
         Ok(rx)
+    }
+}
+
+fn is_table_not_found_error(error: &Error) -> bool {
+    match error {
+        Error::DataFusion(df_error) => {
+            let msg = df_error.to_string().to_lowercase();
+            msg.contains("table") && msg.contains("not found")
+        }
+        _ => false,
     }
 }
 
