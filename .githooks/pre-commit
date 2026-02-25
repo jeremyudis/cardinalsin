@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "pre-commit: cargo not found in PATH"
+  exit 1
+fi
+
+echo "pre-commit: running cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "pre-commit: running cargo clippy --all-targets --all-features -- -D warnings"
+cargo clippy --all-targets --all-features -- -D warnings
+

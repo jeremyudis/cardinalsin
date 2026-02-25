@@ -135,6 +135,18 @@ cargo build --release
 cargo test
 ```
 
+### Enable Pre-Commit Checks
+
+Install the repository-managed git hooks:
+
+```bash
+bash scripts/install-git-hooks.sh
+```
+
+This enables `.githooks/pre-commit`, which runs:
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
 ### Telemetry Query Pack
 
 ```bash

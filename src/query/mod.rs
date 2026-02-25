@@ -99,7 +99,7 @@ impl QueryNode {
             .await?,
         );
 
-        let engine = QueryEngine::new(object_store.clone(), cache.clone()).await?;
+        let engine = QueryEngine::new(object_store.clone(), cache.clone(), &storage_config).await?;
 
         Ok(Self {
             config,

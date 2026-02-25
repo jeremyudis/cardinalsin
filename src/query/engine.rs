@@ -3,7 +3,7 @@
 use super::cache::TieredCache;
 use super::cached_store::CachedObjectStore;
 use crate::metadata::TimeRange;
-use crate::{Error, Result};
+use crate::{Error, Result, StorageConfig};
 
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
@@ -35,11 +35,17 @@ pub struct QueryEngine {
     registered_metrics_paths: Arc<RwLock<BTreeSet<String>>>,
     /// Serialize operations that mutate and query the logical `metrics` table
     metrics_table_query_lock: Arc<Mutex<()>>,
+    /// S3 bucket used for chunk URLs
+    s3_bucket: String,
 }
 
 impl QueryEngine {
     /// Create a new query engine
-    pub async fn new(object_store: Arc<dyn ObjectStore>, cache: Arc<TieredCache>) -> Result<Self> {
+    pub async fn new(
+        object_store: Arc<dyn ObjectStore>,
+        cache: Arc<TieredCache>,
+        storage_config: &StorageConfig,
+    ) -> Result<Self> {
         // Wrap object store with caching layer
         let cached_store = Arc::new(CachedObjectStore::new(object_store.clone(), cache.clone()));
 
@@ -50,7 +56,7 @@ impl QueryEngine {
 
         // Register object store with DataFusion for s3:// URLs
         // DataFusion uses the URL scheme to look up the appropriate ObjectStore
-        let s3_url = url::Url::parse("s3://bucket")
+        let s3_url = url::Url::parse(&format!("s3://{}", storage_config.bucket))
             .map_err(|e| Error::Config(format!("Failed to parse S3 URL: {}", e)))?;
         runtime_env.register_object_store(&s3_url, cached_store.clone());
 
@@ -77,6 +83,7 @@ impl QueryEngine {
             registered_paths: Arc::new(RwLock::new(HashSet::new())),
             registered_metrics_paths: Arc::new(RwLock::new(BTreeSet::new())),
             metrics_table_query_lock: Arc::new(Mutex::new(())),
+            s3_bucket: storage_config.bucket.clone(),
         };
 
         // Register empty metrics table at startup for Grafana compatibility (issue #97).
@@ -138,7 +145,7 @@ impl QueryEngine {
         let table_urls: Result<Vec<_>> = normalized_paths
             .iter()
             .map(|path| {
-                let url = Self::path_to_object_store_url(path);
+                let url = self.path_to_object_store_url(path);
                 ListingTableUrl::parse(&url).map_err(|e| {
                     Error::Config(format!(
                         "Failed to parse metrics table URL '{}': {}",
@@ -211,7 +218,7 @@ impl QueryEngine {
             .with_collect_stat(true);
 
         // Normalize chunk paths to the object-store URL registered in QueryEngine::new
-        let url = Self::path_to_object_store_url(path);
+        let url = self.path_to_object_store_url(path);
 
         let table_url = ListingTableUrl::parse(&url)
             .map_err(|e| Error::Config(format!("Failed to parse table URL '{}': {}", url, e)))?;
@@ -666,11 +673,11 @@ impl QueryEngine {
     }
 
     /// Normalize a chunk path to an object-store URL for DataFusion
-    fn path_to_object_store_url(path: &str) -> String {
+    fn path_to_object_store_url(&self, path: &str) -> String {
         if path.starts_with("s3://") {
             path.to_string()
         } else {
-            format!("s3://bucket/{}", path.trim_start_matches('/'))
+            format!("s3://{}/{}", self.s3_bucket, path.trim_start_matches('/'))
         }
     }
 }
@@ -692,7 +699,7 @@ mod tests {
         };
         let cache = Arc::new(TieredCache::new(config).await.unwrap());
 
-        let engine = QueryEngine::new(object_store, cache).await;
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default()).await;
         assert!(engine.is_ok());
     }
 
@@ -715,7 +722,9 @@ mod tests {
         };
         let cache = Arc::new(TieredCache::new(config).await.unwrap());
 
-        let engine = QueryEngine::new(object_store, cache).await.unwrap();
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default())
+            .await
+            .unwrap();
 
         // Metrics table should be registered at startup - query should return empty, not error
         let results = engine
@@ -740,7 +749,9 @@ mod tests {
         };
         let cache = Arc::new(TieredCache::new(config).await.unwrap());
 
-        let engine = QueryEngine::new(object_store, cache).await.unwrap();
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default())
+            .await
+            .unwrap();
 
         // Re-register with empty paths should succeed and preserve empty table
         engine.register_metrics_table_for_chunks(&[]).await.unwrap();
@@ -753,21 +764,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_path_to_object_store_url() {
-        // Bare path gets s3://bucket/ prefix
-        assert_eq!(
-            QueryEngine::path_to_object_store_url("tenant/data/chunk.parquet"),
-            "s3://bucket/tenant/data/chunk.parquet"
-        );
+    #[tokio::test]
+    async fn test_path_to_object_store_url() {
+        let object_store = Arc::new(InMemory::new());
+        let dir = tempdir().unwrap();
+        let config = super::super::CacheConfig {
+            l1_size: 10 * 1024 * 1024,
+            l2_size: 50 * 1024 * 1024,
+            l2_dir: Some(dir.path().to_str().unwrap().to_string()),
+        };
+        let cache = Arc::new(TieredCache::new(config).await.unwrap());
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default())
+            .await
+            .unwrap();
+
+        // Bare path gets s3://{bucket}/ prefix (default bucket is "cardinalsin-data")
+        let url = engine.path_to_object_store_url("tenant/data/chunk.parquet");
+        assert!(url.starts_with("s3://"));
+        assert!(url.ends_with("/tenant/data/chunk.parquet"));
+
         // Leading slash is stripped
-        assert_eq!(
-            QueryEngine::path_to_object_store_url("/tenant/data/chunk.parquet"),
-            "s3://bucket/tenant/data/chunk.parquet"
-        );
+        let url = engine.path_to_object_store_url("/tenant/data/chunk.parquet");
+        assert!(url.ends_with("/tenant/data/chunk.parquet"));
+        assert!(!url.contains("//tenant"));
+
         // Already has s3:// prefix - returned as-is
         assert_eq!(
-            QueryEngine::path_to_object_store_url("s3://mybucket/data/chunk.parquet"),
+            engine.path_to_object_store_url("s3://mybucket/data/chunk.parquet"),
             "s3://mybucket/data/chunk.parquet"
         );
     }

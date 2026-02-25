@@ -1,0 +1,194 @@
+- generic [ref=e4]:
+  - link "Skip to main content" [ref=e5] [cursor=pointer]:
+    - /url: "#pageContent"
+    - generic [ref=e6]: Skip to main content
+  - generic [ref=e7]:
+    - generic [ref=e8]:
+      - generic [ref=e9]:
+        - button "Close menu" [ref=e10] [cursor=pointer]:
+          - img "Grafana" [ref=e12]
+        - generic [ref=e13]: Grafana
+      - button "Undock menu" [ref=e14] [cursor=pointer]:
+        - img [ref=e15]
+    - navigation [ref=e17]:
+      - list "Navigation" [ref=e21]:
+        - listitem [ref=e22]:
+          - link "Home" [ref=e26] [cursor=pointer]:
+            - /url: /
+            - generic [ref=e28]:
+              - img [ref=e29]
+              - paragraph [ref=e31]: Home
+        - listitem [ref=e32]:
+          - generic [ref=e33]:
+            - link "Starred" [ref=e36] [cursor=pointer]:
+              - /url: /dashboards?starred
+              - generic [ref=e38]:
+                - img [ref=e39]
+                - paragraph [ref=e41]: Starred
+            - 'button "Expand section: Starred" [ref=e43] [cursor=pointer]':
+              - img [ref=e44]
+        - listitem [ref=e46]:
+          - link "Dashboards" [ref=e50] [cursor=pointer]:
+            - /url: /dashboards
+            - generic [ref=e52]:
+              - img [ref=e53]
+              - paragraph [ref=e55]: Dashboards
+        - listitem [ref=e56]:
+          - generic [ref=e57]:
+            - link "Alerting" [ref=e60] [cursor=pointer]:
+              - /url: /alerting
+              - generic [ref=e62]:
+                - img [ref=e63]
+                - paragraph [ref=e65]: Alerting
+            - 'button "Expand section: Alerting" [ref=e67] [cursor=pointer]':
+              - img [ref=e68]
+  - banner [ref=e70]:
+    - generic [ref=e71]:
+      - navigation "Breadcrumbs" [ref=e73]:
+        - list [ref=e74]:
+          - listitem [ref=e75]:
+            - link "Home" [ref=e76] [cursor=pointer]:
+              - /url: /
+            - img [ref=e78]
+          - listitem [ref=e80]:
+            - link "Dashboards" [ref=e81] [cursor=pointer]:
+              - /url: /dashboards
+            - img [ref=e83]
+          - listitem [ref=e85]:
+            - generic "Home" [ref=e86]
+      - generic [ref=e87]:
+        - generic [ref=e89]:
+          - img [ref=e91]
+          - button "Search..." [ref=e93] [cursor=pointer]
+          - generic [ref=e95]: ⌘+k
+        - button "Help" [ref=e96] [cursor=pointer]:
+          - img [ref=e97]
+        - link "Sign in" [ref=e100] [cursor=pointer]:
+          - /url: /?orgId=1&from=now-6h&to=now&timezone=browser&forceLogin=true
+  - main [ref=e111]:
+    - generic [ref=e121]:
+      - generic [ref=e129]:
+        - heading "Welcome to Grafana" [level=1] [ref=e130]
+        - generic [ref=e131]:
+          - heading "Need help?" [level=3] [ref=e132]
+          - generic [ref=e133]:
+            - link "Documentation" [ref=e134] [cursor=pointer]:
+              - /url: https://grafana.com/docs/grafana/latest?utm_source=grafana_gettingstarted
+            - link "Tutorials" [ref=e135] [cursor=pointer]:
+              - /url: https://grafana.com/tutorials?utm_source=grafana_gettingstarted
+            - link "Community" [ref=e136] [cursor=pointer]:
+              - /url: https://community.grafana.com?utm_source=grafana_gettingstarted
+            - link "Public Slack" [ref=e137] [cursor=pointer]:
+              - /url: http://slack.grafana.com?utm_source=grafana_gettingstarted
+      - region "Dashboards" [ref=e143]:
+        - heading "Dashboards" [level=2] [ref=e146]
+        - generic [ref=e149]:
+          - generic [ref=e150]:
+            - heading "Starred dashboards" [level=6] [ref=e152]
+            - list
+          - generic [ref=e153]:
+            - heading "Recently viewed dashboards" [level=6] [ref=e155]
+            - list
+      - region "Latest from the blog" [ref=e161]:
+        - heading "Latest from the blog" [level=2] [ref=e164]
+        - generic [ref=e167]:
+          - article "How to use AI to analyze and visualize CAN data with Grafana Assistant" [ref=e168]:
+            - link [ref=e169] [cursor=pointer]:
+              - /url: https://grafana.com/blog/how-to-use-ai-to-analyze-and-visualize-can-data-with-grafana-assistant/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e170]:
+              - time [ref=e171]: Dec 11
+              - link "How to use AI to analyze and visualize CAN data with Grafana Assistant" [ref=e172] [cursor=pointer]:
+                - /url: https://grafana.com/blog/how-to-use-ai-to-analyze-and-visualize-can-data-with-grafana-assistant/?utm_source=grafana_news&utm_medium=rss
+                - heading "How to use AI to analyze and visualize CAN data with Grafana Assistant" [level=3] [ref=e173]
+              - generic [ref=e174]: "Note: A version of this post originally appeared on the CSS Electronics blog. Martin Falch, co-owner and head of sales and marketing at CSS Electronics, is an expert on CAN bus data. Martin works closely with end users, typically OEM engineers, across diverse industries, including automotive, maritime, and industrial. He is passionate about data visualization and AI—and he’s been working extensively with Grafana Assistant."
+          - 'article "‘Grafana’s Big Tent’ podcast: Welcome to season 3!" [ref=e175]':
+            - link [ref=e176] [cursor=pointer]:
+              - /url: https://grafana.com/blog/grafanas-big-tent-podcast-welcome-to-season-3/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e177]:
+              - time [ref=e178]: Dec 10
+              - 'link "‘Grafana’s Big Tent’ podcast: Welcome to season 3!" [ref=e179] [cursor=pointer]':
+                - /url: https://grafana.com/blog/grafanas-big-tent-podcast-welcome-to-season-3/?utm_source=grafana_news&utm_medium=rss
+                - 'heading "‘Grafana’s Big Tent’ podcast: Welcome to season 3!" [level=3] [ref=e180]'
+              - generic [ref=e181]: "Sometimes the simplest questions spark the most entertaining rabbit holes. Questions like: “Can you monitor a candle without starting a fire?” or “Should your robot boat have redundancy, or just a twin?”"
+          - 'article "Grafana Labs: Top 10 moments of 2025" [ref=e182]':
+            - link [ref=e183] [cursor=pointer]:
+              - /url: https://grafana.com/blog/grafana-labs-top-10-moments-of-2025/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e184]:
+              - time [ref=e185]: Dec 10
+              - 'link "Grafana Labs: Top 10 moments of 2025" [ref=e186] [cursor=pointer]':
+                - /url: https://grafana.com/blog/grafana-labs-top-10-moments-of-2025/?utm_source=grafana_news&utm_medium=rss
+                - 'heading "Grafana Labs: Top 10 moments of 2025" [level=3] [ref=e187]'
+              - generic [ref=e188]: For Grafana Labs, 2025 was a year defined by innovation, growth, and the power of our community. We celebrated the release of Grafana 12 at our 10th annual GrafanaCON event, and marked major milestones across open source projects, including Mimir, k6, Beyla, Faro, and Alloy.
+          - 'article "Removal of Drilldown Investigations in Grafana: What you need to know" [ref=e189]':
+            - link [ref=e190] [cursor=pointer]:
+              - /url: https://grafana.com/blog/removal-of-drilldown-investigations-in-grafana-what-you-need-to-know/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e191]:
+              - time [ref=e192]: Dec 03
+              - 'link "Removal of Drilldown Investigations in Grafana: What you need to know" [ref=e193] [cursor=pointer]':
+                - /url: https://grafana.com/blog/removal-of-drilldown-investigations-in-grafana-what-you-need-to-know/?utm_source=grafana_news&utm_medium=rss
+                - 'heading "Removal of Drilldown Investigations in Grafana: What you need to know" [level=3] [ref=e194]'
+              - generic [ref=e195]: Back in May, we introduced the public preview of Grafana Drilldown Investigations, a new feature intended to help Grafana OSS and Grafana Cloud users accelerate their incident response.
+          - article "Send OpenTelemetry traces and logs from Cloudflare Workers to Grafana Cloud" [ref=e196]:
+            - link [ref=e197] [cursor=pointer]:
+              - /url: https://grafana.com/blog/send-opentelemetry-traces-and-logs-from-cloudflare-workers-to-grafana-cloud/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e198]:
+              - time [ref=e199]: Dec 03
+              - link "Send OpenTelemetry traces and logs from Cloudflare Workers to Grafana Cloud" [ref=e200] [cursor=pointer]:
+                - /url: https://grafana.com/blog/send-opentelemetry-traces-and-logs-from-cloudflare-workers-to-grafana-cloud/?utm_source=grafana_news&utm_medium=rss
+                - heading "Send OpenTelemetry traces and logs from Cloudflare Workers to Grafana Cloud" [level=3] [ref=e201]
+              - generic [ref=e202]: "Note: This blog was co-authored by Nevika Shah, a senior product manager at Cloudflare. Cloudflare Workers is a developer platform for deploying serverless functions, frontends, containers, and databases to a global network, spanning 330+ cities around the world. However, as your application scales, it becomes crucial to have the right observability tools to investigate issues, monitor performance, and get alerts when issues arise."
+          - 'article "What''s new in the Grafana Image Renderer: higher-quality results, security enhancements, and more" [ref=e203]':
+            - link [ref=e204] [cursor=pointer]:
+              - /url: https://grafana.com/blog/whats-new-in-the-grafana-image-renderer-higher-quality-results-security-enhancements-and-more/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e205]:
+              - time [ref=e206]: Dec 02
+              - 'link "What''s new in the Grafana Image Renderer: higher-quality results, security enhancements, and more" [ref=e207] [cursor=pointer]':
+                - /url: https://grafana.com/blog/whats-new-in-the-grafana-image-renderer-higher-quality-results-security-enhancements-and-more/?utm_source=grafana_news&utm_medium=rss
+                - 'heading "What''s new in the Grafana Image Renderer: higher-quality results, security enhancements, and more" [level=3] [ref=e208]'
+              - generic [ref=e209]: Whether it’s for an email or that upcoming presentation, many Grafana users like to share their favorite dashboards or panels outside of Grafana itself. The Grafana Image Renderer is a backend service for Grafana that helps you do just that by rendering panels and dashboards as images, such as PNGs and PDFs, via a headless browser. It’s commonly used to support Grafana features like exporting dashboards, generating images for alert notifications, and creating PDF reports.
+          - 'article "Contextual, in-product guidance for every Grafana user: A closer look at Interactive Learning" [ref=e210]':
+            - link [ref=e211] [cursor=pointer]:
+              - /url: https://grafana.com/blog/contextual-in-product-guidance-for-every-grafana-user-a-closer-look-at-interactive-learning/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e212]:
+              - time [ref=e213]: Dec 01
+              - 'link "Contextual, in-product guidance for every Grafana user: A closer look at Interactive Learning" [ref=e214] [cursor=pointer]':
+                - /url: https://grafana.com/blog/contextual-in-product-guidance-for-every-grafana-user-a-closer-look-at-interactive-learning/?utm_source=grafana_news&utm_medium=rss
+                - 'heading "Contextual, in-product guidance for every Grafana user: A closer look at Interactive Learning" [level=3] [ref=e215]'
+              - generic [ref=e216]: "As developer advocates at Grafana Labs, we’re always looking for new ways to help our users better understand and learn observability. You might remember our previous project that brought learning to life through an adventure-style game, and now we’re really excited to share something else we’ve been working on: Interactive Learning, a new way to get the technical help you need directly in Grafana."
+          - article "Improve service reliability and ops culture with Grafana Cloud Service Center" [ref=e217]:
+            - link [ref=e218] [cursor=pointer]:
+              - /url: https://grafana.com/blog/improve-service-reliability-and-ops-culture-with-grafana-cloud-service-center/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e219]:
+              - time [ref=e220]: Nov 30
+              - link "Improve service reliability and ops culture with Grafana Cloud Service Center" [ref=e221] [cursor=pointer]:
+                - /url: https://grafana.com/blog/improve-service-reliability-and-ops-culture-with-grafana-cloud-service-center/?utm_source=grafana_news&utm_medium=rss
+                - heading "Improve service reliability and ops culture with Grafana Cloud Service Center" [level=3] [ref=e222]
+              - generic [ref=e223]: Today’s engineering organizations are built around service ownership. Service owners are accountable for keeping their services reliable, performant, and ready to scale. But no service operates in isolation; every team depends on others, and those dependencies form a complex web that can be hard to see, let alone understand.
+          - article "How to monitor Amazon Bedrock AgentCore AI agent infrastructure in Grafana Cloud" [ref=e224]:
+            - link [ref=e225] [cursor=pointer]:
+              - /url: https://grafana.com/blog/how-to-monitor-amazon-bedrock-agentcore-ai-agent-infrastructure-in-grafana-cloud/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e226]:
+              - time [ref=e227]: Nov 27
+              - link "How to monitor Amazon Bedrock AgentCore AI agent infrastructure in Grafana Cloud" [ref=e228] [cursor=pointer]:
+                - /url: https://grafana.com/blog/how-to-monitor-amazon-bedrock-agentcore-ai-agent-infrastructure-in-grafana-cloud/?utm_source=grafana_news&utm_medium=rss
+                - heading "How to monitor Amazon Bedrock AgentCore AI agent infrastructure in Grafana Cloud" [level=3] [ref=e229]
+              - generic [ref=e230]: Modern AI agents are now highly advanced, frequently becoming essential components of engineering workflows and deployment pipelines. However, operating these systems often feels like trying to navigate a ship through a dense fog. When an agent errors, slows down, or consumes excessive resources, engineers find themselves adrift, lacking the navigational charts needed to diagnose the problem. The absence of deep insight makes debugging, performance tuning, and cost management unnecessarily difficult.
+          - article "How to monitor AI agent applications on Amazon Bedrock AgentCore with Grafana Cloud" [ref=e231]:
+            - link [ref=e232] [cursor=pointer]:
+              - /url: https://grafana.com/blog/how-to-monitor-ai-agent-applications-on-amazon-bedrock-agentcore-with-grafana-cloud/?utm_source=grafana_news&utm_medium=rss
+              - img
+            - generic [ref=e233]:
+              - time [ref=e234]: Nov 25
+              - link "How to monitor AI agent applications on Amazon Bedrock AgentCore with Grafana Cloud" [ref=e235] [cursor=pointer]:
+                - /url: https://grafana.com/blog/how-to-monitor-ai-agent-applications-on-amazon-bedrock-agentcore-with-grafana-cloud/?utm_source=grafana_news&utm_medium=rss
+                - heading "How to monitor AI agent applications on Amazon Bedrock AgentCore with Grafana Cloud" [level=3] [ref=e236]
+              - generic [ref=e237]: Today’s AI agents have grown increasingly sophisticated, moving into production environments and becoming integral parts of engineering workflows. But these agents can also be black boxes for engineers, which makes observability more critical than ever.
