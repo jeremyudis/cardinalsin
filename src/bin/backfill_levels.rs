@@ -30,10 +30,6 @@ struct Args {
     #[arg(short, long, env = "METADATA_BUCKET")]
     bucket: Option<String>,
 
-    /// Deprecated alias for --bucket
-    #[arg(long, env = "METADATA_CONTAINER", hide = true)]
-    container: Option<String>,
-
     /// Metadata prefix
     #[arg(short, long, default_value = "metadata/")]
     prefix: String,
@@ -48,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _telemetry = Telemetry::init_for_component("cardinalsin-backfill-levels", "info")?;
 
     let args = Args::parse();
-    let bucket_override = args.bucket.as_deref().or(args.container.as_deref());
+    let bucket_override = args.bucket.as_deref();
     let provider_override = args.cloud_provider.as_deref().or_else(|| {
         if bucket_override.is_some() && !provider_env_is_set() {
             Some("aws")
