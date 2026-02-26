@@ -1,5 +1,10 @@
+# Keep Rust and Debian releases aligned to avoid glibc mismatches between
+# builder and runtime images.
+ARG RUST_TOOLCHAIN=1.93.0
+ARG DEBIAN_RELEASE=bookworm
+
 # Build stage
-FROM rust:latest AS builder
+FROM rust:${RUST_TOOLCHAIN}-${DEBIAN_RELEASE} AS builder
 
 WORKDIR /app
 
@@ -41,7 +46,7 @@ RUN touch src/lib.rs src/bin/*.rs
 RUN cargo build --release --bins
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:${DEBIAN_RELEASE}-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
