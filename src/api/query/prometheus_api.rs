@@ -322,11 +322,23 @@ enum LabelMatchOp {
 
 impl LabelMatchOp {
     fn to_sql(&self, label: &str, value: &str) -> String {
+        let quoted_label = format!("\"{}\"", label);
+        let escaped_value = value.replace('\'', "''");
         match self {
-            LabelMatchOp::Eq => format!("{} = '{}'", label, value.replace('\'', "''")),
-            LabelMatchOp::Ne => format!("{} != '{}'", label, value.replace('\'', "''")),
-            LabelMatchOp::Re => format!("{} ~ '{}'", label, value.replace('\'', "''")),
-            LabelMatchOp::Nre => format!("NOT ({} ~ '{}')", label, value.replace('\'', "''")),
+            LabelMatchOp::Eq => format!("{} = '{}'", quoted_label, escaped_value),
+            LabelMatchOp::Ne => format!("{} != '{}'", quoted_label, escaped_value),
+            LabelMatchOp::Re => {
+                format!(
+                    "regexp_match({}, '{}') IS NOT NULL",
+                    quoted_label, escaped_value
+                )
+            }
+            LabelMatchOp::Nre => {
+                format!(
+                    "regexp_match({}, '{}') IS NULL",
+                    quoted_label, escaped_value
+                )
+            }
         }
     }
 }
@@ -443,6 +455,27 @@ fn parse_label_matchers(s: &str) -> Vec<LabelMatcher> {
     matchers
 }
 
+/// Discover label columns from parsed PromQL query
+fn discover_label_columns(parsed: &ParsedPromQL) -> Vec<String> {
+    let mut labels = Vec::new();
+
+    // Extract labels from matchers
+    for matcher in &parsed.label_matchers {
+        if !labels.contains(&matcher.label) {
+            labels.push(matcher.label.clone());
+        }
+    }
+
+    // Add group_by labels
+    for label in &parsed.group_by {
+        if !labels.contains(label) {
+            labels.push(label.clone());
+        }
+    }
+
+    labels
+}
+
 /// Transpile PromQL instant query to SQL
 fn transpile_promql_instant(promql: &str, time: Option<f64>) -> String {
     let parsed = parse_promql(promql);
@@ -481,11 +514,19 @@ fn transpile_promql_instant(promql: &str, time: Option<f64>) -> String {
         let group_clause = if parsed.group_by.is_empty() {
             "metric_name".to_string()
         } else {
-            format!("metric_name, {}", parsed.group_by.join(", "))
+            format!(
+                "metric_name, {}",
+                parsed
+                    .group_by
+                    .iter()
+                    .map(|l| format!("\"{}\"", l))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
 
         return format!(
-            "SELECT {}, {} as value FROM metrics WHERE {} GROUP BY {} ORDER BY value DESC",
+            "SELECT {}, MAX(timestamp) as timestamp, {} as value FROM metrics WHERE {} GROUP BY {} ORDER BY value DESC",
             group_clause, sql_agg, where_sql, group_clause
         );
     }
@@ -514,6 +555,15 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
     }
     let where_sql = where_clauses.join(" AND ");
 
+    // Discover label columns to include in SELECT and GROUP BY
+    let label_cols = discover_label_columns(&parsed);
+    let label_cols_quoted: Vec<String> = label_cols.iter().map(|l| format!("\"{}\"", l)).collect();
+    let label_cols_select = if label_cols_quoted.is_empty() {
+        String::new()
+    } else {
+        format!(", {}", label_cols_quoted.join(", "))
+    };
+
     // Handle rate/increase functions
     if let Some(func) = &parsed.function {
         let _range_ns = parsed.range_seconds.unwrap_or(step) as i64 * 1_000_000_000;
@@ -522,13 +572,14 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
             "rate" | "irate" => format!(
                 "SELECT
                     (timestamp / {step}) * {step} as time_bucket,
-                    metric_name,
+                    metric_name{label_cols},
                     (MAX({value_expr}) - MIN({value_expr})) / ({range_secs}) as value
                 FROM metrics
                 WHERE {where_sql}
-                GROUP BY time_bucket, metric_name
+                GROUP BY time_bucket, metric_name{label_cols}
                 ORDER BY time_bucket",
                 step = step_ns,
+                label_cols = label_cols_select,
                 value_expr = PROM_VALUE_EXPR,
                 range_secs = parsed.range_seconds.unwrap_or(step),
                 where_sql = where_sql
@@ -536,26 +587,28 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
             "increase" | "delta" => format!(
                 "SELECT
                     (timestamp / {step}) * {step} as time_bucket,
-                    metric_name,
+                    metric_name{label_cols},
                     MAX({value_expr}) - MIN({value_expr}) as value
                 FROM metrics
                 WHERE {where_sql}
-                GROUP BY time_bucket, metric_name
+                GROUP BY time_bucket, metric_name{label_cols}
                 ORDER BY time_bucket",
                 step = step_ns,
+                label_cols = label_cols_select,
                 value_expr = PROM_VALUE_EXPR,
                 where_sql = where_sql
             ),
             _ => format!(
                 "SELECT
                     (timestamp / {step}) * {step} as time_bucket,
-                    metric_name,
+                    metric_name{label_cols},
                     AVG({value_expr}) as value
                 FROM metrics
                 WHERE {where_sql}
-                GROUP BY time_bucket, metric_name
+                GROUP BY time_bucket, metric_name{label_cols}
                 ORDER BY time_bucket",
                 step = step_ns,
+                label_cols = label_cols_select,
                 value_expr = PROM_VALUE_EXPR,
                 where_sql = where_sql
             ),
@@ -577,19 +630,42 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
         let group_clause = if parsed.group_by.is_empty() {
             "time_bucket, metric_name".to_string()
         } else {
-            format!("time_bucket, metric_name, {}", parsed.group_by.join(", "))
+            format!(
+                "time_bucket, metric_name, {}",
+                parsed
+                    .group_by
+                    .iter()
+                    .map(|l| format!("\"{}\"", l))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+
+        let select_labels = if parsed.group_by.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", {}",
+                parsed
+                    .group_by
+                    .iter()
+                    .map(|l| format!("\"{}\"", l))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
 
         return format!(
             "SELECT
                 (timestamp / {step}) * {step} as time_bucket,
-                metric_name,
+                metric_name{select_labels},
                 {agg} as value
             FROM metrics
             WHERE {where_sql}
             GROUP BY {group_clause}
             ORDER BY time_bucket",
             step = step_ns,
+            select_labels = select_labels,
             agg = sql_agg,
             where_sql = where_sql,
             group_clause = group_clause
@@ -600,13 +676,14 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
     format!(
         "SELECT
             (timestamp / {step}) * {step} as time_bucket,
-            metric_name,
+            metric_name{label_cols},
             AVG({value_expr}) as value
         FROM metrics
         WHERE {where_sql}
-        GROUP BY time_bucket, metric_name
+        GROUP BY time_bucket, metric_name{label_cols}
         ORDER BY time_bucket",
         step = step_ns,
+        label_cols = label_cols_select,
         value_expr = PROM_VALUE_EXPR,
         where_sql = where_sql
     )
