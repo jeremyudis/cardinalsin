@@ -84,7 +84,7 @@ fn make_ingester(config: IngesterConfig) -> cardinalsin::ingester::Ingester {
         Arc::new(LocalMetadataClient::new());
     let storage_config = StorageConfig {
         provider: CloudProvider::Memory,
-        container: "test-bucket".to_string(),
+        bucket: "test-bucket".to_string(),
         tenant_id: "test-tenant".to_string(),
     };
     let schema = MetricSchema::default_metrics();

@@ -37,8 +37,8 @@ pub struct QueryEngine {
     metrics_table_query_lock: Arc<Mutex<()>>,
     /// Object-store URL scheme used for chunk URLs.
     object_store_scheme: String,
-    /// Object-store container/bucket used for chunk URLs.
-    object_store_container: String,
+    /// Object-store bucket used for chunk URLs.
+    object_store_bucket: String,
 }
 
 impl QueryEngine {
@@ -61,7 +61,7 @@ impl QueryEngine {
         let store_url = url::Url::parse(&format!(
             "{}://{}",
             storage_config.provider.object_store_scheme(),
-            storage_config.container
+            storage_config.bucket
         ))
         .map_err(|e| Error::Config(format!("Failed to parse object-store URL: {}", e)))?;
         runtime_env.register_object_store(&store_url, cached_store.clone());
@@ -90,7 +90,7 @@ impl QueryEngine {
             registered_metrics_paths: Arc::new(RwLock::new(BTreeSet::new())),
             metrics_table_query_lock: Arc::new(Mutex::new(())),
             object_store_scheme: storage_config.provider.object_store_scheme().to_string(),
-            object_store_container: storage_config.container.clone(),
+            object_store_bucket: storage_config.bucket.clone(),
         };
 
         // Register empty metrics table at startup for Grafana compatibility (issue #97).
@@ -686,7 +686,7 @@ impl QueryEngine {
             format!(
                 "{}://{}/{}",
                 self.object_store_scheme,
-                self.object_store_container,
+                self.object_store_bucket,
                 path.trim_start_matches('/')
             )
         }
@@ -818,7 +818,7 @@ mod tests {
         let cache = Arc::new(TieredCache::new(config).await.unwrap());
         let storage = StorageConfig {
             provider: crate::CloudProvider::Gcp,
-            container: "gcs-test-bucket".to_string(),
+            bucket: "gcs-test-bucket".to_string(),
             tenant_id: "default".to_string(),
         };
         let engine = QueryEngine::new(object_store, cache, &storage)

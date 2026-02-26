@@ -40,18 +40,18 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Rebuilding time index...");
     println!("  Provider: {}", storage.provider.as_str());
-    println!("  Container: {}", storage.container);
+    println!("  Bucket: {}", storage.bucket);
     println!("  Prefix: {}", prefix);
 
     let metadata_storage = StorageConfig {
         provider: storage.provider,
-        container: storage.container.clone(),
+        bucket: storage.bucket.clone(),
         tenant_id: storage.tenant_id.clone(),
     };
     let object_store = ComponentFactory::create_object_store_for(&metadata_storage).await?;
 
     let config = ObjectStoreMetadataConfig {
-        bucket: storage.container,
+        bucket: storage.bucket,
         metadata_prefix: prefix,
         enable_cache: false,
         allow_unsafe_overwrite: std::env::var("S3_METADATA_ALLOW_UNSAFE_OVERWRITE")

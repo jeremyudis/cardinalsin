@@ -21,15 +21,15 @@ impl ComponentFactory {
     /// Resolve a provider-neutral storage config from overrides and environment.
     pub fn resolve_storage_config(
         provider_override: Option<&str>,
-        container_override: Option<&str>,
+        bucket_override: Option<&str>,
         tenant_id: impl Into<String>,
     ) -> Result<StorageConfig> {
         let provider = Self::resolve_cloud_provider(provider_override)?;
-        let container = Self::resolve_storage_container(provider, container_override)?;
+        let bucket = Self::resolve_storage_bucket(provider, bucket_override)?;
 
         Ok(StorageConfig {
             provider,
-            container,
+            bucket,
             tenant_id: tenant_id.into(),
         })
     }
@@ -38,7 +38,8 @@ impl ComponentFactory {
     ///
     /// Environment variables:
     /// - CLOUD_PROVIDER: "memory" (default), "aws", "gcp", or "azure"
-    /// - STORAGE_CONTAINER: provider container/bucket name (required for aws/gcp/azure)
+    /// - STORAGE_BUCKET: provider bucket name (required for aws/gcp/azure)
+    /// - STORAGE_CONTAINER: deprecated alias for STORAGE_BUCKET
     /// - STORAGE_BACKEND: deprecated alias for CLOUD_PROVIDER
     pub async fn create_object_store() -> Result<Arc<dyn ObjectStore>> {
         let storage = Self::resolve_storage_config(None, None, "default")?;
@@ -59,13 +60,13 @@ impl ComponentFactory {
 
                 info!(
                     provider = "aws",
-                    container = %storage.container,
+                    container = %storage.bucket,
                     region = %region,
                     "Using object store"
                 );
 
                 let mut builder = AmazonS3Builder::new()
-                    .with_bucket_name(&storage.container)
+                    .with_bucket_name(&storage.bucket)
                     .with_region(&region);
 
                 if let Some(endpoint) = Self::read_env("S3_ENDPOINT") {
@@ -83,16 +84,16 @@ impl ComponentFactory {
                 Ok(Arc::new(builder.build()?))
             }
             CloudProvider::Gcp => {
-                info!(provider = "gcp", container = %storage.container, "Using object store");
+                info!(provider = "gcp", container = %storage.bucket, "Using object store");
                 let store = GoogleCloudStorageBuilder::from_env()
-                    .with_bucket_name(&storage.container)
+                    .with_bucket_name(&storage.bucket)
                     .build()?;
                 Ok(Arc::new(store))
             }
             CloudProvider::Azure => {
-                info!(provider = "azure", container = %storage.container, "Using object store");
+                info!(provider = "azure", container = %storage.bucket, "Using object store");
                 let store = MicrosoftAzureBuilder::from_env()
-                    .with_container_name(&storage.container)
+                    .with_container_name(&storage.bucket)
                     .build()?;
                 Ok(Arc::new(store))
             }
@@ -104,8 +105,8 @@ impl ComponentFactory {
     /// Environment variables:
     /// - METADATA_BACKEND: "local" (default) or "object_store"
     /// - METADATA_BACKEND=s3: deprecated alias for "object_store"
-    /// - METADATA_CONTAINER: metadata container/bucket (optional, defaults to STORAGE_CONTAINER)
-    /// - METADATA_BUCKET: deprecated alias for METADATA_CONTAINER
+    /// - METADATA_BUCKET: metadata bucket (optional, defaults to STORAGE_BUCKET)
+    /// - METADATA_CONTAINER: deprecated alias for METADATA_BUCKET
     /// - METADATA_PREFIX: object-store prefix for metadata (default: metadata/)
     pub async fn create_metadata_client(
         object_store: Arc<dyn ObjectStore>,
@@ -146,7 +147,7 @@ impl ComponentFactory {
         storage: &StorageConfig,
     ) -> Result<Arc<dyn MetadataClient>> {
         let provider = storage.provider;
-        let storage_container = storage.container.clone();
+        let storage_container = storage.bucket.clone();
 
         let metadata_container = match (
             Self::read_env("METADATA_CONTAINER"),
@@ -176,11 +177,11 @@ impl ComponentFactory {
             warn!(
                 storage_container = %storage_container,
                 metadata_container = %metadata_container,
-                "Creating dedicated object store for metadata container"
+                "Creating dedicated object store for metadata bucket"
             );
             let metadata_storage = StorageConfig {
                 provider,
-                container: metadata_container.clone(),
+                bucket: metadata_container.clone(),
                 tenant_id: "metadata".to_string(),
             };
             Self::create_object_store_for(&metadata_storage).await?
@@ -243,15 +244,16 @@ impl ComponentFactory {
         }
     }
 
-    fn resolve_storage_container(
+    fn resolve_storage_bucket(
         provider: CloudProvider,
-        container_override: Option<&str>,
+        bucket_override: Option<&str>,
     ) -> Result<String> {
-        if let Some(container) = container_override.and_then(Self::normalize) {
-            return Ok(container);
+        if let Some(bucket) = bucket_override.and_then(Self::normalize) {
+            return Ok(bucket);
         }
 
-        let common = Self::read_env("STORAGE_CONTAINER");
+        let common =
+            Self::read_env("STORAGE_BUCKET").or_else(|| Self::read_env("STORAGE_CONTAINER"));
 
         match provider {
             CloudProvider::Memory => Ok(common.unwrap_or_else(|| "cardinalsin-data".to_string())),
@@ -271,12 +273,11 @@ impl ComponentFactory {
                     }
                     (Some(container), None) => Ok(container),
                     (None, Some(bucket)) => {
-                        warn!("S3_BUCKET is deprecated for selection; prefer STORAGE_CONTAINER");
+                        warn!("S3_BUCKET is deprecated for selection; prefer STORAGE_BUCKET");
                         Ok(bucket)
                     }
                     (None, None) => Err(crate::Error::Config(
-                        "STORAGE_CONTAINER or S3_BUCKET required when CLOUD_PROVIDER=aws"
-                            .to_string(),
+                        "STORAGE_BUCKET or S3_BUCKET required when CLOUD_PROVIDER=aws".to_string(),
                     )),
                 }
             }
@@ -298,7 +299,7 @@ impl ComponentFactory {
                     (Some(container), None) => Ok(container),
                     (None, Some(bucket)) => Ok(bucket),
                     (None, None) => Err(crate::Error::Config(
-                        "STORAGE_CONTAINER, GOOGLE_BUCKET, or GOOGLE_BUCKET_NAME required when CLOUD_PROVIDER=gcp".to_string(),
+                        "STORAGE_BUCKET, GOOGLE_BUCKET, or GOOGLE_BUCKET_NAME required when CLOUD_PROVIDER=gcp".to_string(),
                     )),
                 }
             }
@@ -319,7 +320,8 @@ impl ComponentFactory {
                     (Some(container), None) => Ok(container),
                     (None, Some(azure_name)) => Ok(azure_name),
                     (None, None) => Err(crate::Error::Config(
-                        "STORAGE_CONTAINER or AZURE_CONTAINER_NAME required when CLOUD_PROVIDER=azure".to_string(),
+                        "STORAGE_BUCKET or AZURE_CONTAINER_NAME required when CLOUD_PROVIDER=azure"
+                            .to_string(),
                     )),
                 }
             }
@@ -439,6 +441,7 @@ mod tests {
     const TEST_ENV_KEYS: &[&str] = &[
         "CLOUD_PROVIDER",
         "STORAGE_BACKEND",
+        "STORAGE_BUCKET",
         "STORAGE_CONTAINER",
         "S3_BUCKET",
         "S3_REGION",
@@ -449,8 +452,8 @@ mod tests {
         "GOOGLE_BUCKET_NAME",
         "AZURE_CONTAINER_NAME",
         "METADATA_BACKEND",
-        "METADATA_CONTAINER",
         "METADATA_BUCKET",
+        "METADATA_CONTAINER",
         "METADATA_PREFIX",
         "S3_METADATA_ALLOW_UNSAFE_OVERWRITE",
     ];
@@ -517,7 +520,7 @@ mod tests {
         with_env(&[], || {
             let cfg = ComponentFactory::resolve_storage_config(None, None, "tenant-a").unwrap();
             assert_eq!(cfg.provider, CloudProvider::Memory);
-            assert_eq!(cfg.container, "cardinalsin-data");
+            assert_eq!(cfg.bucket, "cardinalsin-data");
             assert_eq!(cfg.tenant_id, "tenant-a");
         });
     }
@@ -532,7 +535,7 @@ mod tests {
             || {
                 let cfg = ComponentFactory::resolve_storage_config(None, None, "tenant-a").unwrap();
                 assert_eq!(cfg.provider, CloudProvider::Gcp);
-                assert_eq!(cfg.container, "metrics-gcs");
+                assert_eq!(cfg.bucket, "metrics-gcs");
             },
         );
     }
@@ -547,7 +550,7 @@ mod tests {
             || {
                 let cfg = ComponentFactory::resolve_storage_config(None, None, "tenant-a").unwrap();
                 assert_eq!(cfg.provider, CloudProvider::Aws);
-                assert_eq!(cfg.container, "legacy-bucket");
+                assert_eq!(cfg.bucket, "legacy-bucket");
             },
         );
     }
@@ -564,7 +567,7 @@ mod tests {
             || {
                 let cfg = ComponentFactory::resolve_storage_config(None, None, "tenant-a").unwrap();
                 assert_eq!(cfg.provider, CloudProvider::Gcp);
-                assert_eq!(cfg.container, "gcp-bucket");
+                assert_eq!(cfg.bucket, "gcp-bucket");
             },
         );
     }
@@ -596,7 +599,7 @@ mod tests {
                 )
                 .unwrap();
                 assert_eq!(cfg.provider, CloudProvider::Azure);
-                assert_eq!(cfg.container, "override-container");
+                assert_eq!(cfg.bucket, "override-container");
             },
         );
     }
@@ -610,7 +613,7 @@ mod tests {
             ],
             || {
                 let cfg = ComponentFactory::resolve_storage_config(None, None, "tenant-a").unwrap();
-                assert_eq!(cfg.container, "legacy-aws-bucket");
+                assert_eq!(cfg.bucket, "legacy-aws-bucket");
             },
         );
     }
@@ -675,7 +678,7 @@ mod tests {
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let cfg = StorageConfig {
                 provider: CloudProvider::Memory,
-                container: "data".to_string(),
+                bucket: "data".to_string(),
                 tenant_id: "tenant-a".to_string(),
             };
             let client = rt.block_on(ComponentFactory::create_metadata_client_for_storage(
@@ -698,7 +701,7 @@ mod tests {
                 let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
                 let cfg = StorageConfig {
                     provider: CloudProvider::Memory,
-                    container: "data".to_string(),
+                    bucket: "data".to_string(),
                     tenant_id: "tenant-a".to_string(),
                 };
                 let client = rt.block_on(ComponentFactory::create_metadata_client_for_storage(
@@ -721,7 +724,7 @@ mod tests {
                 let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
                 let cfg = StorageConfig {
                     provider: CloudProvider::Memory,
-                    container: "data".to_string(),
+                    bucket: "data".to_string(),
                     tenant_id: "tenant-a".to_string(),
                 };
                 let client = rt.block_on(ComponentFactory::create_metadata_client_for_storage(
@@ -742,7 +745,7 @@ mod tests {
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
             let cfg = StorageConfig {
                 provider: CloudProvider::Memory,
-                container: "data".to_string(),
+                bucket: "data".to_string(),
                 tenant_id: "tenant-a".to_string(),
             };
             match rt.block_on(ComponentFactory::create_metadata_client_for_storage(

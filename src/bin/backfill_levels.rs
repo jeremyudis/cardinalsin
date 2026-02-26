@@ -26,13 +26,13 @@ struct Args {
     #[arg(long, env = "CLOUD_PROVIDER")]
     cloud_provider: Option<String>,
 
-    /// Metadata container/bucket
-    #[arg(short, long, env = "METADATA_CONTAINER")]
-    container: Option<String>,
-
-    /// Deprecated alias for --container
-    #[arg(long, env = "METADATA_BUCKET", hide = true)]
+    /// Metadata bucket
+    #[arg(short, long, env = "METADATA_BUCKET")]
     bucket: Option<String>,
+
+    /// Deprecated alias for --bucket
+    #[arg(long, env = "METADATA_CONTAINER", hide = true)]
+    container: Option<String>,
 
     /// Metadata prefix
     #[arg(short, long, default_value = "metadata/")]
@@ -48,36 +48,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _telemetry = Telemetry::init_for_component("cardinalsin-backfill-levels", "info")?;
 
     let args = Args::parse();
-    let container_override = args.container.as_deref().or(args.bucket.as_deref());
+    let bucket_override = args.bucket.as_deref().or(args.container.as_deref());
     let provider_override = args.cloud_provider.as_deref().or_else(|| {
-        if container_override.is_some() && !provider_env_is_set() {
+        if bucket_override.is_some() && !provider_env_is_set() {
             Some("aws")
         } else {
             None
         }
     });
 
-    let metadata_storage = ComponentFactory::resolve_storage_config(
-        provider_override,
-        container_override,
-        "metadata",
-    )?;
+    let metadata_storage =
+        ComponentFactory::resolve_storage_config(provider_override, bucket_override, "metadata")?;
 
     info!("Starting level backfill migration");
     info!("  Provider: {}", metadata_storage.provider.as_str());
-    info!("  Container: {}", metadata_storage.container);
+    info!("  Bucket: {}", metadata_storage.bucket);
     info!("  Prefix: {}", args.prefix);
     info!("  Dry run: {}", args.dry_run);
 
     let metadata_store = StorageConfig {
         provider: metadata_storage.provider,
-        container: metadata_storage.container.clone(),
+        bucket: metadata_storage.bucket.clone(),
         tenant_id: metadata_storage.tenant_id.clone(),
     };
     let object_store = ComponentFactory::create_object_store_for(&metadata_store).await?;
 
     let config = ObjectStoreMetadataConfig {
-        bucket: metadata_storage.container,
+        bucket: metadata_storage.bucket,
         metadata_prefix: args.prefix.clone(),
         enable_cache: false,
         allow_unsafe_overwrite: std::env::var("S3_METADATA_ALLOW_UNSAFE_OVERWRITE")

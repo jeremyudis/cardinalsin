@@ -55,8 +55,8 @@ pub struct Config {
 pub struct StorageConfig {
     /// Cloud provider for object storage.
     pub provider: CloudProvider,
-    /// Provider container/bucket name.
-    pub container: String,
+    /// Provider bucket name.
+    pub bucket: String,
     /// Tenant ID for multi-tenant isolation
     pub tenant_id: String,
 }
@@ -111,7 +111,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             provider: CloudProvider::Aws,
-            container: "cardinalsin-data".to_string(),
+            bucket: "cardinalsin-data".to_string(),
             tenant_id: "default".to_string(),
         }
     }
