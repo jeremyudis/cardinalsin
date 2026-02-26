@@ -5,10 +5,23 @@
 
 use crate::api::ApiState;
 
+use arrow_array::Array;
+use arrow_schema::DataType;
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// Columns that are internal to the storage model and should not be exposed as Prometheus labels.
+const INTERNAL_COLUMNS: &[&str] = &[
+    "timestamp",
+    "metric_name",
+    "value_f64",
+    "value_i64",
+    "value_u64",
+    "value",
+    "time_bucket",
+];
 
 const PROM_VALUE_EXPR: &str =
     "COALESCE(value_f64, CAST(value_i64 AS DOUBLE), CAST(value_u64 AS DOUBLE))";
@@ -191,20 +204,25 @@ pub async fn labels(State(state): State<ApiState>) -> Json<LabelsResponse> {
         }
     };
 
-    // Extract label names from results
+    // Extract label names from results, filtering out internal columns
     let mut labels = Vec::new();
+    labels.push("__name__".to_string());
     for batch in &results {
         if let Some(col) = batch.column_by_name("column_name") {
             use arrow_array::cast::AsArray;
-            use arrow_array::Array;
             let string_array = col.as_string::<i32>();
             for i in 0..string_array.len() {
                 if !string_array.is_null(i) {
-                    labels.push(string_array.value(i).to_string());
+                    let name = string_array.value(i);
+                    if !is_internal_column(name) {
+                        labels.push(name.to_string());
+                    }
                 }
             }
         }
     }
+    labels.sort();
+    labels.dedup();
 
     Json(LabelsResponse {
         status: "success".to_string(),
@@ -219,8 +237,23 @@ pub async fn label_values(
     State(state): State<ApiState>,
     Path(name): Path<String>,
 ) -> Json<LabelValuesResponse> {
-    // Query for distinct values of the label
-    let sql = format!("SELECT DISTINCT {} FROM metrics", name);
+    // Handle __name__ specially — it maps to metric_name column
+    let column_name = if name == "__name__" {
+        "metric_name".to_string()
+    } else {
+        name.clone()
+    };
+
+    // Reject invalid column names (SQL injection prevention) and internal columns
+    if !is_valid_column_name(&column_name) || is_internal_column(&column_name) {
+        return Json(LabelValuesResponse {
+            status: "success".to_string(),
+            data: Vec::new(),
+        });
+    }
+
+    // Quote column name with double-quotes for safety
+    let sql = format!("SELECT DISTINCT \"{}\" FROM metrics", column_name);
 
     let results = match state.query_node.query(&sql).await {
         Ok(results) => results,
@@ -232,21 +265,22 @@ pub async fn label_values(
         }
     };
 
-    // Extract values from results
+    // Extract values from results, handling both Utf8 and Dictionary columns
     let mut values = Vec::new();
     for batch in &results {
         if batch.num_columns() > 0 {
-            use arrow_array::cast::AsArray;
-            use arrow_array::Array;
             let col = batch.column(0);
-            let string_array = col.as_string::<i32>();
-            for i in 0..string_array.len() {
-                if !string_array.is_null(i) {
-                    values.push(string_array.value(i).to_string());
+            for i in 0..col.len() {
+                if !col.is_null(i) {
+                    if let Some(v) = extract_string_value(col.as_ref(), i) {
+                        values.push(v);
+                    }
                 }
             }
         }
     }
+    values.sort();
+    values.dedup();
 
     Json(LabelValuesResponse {
         status: "success".to_string(),
@@ -619,14 +653,26 @@ fn convert_to_prometheus_vector(batches: &[arrow_array::RecordBatch]) -> Vec<Pro
     let mut results = Vec::new();
 
     for batch in batches {
+        let label_columns = extract_label_columns(batch.schema().as_ref());
+
         for row in 0..batch.num_rows() {
             let mut metric = HashMap::new();
 
             // Extract metric name
             if let Some(col) = batch.column_by_name("metric_name") {
-                use arrow_array::cast::AsArray;
-                let name = col.as_string::<i32>().value(row);
-                metric.insert("__name__".to_string(), name.to_string());
+                if let Some(name) = extract_string_value(col.as_ref(), row) {
+                    metric.insert("__name__".to_string(), name);
+                }
+            }
+
+            // Extract all label columns
+            for &(col_idx, ref col_name) in &label_columns {
+                let col = batch.column(col_idx);
+                if !col.is_null(row) {
+                    if let Some(v) = extract_string_value(col.as_ref(), row) {
+                        metric.insert(col_name.clone(), v);
+                    }
+                }
             }
 
             // Extract timestamp and value
@@ -660,21 +706,35 @@ fn convert_to_prometheus_matrix(batches: &[arrow_array::RecordBatch]) -> Vec<Pro
     let mut series_map: HashMap<String, SeriesEntry> = HashMap::new();
 
     for batch in batches {
+        let label_columns = extract_label_columns(batch.schema().as_ref());
+
         for row in 0..batch.num_rows() {
-            // Get metric name as series key
-            let series_key = batch
+            // Build metric labels
+            let metric_name = batch
                 .column_by_name("metric_name")
-                .map(|c| {
-                    use arrow_array::cast::AsArray;
-                    c.as_string::<i32>().value(row).to_string()
-                })
+                .and_then(|c| extract_string_value(c.as_ref(), row))
                 .unwrap_or_default();
 
-            let entry = series_map.entry(series_key.clone()).or_insert_with(|| {
-                let mut metric = HashMap::new();
-                metric.insert("__name__".to_string(), series_key);
-                (metric, Vec::new())
-            });
+            let mut label_values_for_key = vec![metric_name.clone()];
+            let mut metric = HashMap::new();
+            metric.insert("__name__".to_string(), metric_name);
+
+            for &(col_idx, ref col_name) in &label_columns {
+                let col = batch.column(col_idx);
+                if !col.is_null(row) {
+                    if let Some(v) = extract_string_value(col.as_ref(), row) {
+                        label_values_for_key.push(format!("{}={}", col_name, v));
+                        metric.insert(col_name.clone(), v);
+                    }
+                }
+            }
+
+            // Series key includes all label values so different label combos are separate series
+            let series_key = label_values_for_key.join("\x00");
+
+            let entry = series_map
+                .entry(series_key)
+                .or_insert_with(|| (metric, Vec::new()));
 
             // Extract timestamp and value
             let timestamp = batch
@@ -700,4 +760,84 @@ fn convert_to_prometheus_matrix(batches: &[arrow_array::RecordBatch]) -> Vec<Pro
             values: Some(values),
         })
         .collect()
+}
+
+/// Check if a column name is a valid SQL identifier (prevents SQL injection).
+fn is_valid_column_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Check if a column name is an internal storage column (not a Prometheus label).
+fn is_internal_column(name: &str) -> bool {
+    INTERNAL_COLUMNS.contains(&name)
+}
+
+/// Extract label column indices and names from a schema.
+/// Returns columns that are string-typed and not internal storage columns.
+fn extract_label_columns(schema: &arrow_schema::Schema) -> Vec<(usize, String)> {
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            let name = field.name().as_str();
+            if is_internal_column(name) || name == "metric_name" {
+                return false;
+            }
+            matches!(
+                field.data_type(),
+                DataType::Utf8 | DataType::Dictionary(_, _)
+            )
+        })
+        .map(|(idx, field)| (idx, field.name().clone()))
+        .collect()
+}
+
+/// Safely extract a string value from a Utf8 or Dictionary-encoded column.
+fn extract_string_value(array: &dyn Array, row: usize) -> Option<String> {
+    use arrow_array::cast::AsArray;
+
+    match array.data_type() {
+        DataType::Utf8 => {
+            let string_array = array.as_string::<i32>();
+            if string_array.is_null(row) {
+                None
+            } else {
+                Some(string_array.value(row).to_string())
+            }
+        }
+        DataType::Dictionary(_, value_type) if matches!(value_type.as_ref(), DataType::Utf8) => {
+            if array.is_null(row) {
+                return None;
+            }
+            // Try UInt16 keys first (metric_name, low-cardinality labels)
+            if let Some(dict) = array
+                .as_any()
+                .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt16Type>>()
+            {
+                let values = dict.values().as_string::<i32>();
+                let key = dict.keys().value(row) as usize;
+                return Some(values.value(key).to_string());
+            }
+            // Try UInt32 keys (medium-cardinality labels)
+            if let Some(dict) = array
+                .as_any()
+                .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt32Type>>()
+            {
+                let values = dict.values().as_string::<i32>();
+                let key = dict.keys().value(row) as usize;
+                return Some(values.value(key).to_string());
+            }
+            None
+        }
+        _ => None,
+    }
 }
