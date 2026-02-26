@@ -581,6 +581,7 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
 fn extract_prometheus_value(batch: &arrow_array::RecordBatch, row: usize) -> String {
     use arrow_array::cast::AsArray;
     use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
+    use arrow_array::Array;
 
     if let Some(col) = batch.column_by_name("value") {
         let values = col.as_primitive::<Float64Type>();
