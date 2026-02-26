@@ -4,10 +4,13 @@ set -euo pipefail
 
 echo "Running pre-commit checks..."
 
-# 1. cargo fmt check
+# 1. cargo fmt — auto-fix and re-stage changed files
 if ! cargo fmt -- --check 2>/dev/null; then
-    echo "error: rustfmt check failed. Run 'cargo fmt' to fix." >&2
-    exit 1
+    echo "rustfmt: auto-fixing formatting..."
+    cargo fmt
+    # Re-stage only the .rs files that were already staged
+    git diff --name-only --cached -- '*.rs' | xargs -r git add
+    echo "rustfmt: fixed and re-staged."
 fi
 
 # 2. cargo clippy
