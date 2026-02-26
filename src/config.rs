@@ -464,11 +464,34 @@ mod tests {
     where
         F: FnOnce(),
     {
+        struct EnvReset {
+            saved: Vec<(&'static str, Option<OsString>)>,
+        }
+
+        impl Drop for EnvReset {
+            fn drop(&mut self) {
+                for (key, value) in self.saved.drain(..) {
+                    match value {
+                        Some(v) => {
+                            // SAFETY: Tests hold a global mutex to serialize environment mutation.
+                            unsafe { std::env::set_var(key, v) };
+                        }
+                        None => {
+                            // SAFETY: Tests hold a global mutex to serialize environment mutation.
+                            unsafe { std::env::remove_var(key) };
+                        }
+                    }
+                }
+            }
+        }
+
         let _guard = env_lock().lock().expect("env lock poisoned");
-        let mut saved: Vec<(&str, Option<OsString>)> = Vec::new();
+        let mut reset = EnvReset {
+            saved: Vec::with_capacity(TEST_ENV_KEYS.len()),
+        };
 
         for key in TEST_ENV_KEYS {
-            saved.push((key, std::env::var_os(key)));
+            reset.saved.push((key, std::env::var_os(key)));
             // SAFETY: Tests hold a global mutex to serialize environment mutation.
             unsafe { std::env::remove_var(key) };
         }
@@ -487,19 +510,6 @@ mod tests {
         }
 
         f();
-
-        for (key, value) in saved {
-            match value {
-                Some(v) => {
-                    // SAFETY: Tests hold a global mutex to serialize environment mutation.
-                    unsafe { std::env::set_var(key, v) };
-                }
-                None => {
-                    // SAFETY: Tests hold a global mutex to serialize environment mutation.
-                    unsafe { std::env::remove_var(key) };
-                }
-            }
-        }
     }
 
     #[test]
