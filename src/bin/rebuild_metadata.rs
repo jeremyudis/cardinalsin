@@ -8,33 +8,50 @@ use cardinalsin::metadata::{ObjectStoreMetadataClient, ObjectStoreMetadataConfig
 use cardinalsin::telemetry::Telemetry;
 use cardinalsin::StorageConfig;
 
+fn provider_env_is_set() -> bool {
+    ["CLOUD_PROVIDER", "STORAGE_BACKEND"].iter().any(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _telemetry = Telemetry::init_for_component("cardinalsin-rebuild-metadata", "info")
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    let storage = ComponentFactory::resolve_storage_config(None, None, "metadata")?;
-    let prefix = std::env::var("METADATA_PREFIX").unwrap_or_else(|_| "metadata/".to_string());
-
     let metadata_container = std::env::var("METADATA_CONTAINER")
         .ok()
-        .or_else(|| std::env::var("METADATA_BUCKET").ok())
-        .unwrap_or_else(|| storage.container.clone());
+        .or_else(|| std::env::var("METADATA_BUCKET").ok());
+    let provider_override = if metadata_container.is_some() && !provider_env_is_set() {
+        Some("aws")
+    } else {
+        None
+    };
+
+    let storage = ComponentFactory::resolve_storage_config(
+        provider_override,
+        metadata_container.as_deref(),
+        "metadata",
+    )?;
+    let prefix = std::env::var("METADATA_PREFIX").unwrap_or_else(|_| "metadata/".to_string());
 
     println!("Rebuilding time index...");
     println!("  Provider: {}", storage.provider.as_str());
-    println!("  Container: {}", metadata_container);
+    println!("  Container: {}", storage.container);
     println!("  Prefix: {}", prefix);
 
     let metadata_storage = StorageConfig {
         provider: storage.provider,
-        container: metadata_container.clone(),
+        container: storage.container.clone(),
         tenant_id: storage.tenant_id.clone(),
     };
     let object_store = ComponentFactory::create_object_store_for(&metadata_storage).await?;
 
     let config = ObjectStoreMetadataConfig {
-        bucket: metadata_container,
+        bucket: storage.container,
         metadata_prefix: prefix,
         enable_cache: false,
         allow_unsafe_overwrite: std::env::var("S3_METADATA_ALLOW_UNSAFE_OVERWRITE")

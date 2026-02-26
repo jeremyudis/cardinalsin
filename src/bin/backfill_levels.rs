@@ -10,6 +10,15 @@ use cardinalsin::StorageConfig;
 use clap::Parser;
 use tracing::info;
 
+fn provider_env_is_set() -> bool {
+    ["CLOUD_PROVIDER", "STORAGE_BACKEND"].iter().any(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    })
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
@@ -39,9 +48,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _telemetry = Telemetry::init_for_component("cardinalsin-backfill-levels", "info")?;
 
     let args = Args::parse();
+    let container_override = args.container.as_deref().or(args.bucket.as_deref());
+    let provider_override = args.cloud_provider.as_deref().or_else(|| {
+        if container_override.is_some() && !provider_env_is_set() {
+            Some("aws")
+        } else {
+            None
+        }
+    });
+
     let metadata_storage = ComponentFactory::resolve_storage_config(
-        args.cloud_provider.as_deref(),
-        args.container.as_deref().or(args.bucket.as_deref()),
+        provider_override,
+        container_override,
         "metadata",
     )?;
 
