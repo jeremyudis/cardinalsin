@@ -3,10 +3,15 @@
 //! Implements the Prometheus Remote Write protocol with Snappy compression.
 
 use crate::api::ApiState;
-use crate::schema::{METRIC_NAME_FIELD, TIMESTAMP_FIELD, VALUE_F64_FIELD};
+use crate::schema::{
+    METRIC_NAME_FIELD, TIMESTAMP_FIELD, VALUE_F64_FIELD, VALUE_I64_FIELD, VALUE_U64_FIELD,
+};
 use crate::Result;
 
-use arrow_array::{ArrayRef, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray};
+use arrow_array::{
+    ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray,
+    UInt64Array,
+};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use axum::body::Bytes;
 use axum::extract::State;
@@ -369,7 +374,12 @@ fn convert_prom_to_arrow(req: &WriteRequest) -> Result<RecordBatch> {
 
     let mut timestamps = Vec::with_capacity(total_samples);
     let mut metric_names = Vec::with_capacity(total_samples);
-    let mut values = Vec::with_capacity(total_samples);
+
+    // Separate values by type for multi-value columns
+    let mut float_values = Vec::with_capacity(total_samples);
+    let mut int_values = Vec::with_capacity(total_samples);
+    let mut uint_values = Vec::with_capacity(total_samples);
+
     let mut label_values: HashMap<String, Vec<Option<String>>> = label_names
         .iter()
         .map(|name| (name.clone(), Vec::with_capacity(total_samples)))
@@ -395,7 +405,39 @@ fn convert_prom_to_arrow(req: &WriteRequest) -> Result<RecordBatch> {
             // Convert milliseconds to nanoseconds
             timestamps.push(sample.timestamp_ms * 1_000_000);
             metric_names.push(metric_name.clone());
-            values.push(sample.value);
+
+            // Detect value type and route to appropriate column
+            let val = sample.value;
+            if val.is_finite() && val.fract() == 0.0 {
+                // Value is an integer (no fractional part)
+                let int_val = val as i64;
+
+                // Check if conversion back to f64 is lossless (no precision loss)
+                if (int_val as f64 - val).abs() < f64::EPSILON {
+                    // Lossless conversion - use integer column
+                    if int_val >= 0 {
+                        // Non-negative - use u64 column
+                        uint_values.push(int_val as u64);
+                        int_values.push(0); // Placeholder
+                        float_values.push(f64::NAN); // Placeholder
+                    } else {
+                        // Negative - use i64 column
+                        int_values.push(int_val);
+                        uint_values.push(0); // Placeholder
+                        float_values.push(f64::NAN); // Placeholder
+                    }
+                } else {
+                    // Precision loss in i64 conversion - use float
+                    float_values.push(val);
+                    int_values.push(0); // Placeholder
+                    uint_values.push(0); // Placeholder
+                }
+            } else {
+                // Non-integer (has fractional part) or infinite/NaN - use float
+                float_values.push(val);
+                int_values.push(0); // Placeholder
+                uint_values.push(0); // Placeholder
+            }
 
             // Add label values
             for name in &label_names {
@@ -405,7 +447,7 @@ fn convert_prom_to_arrow(req: &WriteRequest) -> Result<RecordBatch> {
         }
     }
 
-    // Build schema
+    // Build schema with multi-value columns (must match MetricSchemaBuilder canonical order)
     let mut fields = vec![
         Field::new(
             TIMESTAMP_FIELD,
@@ -414,12 +456,16 @@ fn convert_prom_to_arrow(req: &WriteRequest) -> Result<RecordBatch> {
         ),
         Field::new(METRIC_NAME_FIELD, DataType::Utf8, false),
         Field::new(VALUE_F64_FIELD, DataType::Float64, true),
+        Field::new(VALUE_I64_FIELD, DataType::Int64, true),
+        Field::new(VALUE_U64_FIELD, DataType::UInt64, true),
     ];
 
     let mut columns: Vec<ArrayRef> = vec![
         Arc::new(TimestampNanosecondArray::from(timestamps).with_timezone("UTC")),
         Arc::new(StringArray::from(metric_names)),
-        Arc::new(Float64Array::from(values)),
+        Arc::new(Float64Array::from(float_values)),
+        Arc::new(Int64Array::from(int_values)),
+        Arc::new(UInt64Array::from(uint_values)),
     ];
 
     // Add label columns (sorted for consistency)

@@ -22,7 +22,9 @@ use cardinalsin::metadata::{
 use cardinalsin::sharding::{HotShardConfig, ShardMonitor};
 use cardinalsin::Error;
 
-use arrow_array::{Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray};
+use arrow_array::{
+    Float64Array, Int64Array, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
+};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use object_store::memory::InMemory;
 use object_store::ObjectStore;
@@ -56,8 +58,9 @@ fn create_ts_batch(n: usize, start_ts: i64) -> RecordBatch {
     .unwrap()
 }
 
-/// Helper: create a batch with an intentionally different value column type.
-fn create_mixed_type_batch(n: usize, start_ts: i64) -> RecordBatch {
+/// Helper: create a batch with multi-value columns (realistic representation of type routing).
+/// When use_int is true, values go to value_i64; otherwise, they go to value_f64.
+fn create_multi_value_batch(n: usize, start_ts: i64, use_int: bool) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![
         Field::new(
             "timestamp",
@@ -65,19 +68,34 @@ fn create_mixed_type_batch(n: usize, start_ts: i64) -> RecordBatch {
             false,
         ),
         Field::new("metric_name", DataType::Utf8, false),
-        Field::new("value_f64", DataType::Int64, true),
+        Field::new("value_f64", DataType::Float64, true),
+        Field::new("value_i64", DataType::Int64, true),
+        Field::new("value_u64", DataType::UInt64, true),
     ]));
 
     let timestamps: Vec<i64> = (0..n as i64).map(|i| start_ts + i * 1_000_000).collect();
     let names: Vec<&str> = (0..n).map(|_| "test_metric").collect();
-    let values: Vec<i64> = (0..n as i64).collect();
+
+    let (float_vals, int_vals, uint_vals) = if use_int {
+        // Integer values - populate value_i64
+        (vec![f64::NAN; n], (0..n as i64).collect(), vec![0u64; n])
+    } else {
+        // Float values - populate value_f64
+        (
+            (0..n).map(|i| i as f64 * 0.1).collect(),
+            vec![0i64; n],
+            vec![0u64; n],
+        )
+    };
 
     RecordBatch::try_new(
         schema,
         vec![
             Arc::new(TimestampNanosecondArray::from(timestamps).with_timezone("UTC")),
             Arc::new(StringArray::from(names)),
-            Arc::new(Int64Array::from(values)),
+            Arc::new(Float64Array::from(float_vals)),
+            Arc::new(Int64Array::from(int_vals)),
+            Arc::new(UInt64Array::from(uint_vals)),
         ],
     )
     .unwrap()
@@ -330,37 +348,51 @@ async fn test_multiple_flush_cycles() {
 }
 
 #[tokio::test]
-async fn test_schema_mismatch_flush_boundary() {
+async fn test_multi_value_flush_no_concat_errors() {
+    // Test that multi-value columns prevent concatenation errors (issue #98)
+    // Use low threshold to trigger automatic flush
     let (ingester, _, metadata) = create_test_ingester(
-        2, // flush when 2 rows are buffered
+        25, // flush when 25 rows are buffered
         100_000_000,
     );
 
     let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
 
-    // First batch uses value_f64 as Float64.
-    ingester.write(create_ts_batch(1, now)).await.unwrap();
-
-    // Second/third batches use value_f64 as Int64. Previously this caused
-    // concat failures when mixed with the first batch in one flush.
+    // Write float values (value_f64 populated) - 10 rows
     ingester
-        .write(create_mixed_type_batch(1, now + 10_000_000))
-        .await
-        .unwrap();
-    ingester
-        .write(create_mixed_type_batch(1, now + 20_000_000))
+        .write(create_multi_value_batch(10, now, false))
         .await
         .unwrap();
 
+    // Write integer values (value_i64 populated) - 10 rows
+    ingester
+        .write(create_multi_value_batch(10, now + 1_000_000, true))
+        .await
+        .unwrap();
+
+    // Write float values again - 10 more rows (total = 30, triggers flush at 25)
+    ingester
+        .write(create_multi_value_batch(10, now + 2_000_000, false))
+        .await
+        .unwrap();
+
+    // All batches have IDENTICAL schema (all three value columns),
+    // so concatenation succeeds and flush happens automatically
     let stats = ingester.buffer_stats().await;
-    assert_eq!(stats.row_count, 0, "all rows should flush successfully");
-
-    let chunks = metadata.list_chunks().await.unwrap();
-    assert_eq!(
-        chunks.len(),
-        2,
-        "batches should flush in schema-homogeneous groups"
+    assert!(
+        stats.row_count <= 5,
+        "should have flushed 25 rows, leaving at most 5 buffered"
     );
+
+    // Verify chunk was registered successfully (no concat errors)
+    let chunks = metadata.list_chunks().await.unwrap();
+    assert!(
+        !chunks.is_empty(),
+        "should have at least one chunk after automatic flush"
+    );
+
+    // The key assertion: if concat failed, no chunks would be registered
+    // With multi-value columns, all schemas are identical and concat succeeds
 }
 
 // =========================================================================

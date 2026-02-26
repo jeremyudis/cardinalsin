@@ -199,10 +199,19 @@ impl MetricSchema {
 }
 
 /// Builder for MetricSchema
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MetricSchemaBuilder {
     labels: Vec<ColumnDefinition>,
     multi_value: bool,
+}
+
+impl Default for MetricSchemaBuilder {
+    fn default() -> Self {
+        Self {
+            labels: Vec::new(),
+            multi_value: true, // Enable multi-value columns by default
+        }
+    }
 }
 
 impl MetricSchemaBuilder {
