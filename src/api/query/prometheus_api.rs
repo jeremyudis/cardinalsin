@@ -819,16 +819,18 @@ fn extract_string_value(array: &dyn Array, row: usize) -> Option<String> {
                 return None;
             }
             // Try UInt16 keys first (metric_name, low-cardinality labels)
-            if let Some(dict) =
-                array.as_any().downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt16Type>>()
+            if let Some(dict) = array
+                .as_any()
+                .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt16Type>>()
             {
                 let values = dict.values().as_string::<i32>();
                 let key = dict.keys().value(row) as usize;
                 return Some(values.value(key).to_string());
             }
             // Try UInt32 keys (medium-cardinality labels)
-            if let Some(dict) =
-                array.as_any().downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt32Type>>()
+            if let Some(dict) = array
+                .as_any()
+                .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt32Type>>()
             {
                 let values = dict.values().as_string::<i32>();
                 let key = dict.keys().value(row) as usize;
