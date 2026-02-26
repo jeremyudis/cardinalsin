@@ -6,7 +6,6 @@ use cardinalsin::compactor::{Compactor, CompactorConfig};
 use cardinalsin::config::ComponentFactory;
 use cardinalsin::sharding::{HotShardConfig, ShardMonitor};
 use cardinalsin::telemetry::Telemetry;
-use cardinalsin::StorageConfig;
 
 use clap::Parser;
 use std::sync::Arc;
@@ -17,17 +16,17 @@ use tracing::info;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// S3 bucket name
-    #[arg(long, env = "S3_BUCKET", default_value = "cardinalsin-data")]
-    bucket: String,
+    /// Cloud provider (memory, aws, gcp, azure)
+    #[arg(long, env = "CLOUD_PROVIDER")]
+    cloud_provider: Option<String>,
 
-    /// S3 region
-    #[arg(long, env = "S3_REGION", default_value = "us-east-1")]
-    region: String,
+    /// Provider container/bucket
+    #[arg(long, env = "STORAGE_CONTAINER")]
+    storage_container: Option<String>,
 
-    /// S3 endpoint (for MinIO)
-    #[arg(long, env = "S3_ENDPOINT")]
-    endpoint: Option<String>,
+    /// Deprecated alias for --storage-container
+    #[arg(long, env = "S3_BUCKET", hide = true)]
+    bucket: Option<String>,
 
     /// Tenant ID
     #[arg(long, env = "TENANT_ID", default_value = "default")]
@@ -58,19 +57,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting CardinalSin Compactor");
 
-    // Create storage config
-    let storage_config = StorageConfig {
-        bucket: args.bucket.clone(),
-        region: args.region.clone(),
-        endpoint: args.endpoint.clone(),
-        tenant_id: args.tenant_id.clone(),
-    };
+    let storage_config = ComponentFactory::resolve_storage_config(
+        args.cloud_provider.as_deref(),
+        args.storage_container.as_deref().or(args.bucket.as_deref()),
+        args.tenant_id.clone(),
+    )?;
 
-    // Create object store from environment
-    let object_store = ComponentFactory::create_object_store().await?;
+    let object_store = ComponentFactory::create_object_store_for(&storage_config).await?;
 
     // Create metadata client from environment
-    let metadata = ComponentFactory::create_metadata_client(object_store.clone()).await?;
+    let metadata =
+        ComponentFactory::create_metadata_client_for_storage(object_store.clone(), &storage_config)
+            .await?;
 
     // Create compactor config
     let compactor_config = CompactorConfig {

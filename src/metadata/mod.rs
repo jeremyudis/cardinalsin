@@ -12,7 +12,8 @@ pub use client::{MetadataClient, SplitState};
 pub use local::LocalMetadataClient;
 pub use predicates::{ColumnPredicate, PredicateValue};
 pub use s3::{
-    ChunkMetadataExtended, ColumnStats, MetadataCatalog, S3MetadataClient, S3MetadataConfig,
+    ChunkMetadataExtended, ColumnStats, MetadataCatalog, ObjectStoreMetadataClient,
+    ObjectStoreMetadataConfig, S3MetadataClient, S3MetadataConfig,
 };
 
 use crate::ingester::ChunkMetadata;

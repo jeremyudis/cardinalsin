@@ -396,9 +396,12 @@ CardinalSin supports real-time streaming for live dashboards and alerting by mer
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `S3_BUCKET` | `cardinalsin-data` | S3 bucket name |
-| `S3_REGION` | `us-east-1` | S3 region |
-| `S3_ENDPOINT` | — | S3 endpoint (for MinIO or other S3-compatible storage) |
+| `CLOUD_PROVIDER` | `memory` | Storage provider: `memory`, `aws`, `gcp`, `azure` |
+| `STORAGE_CONTAINER` | — | Container/bucket name for selected provider |
+| `METADATA_BACKEND` | `local` | `local` or `object_store` |
+| `METADATA_CONTAINER` | `STORAGE_CONTAINER` | Metadata container/bucket when using `object_store` backend |
+| `S3_REGION` | `us-east-1` | AWS region (AWS provider) |
+| `S3_ENDPOINT` | — | AWS S3 endpoint (for MinIO or other S3-compatible storage) |
 | `TENANT_ID` | `default` | Tenant identifier |
 | `RUST_LOG` | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`) |
 
@@ -409,7 +412,8 @@ cardinalsin-ingester \
   --http-port 8080 \
   --grpc-port 4317 \
   --flush-interval-secs 300 \
-  --bucket my-metrics
+  --cloud-provider aws \
+  --storage-container my-metrics
 ```
 
 ### Query Node Options

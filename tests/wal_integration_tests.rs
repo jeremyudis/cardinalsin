@@ -15,7 +15,7 @@ use cardinalsin::ingester::{
 };
 use cardinalsin::metadata::LocalMetadataClient;
 use cardinalsin::schema::MetricSchema;
-use cardinalsin::StorageConfig;
+use cardinalsin::{CloudProvider, StorageConfig};
 use object_store::memory::InMemory;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -83,10 +83,9 @@ fn make_ingester(config: IngesterConfig) -> cardinalsin::ingester::Ingester {
     let metadata: Arc<dyn cardinalsin::metadata::MetadataClient> =
         Arc::new(LocalMetadataClient::new());
     let storage_config = StorageConfig {
+        provider: CloudProvider::Memory,
+        container: "test-bucket".to_string(),
         tenant_id: "test-tenant".to_string(),
-        bucket: "test-bucket".to_string(),
-        region: "us-east-1".to_string(),
-        endpoint: None,
     };
     let schema = MetricSchema::default_metrics();
     cardinalsin::ingester::Ingester::new(config, store, metadata, storage_config, schema)

@@ -10,13 +10,13 @@
 //!
 //! - **Columnar Storage**: Labels are stored as columns, not tag sets, eliminating
 //!   the series-set explosion problem
-//! - **Zero-Disk Architecture**: Stateless compute nodes with data stored in S3
-//! - **3-Tier Caching**: RAM → NVMe → S3 for cost-efficient performance
+//! - **Zero-Disk Architecture**: Stateless compute nodes with data stored in object storage
+//! - **3-Tier Caching**: RAM → NVMe → object storage for cost-efficient performance
 //! - **Adaptive Indexing**: Automatically promotes hot dimensions based on query patterns
 //!
 //! ## Architecture
 //!
-//! - **Ingester**: Buffers writes, batches to Parquet, flushes to S3
+//! - **Ingester**: Buffers writes, batches to Parquet, flushes to object storage
 //! - **Query Node**: Executes queries via DataFusion with tiered caching
 //! - **Compactor**: Merges files, downsamples, enforces retention
 
@@ -53,22 +53,65 @@ pub struct Config {
 /// Object storage configuration
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
-    /// S3 bucket name
-    pub bucket: String,
-    /// S3 region
-    pub region: String,
-    /// S3 endpoint (for MinIO or other S3-compatible storage)
-    pub endpoint: Option<String>,
+    /// Cloud provider for object storage.
+    pub provider: CloudProvider,
+    /// Provider container/bucket name.
+    pub container: String,
     /// Tenant ID for multi-tenant isolation
     pub tenant_id: String,
+}
+
+/// Supported object storage cloud providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloudProvider {
+    Memory,
+    Aws,
+    Gcp,
+    Azure,
+}
+
+impl CloudProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Aws => "aws",
+            Self::Gcp => "gcp",
+            Self::Azure => "azure",
+        }
+    }
+
+    pub fn object_store_scheme(&self) -> &'static str {
+        match self {
+            Self::Memory => "memory",
+            Self::Aws => "s3",
+            Self::Gcp => "gs",
+            Self::Azure => "az",
+        }
+    }
+}
+
+impl std::str::FromStr for CloudProvider {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "memory" => Ok(Self::Memory),
+            "aws" | "s3" => Ok(Self::Aws),
+            "gcp" | "gcs" => Ok(Self::Gcp),
+            "azure" => Ok(Self::Azure),
+            other => Err(format!(
+                "unknown cloud provider '{}'; expected one of memory, aws, gcp, azure",
+                other
+            )),
+        }
+    }
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
         Self {
-            bucket: "cardinalsin-data".to_string(),
-            region: "us-east-1".to_string(),
-            endpoint: None,
+            provider: CloudProvider::Aws,
+            container: "cardinalsin-data".to_string(),
             tenant_id: "default".to_string(),
         }
     }
@@ -80,5 +123,5 @@ pub mod prelude {
     pub use crate::ingester::{Ingester, IngesterConfig};
     pub use crate::query::{QueryConfig, QueryNode};
     pub use crate::schema::{MetricSchema, MetricType};
-    pub use crate::{Config, Error, Result, StorageConfig};
+    pub use crate::{CloudProvider, Config, Error, Result, StorageConfig};
 }
