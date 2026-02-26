@@ -10,6 +10,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+const PROM_VALUE_EXPR: &str =
+    "COALESCE(value_f64, CAST(value_i64 AS DOUBLE), CAST(value_u64 AS DOUBLE))";
+
 /// Instant query parameters
 #[derive(Debug, Deserialize)]
 pub struct InstantQueryParams {
@@ -431,14 +434,15 @@ fn transpile_promql_instant(promql: &str, time: Option<f64>) -> String {
     // Handle aggregations
     if let Some(agg) = &parsed.aggregation {
         let sql_agg = match agg.as_str() {
-            "sum" => "SUM(value_f64)",
-            "avg" => "AVG(value_f64)",
+            "sum" => "SUM(PROM_VALUE_EXPR)",
+            "avg" => "AVG(PROM_VALUE_EXPR)",
             "count" => "COUNT(*)",
-            "min" => "MIN(value_f64)",
-            "max" => "MAX(value_f64)",
-            "stddev" => "STDDEV(value_f64)",
-            _ => "AVG(value_f64)",
+            "min" => "MIN(PROM_VALUE_EXPR)",
+            "max" => "MAX(PROM_VALUE_EXPR)",
+            "stddev" => "STDDEV(PROM_VALUE_EXPR)",
+            _ => "AVG(PROM_VALUE_EXPR)",
         };
+        let sql_agg = sql_agg.replace("PROM_VALUE_EXPR", PROM_VALUE_EXPR);
 
         let group_clause = if parsed.group_by.is_empty() {
             "metric_name".to_string()
@@ -485,12 +489,13 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
                 "SELECT
                     (timestamp / {step}) * {step} as time_bucket,
                     metric_name,
-                    (MAX(value_f64) - MIN(value_f64)) / ({range_secs}) as value
+                    (MAX({value_expr}) - MIN({value_expr})) / ({range_secs}) as value
                 FROM metrics
                 WHERE {where_sql}
                 GROUP BY time_bucket, metric_name
                 ORDER BY time_bucket",
                 step = step_ns,
+                value_expr = PROM_VALUE_EXPR,
                 range_secs = parsed.range_seconds.unwrap_or(step),
                 where_sql = where_sql
             ),
@@ -498,24 +503,26 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
                 "SELECT
                     (timestamp / {step}) * {step} as time_bucket,
                     metric_name,
-                    MAX(value_f64) - MIN(value_f64) as value
+                    MAX({value_expr}) - MIN({value_expr}) as value
                 FROM metrics
                 WHERE {where_sql}
                 GROUP BY time_bucket, metric_name
                 ORDER BY time_bucket",
                 step = step_ns,
+                value_expr = PROM_VALUE_EXPR,
                 where_sql = where_sql
             ),
             _ => format!(
                 "SELECT
                     (timestamp / {step}) * {step} as time_bucket,
                     metric_name,
-                    AVG(value_f64) as value
+                    AVG({value_expr}) as value
                 FROM metrics
                 WHERE {where_sql}
                 GROUP BY time_bucket, metric_name
                 ORDER BY time_bucket",
                 step = step_ns,
+                value_expr = PROM_VALUE_EXPR,
                 where_sql = where_sql
             ),
         };
@@ -524,13 +531,14 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
     // Handle aggregations
     if let Some(agg) = &parsed.aggregation {
         let sql_agg = match agg.as_str() {
-            "sum" => "SUM(value_f64)",
-            "avg" => "AVG(value_f64)",
+            "sum" => "SUM(PROM_VALUE_EXPR)",
+            "avg" => "AVG(PROM_VALUE_EXPR)",
             "count" => "COUNT(*)",
-            "min" => "MIN(value_f64)",
-            "max" => "MAX(value_f64)",
-            _ => "AVG(value_f64)",
+            "min" => "MIN(PROM_VALUE_EXPR)",
+            "max" => "MAX(PROM_VALUE_EXPR)",
+            _ => "AVG(PROM_VALUE_EXPR)",
         };
+        let sql_agg = sql_agg.replace("PROM_VALUE_EXPR", PROM_VALUE_EXPR);
 
         let group_clause = if parsed.group_by.is_empty() {
             "time_bucket, metric_name".to_string()
@@ -559,14 +567,50 @@ fn transpile_promql_range(promql: &str, start: f64, end: f64, step: f64) -> Stri
         "SELECT
             (timestamp / {step}) * {step} as time_bucket,
             metric_name,
-            AVG(value_f64) as value
+            AVG({value_expr}) as value
         FROM metrics
         WHERE {where_sql}
         GROUP BY time_bucket, metric_name
         ORDER BY time_bucket",
         step = step_ns,
+        value_expr = PROM_VALUE_EXPR,
         where_sql = where_sql
     )
+}
+
+fn extract_prometheus_value(batch: &arrow_array::RecordBatch, row: usize) -> String {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
+
+    if let Some(col) = batch.column_by_name("value") {
+        let values = col.as_primitive::<Float64Type>();
+        if !values.is_null(row) {
+            return values.value(row).to_string();
+        }
+    }
+
+    if let Some(col) = batch.column_by_name("value_f64") {
+        let values = col.as_primitive::<Float64Type>();
+        if !values.is_null(row) {
+            return values.value(row).to_string();
+        }
+    }
+
+    if let Some(col) = batch.column_by_name("value_i64") {
+        let values = col.as_primitive::<Int64Type>();
+        if !values.is_null(row) {
+            return values.value(row).to_string();
+        }
+    }
+
+    if let Some(col) = batch.column_by_name("value_u64") {
+        let values = col.as_primitive::<UInt64Type>();
+        if !values.is_null(row) {
+            return values.value(row).to_string();
+        }
+    }
+
+    "0".to_string()
 }
 
 /// Convert Arrow results to Prometheus vector format
@@ -594,14 +638,7 @@ fn convert_to_prometheus_vector(batches: &[arrow_array::RecordBatch]) -> Vec<Pro
                 })
                 .unwrap_or(0.0);
 
-            let value = batch
-                .column_by_name("value_f64")
-                .map(|c| {
-                    use arrow_array::cast::AsArray;
-                    use arrow_array::types::Float64Type;
-                    c.as_primitive::<Float64Type>().value(row).to_string()
-                })
-                .unwrap_or_else(|| "0".to_string());
+            let value = extract_prometheus_value(batch, row);
 
             results.push(PrometheusResult {
                 metric,
@@ -648,14 +685,7 @@ fn convert_to_prometheus_matrix(batches: &[arrow_array::RecordBatch]) -> Vec<Pro
                 })
                 .unwrap_or(0.0);
 
-            let value = batch
-                .column_by_name("value")
-                .map(|c| {
-                    use arrow_array::cast::AsArray;
-                    use arrow_array::types::Float64Type;
-                    c.as_primitive::<Float64Type>().value(row).to_string()
-                })
-                .unwrap_or_else(|| "0".to_string());
+            let value = extract_prometheus_value(batch, row);
 
             entry.1.push((timestamp, value));
         }

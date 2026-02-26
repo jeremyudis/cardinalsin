@@ -376,9 +376,9 @@ fn convert_prom_to_arrow(req: &WriteRequest) -> Result<RecordBatch> {
     let mut metric_names = Vec::with_capacity(total_samples);
 
     // Separate values by type for multi-value columns
-    let mut float_values = Vec::with_capacity(total_samples);
-    let mut int_values = Vec::with_capacity(total_samples);
-    let mut uint_values = Vec::with_capacity(total_samples);
+    let mut float_values: Vec<Option<f64>> = Vec::with_capacity(total_samples);
+    let mut int_values: Vec<Option<i64>> = Vec::with_capacity(total_samples);
+    let mut uint_values: Vec<Option<u64>> = Vec::with_capacity(total_samples);
 
     let mut label_values: HashMap<String, Vec<Option<String>>> = label_names
         .iter()
@@ -417,26 +417,26 @@ fn convert_prom_to_arrow(req: &WriteRequest) -> Result<RecordBatch> {
                     // Lossless conversion - use integer column
                     if int_val >= 0 {
                         // Non-negative - use u64 column
-                        uint_values.push(int_val as u64);
-                        int_values.push(0); // Placeholder
-                        float_values.push(f64::NAN); // Placeholder
+                        uint_values.push(Some(int_val as u64));
+                        int_values.push(None);
+                        float_values.push(None);
                     } else {
                         // Negative - use i64 column
-                        int_values.push(int_val);
-                        uint_values.push(0); // Placeholder
-                        float_values.push(f64::NAN); // Placeholder
+                        int_values.push(Some(int_val));
+                        uint_values.push(None);
+                        float_values.push(None);
                     }
                 } else {
                     // Precision loss in i64 conversion - use float
-                    float_values.push(val);
-                    int_values.push(0); // Placeholder
-                    uint_values.push(0); // Placeholder
+                    float_values.push(Some(val));
+                    int_values.push(None);
+                    uint_values.push(None);
                 }
             } else {
                 // Non-integer (has fractional part) or infinite/NaN - use float
-                float_values.push(val);
-                int_values.push(0); // Placeholder
-                uint_values.push(0); // Placeholder
+                float_values.push(Some(val));
+                int_values.push(None);
+                uint_values.push(None);
             }
 
             // Add label values
