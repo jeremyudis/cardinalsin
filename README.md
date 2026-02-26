@@ -397,9 +397,11 @@ CardinalSin supports real-time streaming for live dashboards and alerting by mer
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLOUD_PROVIDER` | `memory` | Storage provider: `memory`, `aws`, `gcp`, `azure` |
-| `STORAGE_CONTAINER` | — | Container/bucket name for selected provider |
+| `STORAGE_BUCKET` | — | Bucket name for selected provider |
+| `STORAGE_CONTAINER` | `STORAGE_BUCKET` | Deprecated alias for `STORAGE_BUCKET` |
 | `METADATA_BACKEND` | `local` | `local` or `object_store` |
-| `METADATA_CONTAINER` | `STORAGE_CONTAINER` | Metadata container/bucket when using `object_store` backend |
+| `METADATA_BUCKET` | `STORAGE_BUCKET` | Metadata bucket when using `object_store` backend |
+| `METADATA_CONTAINER` | `METADATA_BUCKET` | Deprecated alias for `METADATA_BUCKET` |
 | `S3_REGION` | `us-east-1` | AWS region (AWS provider) |
 | `S3_ENDPOINT` | — | AWS S3 endpoint (for MinIO or other S3-compatible storage) |
 | `TENANT_ID` | `default` | Tenant identifier |
@@ -413,7 +415,7 @@ cardinalsin-ingester \
   --grpc-port 4317 \
   --flush-interval-secs 300 \
   --cloud-provider aws \
-  --storage-container my-metrics
+  --storage-bucket my-metrics
 ```
 
 ### Query Node Options

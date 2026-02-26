@@ -34,13 +34,9 @@ struct Args {
     #[arg(long, env = "CLOUD_PROVIDER")]
     cloud_provider: Option<String>,
 
-    /// Provider container/bucket
-    #[arg(long, env = "STORAGE_CONTAINER")]
-    storage_container: Option<String>,
-
-    /// Deprecated alias for --storage-container
-    #[arg(long, env = "S3_BUCKET", hide = true)]
-    bucket: Option<String>,
+    /// Provider bucket
+    #[arg(long, env = "STORAGE_BUCKET")]
+    storage_bucket: Option<String>,
 
     /// Tenant ID
     #[arg(long, env = "TENANT_ID", default_value = "default")]
@@ -73,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let storage_config = ComponentFactory::resolve_storage_config(
         args.cloud_provider.as_deref(),
-        args.storage_container.as_deref().or(args.bucket.as_deref()),
+        args.storage_bucket.as_deref(),
         args.tenant_id.clone(),
     )?;
 
