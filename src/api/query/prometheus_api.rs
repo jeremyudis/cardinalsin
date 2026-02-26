@@ -8,7 +8,7 @@ use crate::api::ApiState;
 use arrow_array::Array;
 use arrow_schema::DataType;
 use axum::extract::{Path, Query, State};
-use axum::Json;
+use axum::{Form, Json};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -84,12 +84,30 @@ pub struct LabelValuesResponse {
     pub data: Vec<String>,
 }
 
-/// Instant query endpoint
+/// Instant query endpoint (GET)
 ///
-/// GET/POST /api/v1/query
+/// GET /api/v1/query
 pub async fn instant_query(
     State(state): State<ApiState>,
     Query(params): Query<InstantQueryParams>,
+) -> Json<PrometheusResponse> {
+    instant_query_inner(state, params).await
+}
+
+/// Instant query endpoint (POST)
+///
+/// POST /api/v1/query
+pub async fn instant_query_post(
+    State(state): State<ApiState>,
+    Form(params): Form<InstantQueryParams>,
+) -> Json<PrometheusResponse> {
+    instant_query_inner(state, params).await
+}
+
+/// Inner implementation for instant query (shared by GET and POST)
+async fn instant_query_inner(
+    state: ApiState,
+    params: InstantQueryParams,
 ) -> Json<PrometheusResponse> {
     // Transpile PromQL to SQL
     let sql = transpile_promql_instant(&params.query, params.time);
@@ -135,13 +153,28 @@ pub async fn instant_query(
     })
 }
 
-/// Range query endpoint
+/// Range query endpoint (GET)
 ///
-/// GET/POST /api/v1/query_range
+/// GET /api/v1/query_range
 pub async fn range_query(
     State(state): State<ApiState>,
     Query(params): Query<RangeQueryParams>,
 ) -> Json<PrometheusResponse> {
+    range_query_inner(state, params).await
+}
+
+/// Range query endpoint (POST)
+///
+/// POST /api/v1/query_range
+pub async fn range_query_post(
+    State(state): State<ApiState>,
+    Form(params): Form<RangeQueryParams>,
+) -> Json<PrometheusResponse> {
+    range_query_inner(state, params).await
+}
+
+/// Inner implementation for range query (shared by GET and POST)
+async fn range_query_inner(state: ApiState, params: RangeQueryParams) -> Json<PrometheusResponse> {
     // Transpile PromQL to SQL with time bucketing
     let sql = transpile_promql_range(&params.query, params.start, params.end, params.step);
 
