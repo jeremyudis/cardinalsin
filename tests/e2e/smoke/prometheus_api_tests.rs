@@ -266,3 +266,111 @@ async fn test_prometheus_response_format() {
         "Data should have 'result' field"
     );
 }
+
+/// Test Prometheus instant query POST endpoint (Grafana compatibility)
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_prometheus_instant_query_post() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    // First write some data
+    let samples = generate_test_samples(10, 1);
+    harness
+        .write_samples(samples)
+        .await
+        .expect("Write should succeed");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Query via Prometheus API using POST
+    let result = harness.query_prom_post("test_metric_0").await;
+
+    match result {
+        Ok(r) => {
+            println!(
+                "Prometheus POST instant query returned status: {}, {} results",
+                r.status,
+                r.data.len()
+            );
+            assert_eq!(r.status, "success", "Status should be 'success'");
+        }
+        Err(e) => {
+            panic!("Prometheus POST query failed: {}", e);
+        }
+    }
+}
+
+/// Test Prometheus range query POST endpoint (Grafana compatibility)
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_prometheus_range_query_post() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    let now = chrono::Utc::now().timestamp() as f64;
+    let one_hour_ago = now - 3600.0;
+
+    // Query via Prometheus range API using POST
+    let result = harness
+        .query_prom_range_post("test_metric_0", one_hour_ago, now, 60.0)
+        .await;
+
+    match result {
+        Ok(r) => {
+            println!(
+                "Prometheus POST range query returned status: {}, {} series",
+                r.status,
+                r.data.len()
+            );
+            assert_eq!(r.status, "success", "Status should be 'success'");
+        }
+        Err(e) => {
+            panic!("Prometheus POST range query failed: {}", e);
+        }
+    }
+}
+
+/// Test that POST endpoint can handle complex queries with labels
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_prometheus_post_with_labels() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    // Write some data with labels
+    let samples = generate_test_samples(20, 2);
+    harness
+        .write_samples(samples)
+        .await
+        .expect("Write should succeed");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Query with label selector using POST
+    let result = harness
+        .query_prom_post(r#"test_metric_0{host="host-001"}"#)
+        .await;
+
+    match result {
+        Ok(r) => {
+            println!(
+                "Prometheus POST query with labels returned: {} results",
+                r.data.len()
+            );
+            assert_eq!(r.status, "success");
+        }
+        Err(e) => {
+            panic!("Prometheus POST query with labels failed: {}", e);
+        }
+    }
+}

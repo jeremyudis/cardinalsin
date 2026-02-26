@@ -253,6 +253,71 @@ impl E2EHarness {
         })
     }
 
+    /// Query via Prometheus instant query API (POST with form body)
+    pub async fn query_prom_post(&self, query: &str) -> Result<PromResult> {
+        let resp = self
+            .http_client
+            .post(format!("{}/api/v1/query", self.query_url))
+            .form(&[("query", query)])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Prometheus POST query failed: {} - {}",
+                status,
+                text
+            ));
+        }
+
+        let prom_response: PrometheusResponse = resp.json().await?;
+
+        Ok(PromResult {
+            status: prom_response.status,
+            data: prom_response.data.result,
+        })
+    }
+
+    /// Query via Prometheus range query API (POST with form body)
+    pub async fn query_prom_range_post(
+        &self,
+        query: &str,
+        start: f64,
+        end: f64,
+        step: f64,
+    ) -> Result<PromResult> {
+        let resp = self
+            .http_client
+            .post(format!("{}/api/v1/query_range", self.query_url))
+            .form(&[
+                ("query", query),
+                ("start", &start.to_string()),
+                ("end", &end.to_string()),
+                ("step", &step.to_string()),
+            ])
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Prometheus POST range query failed: {} - {}",
+                status,
+                text
+            ));
+        }
+
+        let prom_response: PrometheusResponse = resp.json().await?;
+
+        Ok(PromResult {
+            status: prom_response.status,
+            data: prom_response.data.result,
+        })
+    }
+
     /// Get all label names via Prometheus API
     pub async fn get_labels(&self) -> Result<Vec<String>> {
         let resp = self

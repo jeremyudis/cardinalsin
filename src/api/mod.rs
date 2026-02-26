@@ -62,9 +62,9 @@ pub fn build_http_router(
 
         // Prometheus API
         .route("/api/v1/query", get(query::prometheus_api::instant_query))
-        .route("/api/v1/query", post(query::prometheus_api::instant_query))
+        .route("/api/v1/query", post(query::prometheus_api::instant_query_post))
         .route("/api/v1/query_range", get(query::prometheus_api::range_query))
-        .route("/api/v1/query_range", post(query::prometheus_api::range_query))
+        .route("/api/v1/query_range", post(query::prometheus_api::range_query_post))
         .route("/api/v1/labels", get(query::prometheus_api::labels))
         .route("/api/v1/label/:name/values", get(query::prometheus_api::label_values))
 
