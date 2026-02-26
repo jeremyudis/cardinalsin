@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **If an implementation is incorrect, FIX IT! Do NOT modify tests to match broken code.**
 
+**NEVER push directly to main.** All changes must go through the PR workflow on a feature branch. Use `git worktree` for all tasks and create PRs for review and CI validation.
+
 **Always create a PR after committing and pushing.** Beads issues cannot be closed until the full PR lifecycle is complete: opened → comments addressed → merged. After opening a PR, always check for merge conflicts (`gh pr view <number> --json mergeable`) and resolve them before moving on.
 
 ## Epic Delivery Workflow
