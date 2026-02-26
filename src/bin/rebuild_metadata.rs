@@ -1,30 +1,40 @@
 //! Rebuild metadata utility
 //!
 //! This utility rebuilds the time index from existing chunk metadata.
-//! Use this after deploying the S3MetadataClient time index bug fix.
+//! Use this after deploying the object-store metadata time-index bug fix.
 
-use cardinalsin::metadata::{S3MetadataClient, S3MetadataConfig};
+use cardinalsin::config::ComponentFactory;
+use cardinalsin::metadata::{ObjectStoreMetadataClient, ObjectStoreMetadataConfig};
 use cardinalsin::telemetry::Telemetry;
-use object_store::aws::AmazonS3Builder;
-use std::sync::Arc;
+use cardinalsin::StorageConfig;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _telemetry = Telemetry::init_for_component("cardinalsin-rebuild-metadata", "info")
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
-    let bucket = std::env::var("METADATA_BUCKET")
-        .or_else(|_| std::env::var("S3_BUCKET"))
-        .expect("METADATA_BUCKET or S3_BUCKET environment variable required");
-
+    let storage = ComponentFactory::resolve_storage_config(None, None, "metadata")?;
     let prefix = std::env::var("METADATA_PREFIX").unwrap_or_else(|_| "metadata/".to_string());
 
+    let metadata_container = std::env::var("METADATA_CONTAINER")
+        .ok()
+        .or_else(|| std::env::var("METADATA_BUCKET").ok())
+        .unwrap_or_else(|| storage.container.clone());
+
     println!("Rebuilding time index...");
-    println!("  Bucket: {}", bucket);
+    println!("  Provider: {}", storage.provider.as_str());
+    println!("  Container: {}", metadata_container);
     println!("  Prefix: {}", prefix);
 
-    let config = S3MetadataConfig {
-        bucket: bucket.clone(),
+    let metadata_storage = StorageConfig {
+        provider: storage.provider,
+        container: metadata_container.clone(),
+        tenant_id: storage.tenant_id.clone(),
+    };
+    let object_store = ComponentFactory::create_object_store_for(&metadata_storage).await?;
+
+    let config = ObjectStoreMetadataConfig {
+        bucket: metadata_container,
         metadata_prefix: prefix,
         enable_cache: false,
         allow_unsafe_overwrite: std::env::var("S3_METADATA_ALLOW_UNSAFE_OVERWRITE")
@@ -35,30 +45,9 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(false),
     };
 
-    // Build S3 client
-    let mut builder = AmazonS3Builder::new().with_bucket_name(&bucket);
-
-    if let Ok(region) = std::env::var("S3_REGION") {
-        builder = builder.with_region(&region);
-    }
-
-    if let Ok(endpoint) = std::env::var("S3_ENDPOINT") {
-        builder = builder.with_endpoint(&endpoint).with_allow_http(true);
-    }
-
-    if let Ok(key) = std::env::var("AWS_ACCESS_KEY_ID") {
-        builder = builder.with_access_key_id(&key);
-    }
-
-    if let Ok(secret) = std::env::var("AWS_SECRET_ACCESS_KEY") {
-        builder = builder.with_secret_access_key(&secret);
-    }
-
-    let object_store = Arc::new(builder.build()?);
-    let client = S3MetadataClient::new(object_store, config);
-
+    let client = ObjectStoreMetadataClient::new(object_store, config);
     client.rebuild_time_index().await?;
-    println!("✓ Time index rebuilt successfully");
 
+    println!("✓ Time index rebuilt successfully");
     Ok(())
 }

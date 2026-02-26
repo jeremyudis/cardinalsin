@@ -128,7 +128,7 @@ pub struct ColumnStats {
 
 /// S3 metadata client configuration
 #[derive(Debug, Clone)]
-pub struct S3MetadataConfig {
+pub struct ObjectStoreMetadataConfig {
     /// S3 bucket name
     pub bucket: String,
     /// Prefix for metadata files
@@ -139,7 +139,7 @@ pub struct S3MetadataConfig {
     pub allow_unsafe_overwrite: bool,
 }
 
-impl Default for S3MetadataConfig {
+impl Default for ObjectStoreMetadataConfig {
     fn default() -> Self {
         Self {
             bucket: "cardinalsin-metadata".to_string(),
@@ -153,23 +153,23 @@ impl Default for S3MetadataConfig {
 /// S3-based metadata client
 ///
 /// Stores metadata durably on S3 with atomic operations
-pub struct S3MetadataClient {
+pub struct ObjectStoreMetadataClient {
     /// Object store for metadata storage
     object_store: Arc<dyn ObjectStore>,
     /// Configuration
-    config: S3MetadataConfig,
+    config: ObjectStoreMetadataConfig,
     /// Unified catalog cache with TTL
     catalog_cache: Arc<tokio::sync::RwLock<Option<(MetadataCatalog, Instant)>>>,
     /// Catalog cache TTL duration
     catalog_cache_ttl: Duration,
 }
 
-impl S3MetadataClient {
+impl ObjectStoreMetadataClient {
     /// Nanoseconds per hour constant
     const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
 
     /// Create a new S3 metadata client
-    pub fn new(object_store: Arc<dyn ObjectStore>, config: S3MetadataConfig) -> Self {
+    pub fn new(object_store: Arc<dyn ObjectStore>, config: ObjectStoreMetadataConfig) -> Self {
         Self {
             object_store,
             config,
@@ -1061,7 +1061,7 @@ impl S3MetadataClient {
 }
 
 #[async_trait]
-impl MetadataClient for S3MetadataClient {
+impl MetadataClient for ObjectStoreMetadataClient {
     async fn register_chunk(&self, path: &str, metadata: &ChunkMetadata) -> Result<()> {
         // Use atomic registration with retry logic
         self.atomic_register_chunk(path, metadata).await
@@ -2065,3 +2065,7 @@ impl MetadataClient for S3MetadataClient {
             .any(|s| matches!(s.phase, SplitPhase::DualWrite | SplitPhase::Backfill)))
     }
 }
+
+pub type S3MetadataConfig = ObjectStoreMetadataConfig;
+
+pub type S3MetadataClient = ObjectStoreMetadataClient;
