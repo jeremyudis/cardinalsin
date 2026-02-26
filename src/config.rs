@@ -488,7 +488,9 @@ mod tests {
             }
         }
 
-        let _guard = env_lock().lock().expect("env lock poisoned");
+        let _guard = env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut reset = EnvReset {
             saved: Vec::with_capacity(TEST_ENV_KEYS.len()),
         };
@@ -625,7 +627,7 @@ mod tests {
                 .expect_err("aws without container should fail");
             assert!(
                 err.to_string()
-                    .contains("STORAGE_CONTAINER or S3_BUCKET required"),
+                    .contains("STORAGE_BUCKET or S3_BUCKET required"),
                 "unexpected error: {err}"
             );
         });
