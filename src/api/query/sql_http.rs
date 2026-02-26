@@ -208,7 +208,7 @@ fn format_csv_response(batches: Vec<RecordBatch>) -> Response {
 fn column_value_to_json(array: &dyn arrow_array::Array, row: usize) -> serde_json::Value {
     use arrow_array::cast::AsArray;
     use arrow_array::types::*;
-    use arrow_schema::DataType;
+    use arrow_schema::{DataType, TimeUnit};
 
     if array.is_null(row) {
         return serde_json::Value::Null;
@@ -259,11 +259,160 @@ fn column_value_to_json(array: &dyn arrow_array::Array, row: usize) -> serde_jso
         DataType::LargeUtf8 => {
             serde_json::Value::String(array.as_string::<i64>().value(row).to_string())
         }
-        DataType::Timestamp(_, _) => {
-            // Return timestamp as integer (nanoseconds)
-            let val = array.as_primitive::<TimestampNanosecondType>().value(row);
+        DataType::Utf8View => {
+            serde_json::Value::String(array.as_string_view().value(row).to_string())
+        }
+        DataType::Dictionary(_, value_type) => dictionary_value_to_json(array, row, value_type)
+            .unwrap_or_else(|| {
+                serde_json::Value::String(format!("Unsupported type: {:?}", array.data_type()))
+            }),
+        DataType::Timestamp(unit, _) => {
+            // Return all timestamps as unix-nanoseconds for stable JSON output.
+            let val = match unit {
+                TimeUnit::Second => array
+                    .as_primitive::<TimestampSecondType>()
+                    .value(row)
+                    .saturating_mul(1_000_000_000),
+                TimeUnit::Millisecond => array
+                    .as_primitive::<TimestampMillisecondType>()
+                    .value(row)
+                    .saturating_mul(1_000_000),
+                TimeUnit::Microsecond => array
+                    .as_primitive::<TimestampMicrosecondType>()
+                    .value(row)
+                    .saturating_mul(1_000),
+                TimeUnit::Nanosecond => array.as_primitive::<TimestampNanosecondType>().value(row),
+            };
             serde_json::Value::Number(val.into())
         }
         _ => serde_json::Value::String(format!("Unsupported type: {:?}", array.data_type())),
+    }
+}
+
+fn dictionary_value_to_json(
+    array: &dyn arrow_array::Array,
+    row: usize,
+    value_type: &arrow_schema::DataType,
+) -> Option<serde_json::Value> {
+    use arrow_schema::DataType;
+
+    let string_value = match value_type {
+        DataType::Utf8 => extract_dictionary_string::<i32>(array, row),
+        DataType::LargeUtf8 => extract_dictionary_string::<i64>(array, row),
+        DataType::Utf8View => extract_dictionary_string_view(array, row),
+        _ => None,
+    }?;
+
+    Some(serde_json::Value::String(string_value))
+}
+
+fn extract_dictionary_string<O: arrow_array::OffsetSizeTrait>(
+    array: &dyn arrow_array::Array,
+    row: usize,
+) -> Option<String> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    use arrow_array::Array;
+
+    macro_rules! extract_for_key_type {
+        ($key_type:ty) => {
+            if let Some(dict) = array
+                .as_any()
+                .downcast_ref::<arrow_array::DictionaryArray<$key_type>>()
+            {
+                let key = dict.keys().value(row) as usize;
+                let values = dict.values().as_string::<O>();
+                if key < values.len() {
+                    return Some(values.value(key).to_string());
+                }
+                return None;
+            }
+        };
+    }
+
+    extract_for_key_type!(Int8Type);
+    extract_for_key_type!(Int16Type);
+    extract_for_key_type!(Int32Type);
+    extract_for_key_type!(Int64Type);
+    extract_for_key_type!(UInt8Type);
+    extract_for_key_type!(UInt16Type);
+    extract_for_key_type!(UInt32Type);
+    extract_for_key_type!(UInt64Type);
+
+    None
+}
+
+fn extract_dictionary_string_view(array: &dyn arrow_array::Array, row: usize) -> Option<String> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::*;
+    use arrow_array::Array;
+
+    macro_rules! extract_for_key_type {
+        ($key_type:ty) => {
+            if let Some(dict) = array
+                .as_any()
+                .downcast_ref::<arrow_array::DictionaryArray<$key_type>>()
+            {
+                let key = dict.keys().value(row) as usize;
+                let values = dict.values().as_string_view();
+                if key < values.len() {
+                    return Some(values.value(key).to_string());
+                }
+                return None;
+            }
+        };
+    }
+
+    extract_for_key_type!(Int8Type);
+    extract_for_key_type!(Int16Type);
+    extract_for_key_type!(Int32Type);
+    extract_for_key_type!(Int64Type);
+    extract_for_key_type!(UInt8Type);
+    extract_for_key_type!(UInt16Type);
+    extract_for_key_type!(UInt32Type);
+    extract_for_key_type!(UInt64Type);
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::column_value_to_json;
+    use arrow_array::types::{Int16Type, Int32Type};
+    use arrow_array::{
+        ArrayRef, DictionaryArray, Int16Array, Int32Array, StringArray, StringViewArray,
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn test_column_value_to_json_utf8_view() {
+        let array = StringViewArray::from(vec!["cardinalsin-query", "cardinalsin-ingester"]);
+        assert_eq!(column_value_to_json(&array, 0), json!("cardinalsin-query"));
+        assert_eq!(
+            column_value_to_json(&array, 1),
+            json!("cardinalsin-ingester")
+        );
+    }
+
+    #[test]
+    fn test_column_value_to_json_dictionary_utf8() {
+        let keys = Int32Array::from(vec![0, 1, 0]);
+        let values: ArrayRef = Arc::new(StringArray::from(vec!["svc-a", "svc-b"]));
+        let array = DictionaryArray::<Int32Type>::new(keys, values);
+
+        assert_eq!(column_value_to_json(&array, 0), json!("svc-a"));
+        assert_eq!(column_value_to_json(&array, 1), json!("svc-b"));
+        assert_eq!(column_value_to_json(&array, 2), json!("svc-a"));
+    }
+
+    #[test]
+    fn test_column_value_to_json_dictionary_utf8_view() {
+        let keys = Int16Array::from(vec![1, 0]);
+        let values: ArrayRef = Arc::new(StringViewArray::from(vec!["metric-a", "metric-b"]));
+        let array = DictionaryArray::<Int16Type>::new(keys, values);
+
+        assert_eq!(column_value_to_json(&array, 0), json!("metric-b"));
+        assert_eq!(column_value_to_json(&array, 1), json!("metric-a"));
     }
 }

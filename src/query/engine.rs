@@ -76,6 +76,7 @@ impl QueryEngine {
 
         // Create session state and context
         let state = SessionStateBuilder::new()
+            .with_default_features()
             .with_config(session_config)
             .with_runtime_env(runtime_env)
             .build();
@@ -696,6 +697,8 @@ impl QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::Int64Type;
     use object_store::memory::InMemory;
     use tempfile::tempdir;
 
@@ -773,6 +776,64 @@ mod tests {
             results.is_empty() || results[0].num_rows() == 0,
             "Should return 0 rows after re-registering with empty paths"
         );
+    }
+
+    #[tokio::test]
+    async fn test_empty_metrics_table_aggregate_functions_available() {
+        let object_store = Arc::new(InMemory::new());
+        let dir = tempdir().unwrap();
+        let config = super::super::CacheConfig {
+            l1_size: 10 * 1024 * 1024,
+            l2_size: 50 * 1024 * 1024,
+            l2_dir: Some(dir.path().to_str().unwrap().to_string()),
+        };
+        let cache = Arc::new(TieredCache::new(config).await.unwrap());
+
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default())
+            .await
+            .unwrap();
+
+        let results = engine
+            .execute(
+                "SELECT COUNT(*) AS total_rows, MIN(timestamp) AS min_ts, MAX(timestamp) AS max_ts FROM metrics",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        let batch = &results[0];
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.column(0).as_primitive::<Int64Type>().value(0), 0);
+        assert!(batch.column(1).is_null(0));
+        assert!(batch.column(2).is_null(0));
+    }
+
+    #[tokio::test]
+    async fn test_now_interval_expression_available() {
+        let object_store = Arc::new(InMemory::new());
+        let dir = tempdir().unwrap();
+        let config = super::super::CacheConfig {
+            l1_size: 10 * 1024 * 1024,
+            l2_size: 50 * 1024 * 1024,
+            l2_dir: Some(dir.path().to_str().unwrap().to_string()),
+        };
+        let cache = Arc::new(TieredCache::new(config).await.unwrap());
+
+        let engine = QueryEngine::new(object_store, cache, &StorageConfig::default())
+            .await
+            .unwrap();
+
+        let results = engine
+            .execute(
+                "SELECT COUNT(*) AS recent_rows FROM metrics WHERE timestamp > now() - interval '5 minutes'",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        let batch = &results[0];
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.column(0).as_primitive::<Int64Type>().value(0), 0);
     }
 
     #[tokio::test]
