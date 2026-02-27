@@ -85,6 +85,19 @@ cd deploy
 docker-compose up -d  # Starts MinIO, ingester, query node, compactor, Grafana
 ```
 
+### Worktree Maintenance
+When using git worktrees for parallel work, each worktree creates its own `target/` directory. Clean up when you have more than 10 worktrees:
+
+```bash
+# Remove all target directories (safe - cargo will rebuild as needed)
+find ~/code/cardinalsin -name "target" -type d -exec rm -rf {} +
+
+# Check worktree count
+git worktree list | wc -l
+```
+
+**Note**: This is safe because Cargo will rebuild dependencies as needed. Cleaning up saves disk space (each target dir can be 1-5GB).
+
 ## Architecture Overview
 
 ### Three-Tier System
