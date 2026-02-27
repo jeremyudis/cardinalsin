@@ -65,8 +65,11 @@ pub fn build_http_router(
         .route("/api/v1/query", post(query::prometheus_api::instant_query_post))
         .route("/api/v1/query_range", get(query::prometheus_api::range_query))
         .route("/api/v1/query_range", post(query::prometheus_api::range_query_post))
-        .route("/api/v1/labels", get(query::prometheus_api::labels))
+        .route("/api/v1/labels", get(query::prometheus_api::labels_get))
+        .route("/api/v1/labels", post(query::prometheus_api::labels_post))
         .route("/api/v1/label/:name/values", get(query::prometheus_api::label_values))
+        .route("/api/v1/series", get(query::prometheus_api::series))
+        .route("/api/v1/series", post(query::prometheus_api::series_post))
 
         // Prometheus Remote Write
         .route("/api/v1/write", post(ingest::prometheus::handle_remote_write))

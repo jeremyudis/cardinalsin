@@ -84,6 +84,68 @@ pub struct LabelValuesResponse {
     pub data: Vec<String>,
 }
 
+/// Series query parameters (GET)
+#[derive(Debug, Deserialize)]
+pub struct SeriesQueryParams {
+    #[serde(rename = "match[]")]
+    pub matchers: Vec<String>,
+    #[serde(default)]
+    pub start: Option<f64>,
+    #[serde(default)]
+    pub end: Option<f64>,
+}
+
+/// Series query parameters (POST form)
+#[derive(Debug, Deserialize)]
+pub struct SeriesFormParams {
+    #[serde(rename = "match[]")]
+    pub matchers: Vec<String>,
+    #[serde(default)]
+    pub start: Option<f64>,
+    #[serde(default)]
+    pub end: Option<f64>,
+}
+
+/// Series response
+#[derive(Debug, Serialize)]
+pub struct SeriesResponse {
+    pub status: String,
+    pub data: Vec<HashMap<String, String>>,
+}
+
+/// Labels query parameters with filtering
+#[derive(Debug, Deserialize)]
+pub struct LabelsQueryParams {
+    #[serde(rename = "match[]", default)]
+    pub matchers: Vec<String>,
+    #[serde(default)]
+    pub start: Option<f64>,
+    #[serde(default)]
+    pub end: Option<f64>,
+}
+
+/// Labels POST form parameters
+#[derive(Debug, Deserialize)]
+pub struct LabelsFormParams {
+    #[serde(rename = "match[]", default)]
+    pub matchers: Vec<String>,
+    #[serde(default)]
+    pub start: Option<f64>,
+    #[serde(default)]
+    pub end: Option<f64>,
+}
+
+/// Label values query parameters with filtering
+#[derive(Debug, Deserialize)]
+pub struct LabelValuesQueryParams {
+    #[serde(rename = "match[]", default)]
+    pub matchers: Vec<String>,
+    #[serde(default)]
+    pub start: Option<f64>,
+    #[serde(default)]
+    pub end: Option<f64>,
+}
+
 /// Instant query endpoint (GET)
 ///
 /// GET /api/v1/query
@@ -263,12 +325,22 @@ pub async fn labels(State(state): State<ApiState>) -> Json<LabelsResponse> {
     })
 }
 
-/// Get values for a specific label
+/// Get values for a specific label (with optional filtering)
 ///
 /// GET /api/v1/label/{name}/values
 pub async fn label_values(
     State(state): State<ApiState>,
     Path(name): Path<String>,
+    Query(params): Query<LabelValuesQueryParams>,
+) -> Json<LabelValuesResponse> {
+    label_values_inner(state, name, params).await
+}
+
+/// Inner implementation for label values (with filtering support)
+async fn label_values_inner(
+    state: ApiState,
+    name: String,
+    params: LabelValuesQueryParams,
 ) -> Json<LabelValuesResponse> {
     // Handle __name__ specially — it maps to metric_name column
     let column_name = if name == "__name__" {
@@ -285,8 +357,19 @@ pub async fn label_values(
         });
     }
 
+    // Build WHERE clause from matchers and time range
+    let where_clauses = build_where_clauses(&params.matchers, params.start, params.end);
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clauses.join(" AND "))
+    };
+
     // Quote column name with double-quotes for safety
-    let sql = format!("SELECT DISTINCT \"{}\" FROM metrics", column_name);
+    let sql = format!(
+        "SELECT DISTINCT \"{}\" FROM metrics{}",
+        column_name, where_sql
+    );
 
     let results = match state.query_node.query(&sql).await {
         Ok(results) => results,
@@ -319,6 +402,287 @@ pub async fn label_values(
         status: "success".to_string(),
         data: values,
     })
+}
+
+/// Get all series matching selectors (GET)
+///
+/// GET /api/v1/series
+pub async fn series(
+    State(state): State<ApiState>,
+    Query(params): Query<SeriesQueryParams>,
+) -> Json<SeriesResponse> {
+    series_inner(state, params.matchers, params.start, params.end).await
+}
+
+/// Get all series matching selectors (POST)
+///
+/// POST /api/v1/series
+pub async fn series_post(
+    State(state): State<ApiState>,
+    Form(params): Form<SeriesFormParams>,
+) -> Json<SeriesResponse> {
+    series_inner(state, params.matchers, params.start, params.end).await
+}
+
+/// Inner implementation for series endpoint
+async fn series_inner(
+    state: ApiState,
+    matchers: Vec<String>,
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Json<SeriesResponse> {
+    // Build WHERE clause from matchers and time range
+    let where_clauses = build_where_clauses(&matchers, start, end);
+
+    if where_clauses.is_empty() {
+        // No filters - return empty to avoid returning all series
+        return Json(SeriesResponse {
+            status: "success".to_string(),
+            data: Vec::new(),
+        });
+    }
+
+    let where_sql = where_clauses.join(" AND ");
+
+    // Get all columns from the metrics table
+    let column_sql =
+        "SELECT DISTINCT column_name FROM information_schema.columns WHERE table_name = 'metrics'";
+    let column_results = match state.query_node.query(column_sql).await {
+        Ok(results) => results,
+        Err(_) => {
+            return Json(SeriesResponse {
+                status: "success".to_string(),
+                data: Vec::new(),
+            });
+        }
+    };
+
+    // Extract column names
+    let mut columns = Vec::new();
+    columns.push("metric_name".to_string());
+    for batch in &column_results {
+        if let Some(col) = batch.column_by_name("column_name") {
+            use arrow_array::cast::AsArray;
+            let string_array = col.as_string::<i32>();
+            for i in 0..string_array.len() {
+                if !string_array.is_null(i) {
+                    let name = string_array.value(i);
+                    if !is_internal_column(name) && name != "metric_name" {
+                        columns.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Build SELECT for all label columns
+    let select_cols = columns
+        .iter()
+        .map(|c| format!("\"{}\"", c))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!(
+        "SELECT DISTINCT {} FROM metrics WHERE {}",
+        select_cols, where_sql
+    );
+
+    let results = match state.query_node.query(&sql).await {
+        Ok(results) => results,
+        Err(_) => {
+            return Json(SeriesResponse {
+                status: "success".to_string(),
+                data: Vec::new(),
+            });
+        }
+    };
+
+    // Extract series (unique label sets)
+    let mut series_set: Vec<HashMap<String, String>> = Vec::new();
+    for batch in &results {
+        for row in 0..batch.num_rows() {
+            let mut labels = HashMap::new();
+
+            // Extract metric name
+            if let Some(col) = batch.column_by_name("metric_name") {
+                if let Some(name) = extract_string_value(col.as_ref(), row) {
+                    labels.insert("__name__".to_string(), name);
+                }
+            }
+
+            // Extract all other label columns
+            for col_name in &columns {
+                if col_name == "metric_name" {
+                    continue;
+                }
+                if let Some(col) = batch.column_by_name(col_name) {
+                    if !col.is_null(row) {
+                        if let Some(v) = extract_string_value(col.as_ref(), row) {
+                            labels.insert(col_name.clone(), v);
+                        }
+                    }
+                }
+            }
+
+            series_set.push(labels);
+        }
+    }
+
+    Json(SeriesResponse {
+        status: "success".to_string(),
+        data: series_set,
+    })
+}
+
+/// Get all label names (with optional filtering) - GET version
+///
+/// GET /api/v1/labels
+pub async fn labels_get(
+    State(state): State<ApiState>,
+    Query(params): Query<LabelsQueryParams>,
+) -> Json<LabelsResponse> {
+    labels_inner(state, params.matchers, params.start, params.end).await
+}
+
+/// Get all label names (with optional filtering) - POST version
+///
+/// POST /api/v1/labels
+pub async fn labels_post(
+    State(state): State<ApiState>,
+    Form(params): Form<LabelsFormParams>,
+) -> Json<LabelsResponse> {
+    labels_inner(state, params.matchers, params.start, params.end).await
+}
+
+/// Inner implementation for labels endpoint (with filtering support)
+async fn labels_inner(
+    state: ApiState,
+    matchers: Vec<String>,
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Json<LabelsResponse> {
+    // If no filters, return all label names
+    if matchers.is_empty() && start.is_none() && end.is_none() {
+        return labels_unfiltered(state).await;
+    }
+
+    // Build WHERE clause from matchers and time range
+    let where_clauses = build_where_clauses(&matchers, start, end);
+    let where_sql = if where_clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_clauses.join(" AND "))
+    };
+
+    // Get column names from actual data matching the filters
+    let sql = format!("SELECT * FROM metrics{} LIMIT 1000", where_sql);
+    let results = match state.query_node.query(&sql).await {
+        Ok(results) => results,
+        Err(_) => {
+            return Json(LabelsResponse {
+                status: "success".to_string(),
+                data: vec!["__name__".to_string()],
+            });
+        }
+    };
+
+    // Extract label names from schema
+    let mut labels = Vec::new();
+    labels.push("__name__".to_string());
+    if !results.is_empty() {
+        for field in results[0].schema().fields() {
+            let name = field.name().as_str();
+            if !is_internal_column(name) && name != "metric_name" {
+                labels.push(name.to_string());
+            }
+        }
+    }
+    labels.sort();
+    labels.dedup();
+
+    Json(LabelsResponse {
+        status: "success".to_string(),
+        data: labels,
+    })
+}
+
+/// Unfiltered labels query (original implementation)
+async fn labels_unfiltered(state: ApiState) -> Json<LabelsResponse> {
+    // Query for distinct label names
+    let sql =
+        "SELECT DISTINCT column_name FROM information_schema.columns WHERE table_name = 'metrics'";
+
+    let results = match state.query_node.query(sql).await {
+        Ok(results) => results,
+        Err(_) => {
+            return Json(LabelsResponse {
+                status: "success".to_string(),
+                data: Vec::new(),
+            });
+        }
+    };
+
+    // Extract label names from results, filtering out internal columns
+    let mut labels = Vec::new();
+    labels.push("__name__".to_string());
+    for batch in &results {
+        if let Some(col) = batch.column_by_name("column_name") {
+            use arrow_array::cast::AsArray;
+            let string_array = col.as_string::<i32>();
+            for i in 0..string_array.len() {
+                if !string_array.is_null(i) {
+                    let name = string_array.value(i);
+                    if !is_internal_column(name) {
+                        labels.push(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    labels.sort();
+    labels.dedup();
+
+    Json(LabelsResponse {
+        status: "success".to_string(),
+        data: labels,
+    })
+}
+
+/// Build WHERE clauses from match[] selectors and time range
+fn build_where_clauses(matchers: &[String], start: Option<f64>, end: Option<f64>) -> Vec<String> {
+    let mut clauses = Vec::new();
+
+    // Parse and add matcher clauses
+    for matcher in matchers {
+        let parsed = parse_promql(matcher);
+
+        // Add metric name filter
+        if !parsed.metric_name.is_empty() {
+            clauses.push(format!(
+                "metric_name = '{}'",
+                parsed.metric_name.replace('\'', "''")
+            ));
+        }
+
+        // Add label matcher filters
+        for label_matcher in &parsed.label_matchers {
+            clauses.push(
+                label_matcher
+                    .op
+                    .to_sql(&label_matcher.label, &label_matcher.value),
+            );
+        }
+    }
+
+    // Add time range filters
+    if let Some(start_time) = start {
+        clauses.push(format!("timestamp >= {}", (start_time * 1e9) as i64));
+    }
+    if let Some(end_time) = end {
+        clauses.push(format!("timestamp <= {}", (end_time * 1e9) as i64));
+    }
+
+    clauses
 }
 
 /// Parsed PromQL query components
