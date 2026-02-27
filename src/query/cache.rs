@@ -1,6 +1,6 @@
 //! Tiered caching system (RAM → NVMe → S3)
 
-use super::CacheStats;
+use super::{telemetry, CacheStats};
 use crate::{Error, Result};
 
 use arrow_array::RecordBatch;
@@ -122,6 +122,7 @@ impl TieredCache {
         // Try L1 (RAM) - moka's get returns Option directly, not a Future
         if let Some(data) = self.l1.get(key).await {
             self.stats.l1_hits.fetch_add(1, Ordering::Relaxed);
+            telemetry::record_cache_hit();
             return Ok(data);
         }
         self.stats.l1_misses.fetch_add(1, Ordering::Relaxed);
@@ -134,6 +135,7 @@ impl TieredCache {
                 .map_err(|e| Error::Internal(format!("L2 cache error: {}", e)))?
             {
                 self.stats.l2_hits.fetch_add(1, Ordering::Relaxed);
+                telemetry::record_cache_hit();
                 let bytes = Bytes::from(entry.value().clone());
                 let data = Arc::new(CachedData {
                     bytes,
@@ -147,6 +149,7 @@ impl TieredCache {
         }
 
         // Fetch from source (S3)
+        telemetry::record_cache_miss();
         let bytes = fetch().await?;
         let data = Arc::new(CachedData {
             bytes: bytes.clone(),

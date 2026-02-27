@@ -24,11 +24,25 @@ use crate::{Error, Result, StorageConfig};
 
 use metrics::{counter, gauge, histogram};
 use object_store::ObjectStore;
+use opentelemetry::global;
+use opentelemetry::metrics::Gauge as OTelGauge;
+use opentelemetry::KeyValue;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+fn l0_pending_files_gauge() -> &'static OTelGauge<u64> {
+    static GAUGE: OnceLock<OTelGauge<u64>> = OnceLock::new();
+    GAUGE.get_or_init(|| {
+        global::meter("cardinalsin.compactor")
+            .u64_gauge("cardinalsin_compaction_l0_pending_files")
+            .with_description("Number of L0 files pending compaction")
+            .with_unit("1")
+            .init()
+    })
+}
 
 /// A pending chunk deletion, serializable so it survives compactor restarts.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -500,6 +514,14 @@ impl Compactor {
             "tenant" => crate::telemetry::tenant()
         )
         .set(total_files as f64);
+        l0_pending_files_gauge().record(
+            total_files as u64,
+            &[
+                KeyValue::new("service", crate::telemetry::service()),
+                KeyValue::new("run_id", crate::telemetry::run_id()),
+                KeyValue::new("tenant", crate::telemetry::tenant()),
+            ],
+        );
         Ok(())
     }
 

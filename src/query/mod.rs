@@ -11,6 +11,7 @@ mod dedup;
 mod engine;
 mod router;
 mod streaming;
+mod telemetry;
 
 pub use cache::{CacheConfig, TieredCache};
 pub use cached_store::CachedObjectStore;
@@ -26,6 +27,7 @@ use crate::{Error, Result, StorageConfig};
 use arrow_array::RecordBatch;
 use object_store::ObjectStore;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::broadcast;
 
 /// Configuration for the query node
@@ -154,68 +156,87 @@ impl QueryNode {
 
     /// Execute a SQL query for a specific tenant with optional adaptive indexing
     pub async fn query_for_tenant(&self, sql: &str, tenant_id: &str) -> Result<Vec<RecordBatch>> {
-        // Parse query for pruning inputs. If the logical `metrics` table has not
-        // been registered yet, bootstrap with all known chunks and retry parsing.
-        let (time_range, predicates) = match (
-            self.engine.extract_time_range(sql).await,
-            self.engine.extract_column_predicates(sql).await,
-        ) {
-            (Ok(time_range), Ok(predicates)) => (time_range, predicates),
-            (Err(e), _) | (_, Err(e)) if is_table_not_found_error(&e) => {
-                let bootstrap_chunks = self.metadata.list_chunks().await?;
-                let bootstrap_paths: Vec<String> = bootstrap_chunks
-                    .iter()
-                    .map(|chunk| chunk.chunk_path.clone())
-                    .collect();
-                self.engine
-                    .register_metrics_table_for_chunks(&bootstrap_paths)
-                    .await?;
-
-                (
-                    self.engine.extract_time_range(sql).await?,
-                    self.engine.extract_column_predicates(sql).await?,
-                )
-            }
-            (Err(e), _) | (_, Err(e)) => return Err(e),
-        };
-
-        // Get relevant chunks from metadata with predicate pushdown
-        let chunks = self
-            .metadata
-            .get_chunks_with_predicates(time_range, &predicates)
-            .await?;
-
-        // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)
-        let chunk_paths: Vec<String> = chunks.iter().map(|c| c.chunk_path.clone()).collect();
-        let _pin_guard = self
-            .pin_registry
-            .as_ref()
-            .map(|r| r.pin(chunk_paths.clone()));
-
-        // Check if any shard is in a dual-write split phase (causes duplicate data)
-        let needs_dedup = self.metadata.has_active_split().await.unwrap_or(false);
-
-        // Map metadata-selected chunks into the logical `metrics` table used by SQL.
-        // Execute query with or without adaptive indexing while holding a stable
-        // `metrics` table binding for this request.
-        let results = self
-            .engine
-            .with_metrics_table(&chunk_paths, || async {
-                if let Some(ref controller) = self.adaptive_index_controller {
+        let started = Instant::now();
+        let result = async {
+            // Parse query for pruning inputs. If the logical `metrics` table has not
+            // been registered yet, bootstrap with all known chunks and retry parsing.
+            let (time_range, predicates) = match (
+                self.engine.extract_time_range(sql).await,
+                self.engine.extract_column_predicates(sql).await,
+            ) {
+                (Ok(time_range), Ok(predicates)) => (time_range, predicates),
+                (Err(e), _) | (_, Err(e)) if is_table_not_found_error(&e) => {
+                    let bootstrap_chunks = self.metadata.list_chunks().await?;
+                    let bootstrap_paths: Vec<String> = bootstrap_chunks
+                        .iter()
+                        .map(|chunk| chunk.chunk_path.clone())
+                        .collect();
                     self.engine
-                        .execute_with_indexes(sql, tenant_id, controller.clone())
-                        .await
-                } else {
-                    self.engine.execute(sql).await
-                }
-            })
-            .await?;
+                        .register_metrics_table_for_chunks(&bootstrap_paths)
+                        .await?;
 
-        // Deduplicate if any shard is in dual-write phase
-        if needs_dedup {
-            dedup::dedup_batches(results)
-        } else {
-            Ok(results)
+                    (
+                        self.engine.extract_time_range(sql).await?,
+                        self.engine.extract_column_predicates(sql).await?,
+                    )
+                }
+                (Err(e), _) | (_, Err(e)) => return Err(e),
+            };
+
+            // Get relevant chunks from metadata with predicate pushdown
+            let chunks = self
+                .metadata
+                .get_chunks_with_predicates(time_range, &predicates)
+                .await?;
+            let bytes_scanned = chunks.iter().map(|chunk| chunk.size_bytes).sum::<u64>();
+
+            // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)
+            let chunk_paths: Vec<String> = chunks.iter().map(|c| c.chunk_path.clone()).collect();
+            let _pin_guard = self
+                .pin_registry
+                .as_ref()
+                .map(|r| r.pin(chunk_paths.clone()));
+
+            // Check if any shard is in a dual-write split phase (causes duplicate data)
+            let needs_dedup = self.metadata.has_active_split().await.unwrap_or(false);
+
+            // Map metadata-selected chunks into the logical `metrics` table used by SQL.
+            // Execute query with or without adaptive indexing while holding a stable
+            // `metrics` table binding for this request.
+            let results = self
+                .engine
+                .with_metrics_table(&chunk_paths, || async {
+                    if let Some(ref controller) = self.adaptive_index_controller {
+                        self.engine
+                            .execute_with_indexes(sql, tenant_id, controller.clone())
+                            .await
+                    } else {
+                        self.engine.execute(sql).await
+                    }
+                })
+                .await?;
+
+            // Deduplicate if any shard is in dual-write phase
+            let deduped = if needs_dedup {
+                dedup::dedup_batches(results)?
+            } else {
+                results
+            };
+
+            Ok((deduped, bytes_scanned))
+        }
+        .await;
+
+        match result {
+            Ok((batches, bytes_scanned)) => {
+                telemetry::record_query_request(started.elapsed().as_secs_f64(), "ok");
+                telemetry::record_query_bytes_scanned(bytes_scanned);
+                Ok(batches)
+            }
+            Err(error) => {
+                telemetry::record_query_request(started.elapsed().as_secs_f64(), "error");
+                Err(error)
+            }
         }
     }
 

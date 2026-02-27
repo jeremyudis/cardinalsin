@@ -141,3 +141,61 @@ fn critical_epic65_metrics_remain_documented() {
         missing
     );
 }
+
+#[test]
+fn critical_epic65_metrics_have_runtime_callsites() {
+    let required = [
+        (
+            "src/ingester/telemetry.rs",
+            "cardinalsin_ingester_write_rows_total",
+        ),
+        (
+            "src/ingester/telemetry.rs",
+            "cardinalsin_ingester_write_latency_seconds",
+        ),
+        (
+            "src/ingester/telemetry.rs",
+            "cardinalsin_ingester_wal_operations_total",
+        ),
+        (
+            "src/ingester/telemetry.rs",
+            "cardinalsin_ingester_buffer_fullness_ratio",
+        ),
+        ("src/query/telemetry.rs", "cardinalsin_query_requests_total"),
+        (
+            "src/query/telemetry.rs",
+            "cardinalsin_query_latency_seconds",
+        ),
+        (
+            "src/query/telemetry.rs",
+            "cardinalsin_query_bytes_scanned_total",
+        ),
+        (
+            "src/query/telemetry.rs",
+            "cardinalsin_query_cache_hits_total",
+        ),
+        (
+            "src/query/telemetry.rs",
+            "cardinalsin_query_cache_misses_total",
+        ),
+        (
+            "src/compactor/mod.rs",
+            "cardinalsin_compaction_l0_pending_files",
+        ),
+    ];
+
+    let mut missing = Vec::new();
+    for (relative_path, metric_name) in required {
+        let path = repo_root().join(relative_path);
+        let text = read_to_string(&path);
+        if !text.contains(metric_name) {
+            missing.push(format!("{} in {}", metric_name, relative_path));
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "critical telemetry metrics are missing runtime callsites: {:?}",
+        missing
+    );
+}

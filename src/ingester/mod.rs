@@ -10,6 +10,7 @@
 mod broadcast;
 mod buffer;
 mod parquet_writer;
+mod telemetry;
 mod topic_broadcast;
 mod wal;
 
@@ -298,38 +299,59 @@ impl Ingester {
     pub async fn write(&self, batch: RecordBatch) -> Result<()> {
         let start_time = std::time::Instant::now();
         let batch_size = batch.get_array_memory_size();
+        let row_count = batch.num_rows() as u64;
 
         // Compute shard key for this batch (for monitoring)
         let shard_id = self.compute_shard_id(&batch);
-
-        // Check if shard is being split - if so, use dual-write
-        if let Some(split_state) = self.metadata.get_split_state(&shard_id).await? {
-            use crate::sharding::SplitPhase;
-            if matches!(
-                split_state.phase,
-                SplitPhase::DualWrite | SplitPhase::Backfill
-            ) {
-                info!("Shard {} is splitting, enabling dual-write mode", shard_id);
-                return self.write_with_split_awareness(batch, &shard_id).await;
+        let result = async {
+            // Check if shard is being split - if so, use dual-write
+            if let Some(split_state) = self.metadata.get_split_state(&shard_id).await? {
+                use crate::sharding::SplitPhase;
+                if matches!(
+                    split_state.phase,
+                    SplitPhase::DualWrite | SplitPhase::Backfill
+                ) {
+                    info!("Shard {} is splitting, enabling dual-write mode", shard_id);
+                    return self.write_with_split_awareness(batch, &shard_id).await;
+                }
             }
+
+            // Normal single-write path
+            if let Some(wal) = self.wal.as_ref() {
+                let seq = match wal.lock().await.append(&batch).await {
+                    Ok(seq) => {
+                        telemetry::record_wal_operation("append", "ok");
+                        seq
+                    }
+                    Err(e) => {
+                        telemetry::record_wal_operation("append", "error");
+                        return Err(e);
+                    }
+                };
+                self.last_wal_seq.store(seq, Ordering::Release);
+            } else if self.config.wal.enabled {
+                telemetry::record_wal_operation("append", "error");
+                if !self.wal_warned.swap(true, Ordering::Relaxed) {
+                    warn!(
+                        "WAL is enabled but not initialized - call ensure_wal() for crash durability"
+                    );
+                }
+            }
+
+            self.append_to_buffer_and_maybe_flush(batch, batch_size).await?;
+
+            // Record write metrics for hot shard detection
+            let write_latency = start_time.elapsed();
+            self.shard_monitor
+                .record_write(&shard_id, batch_size, write_latency);
+
+            Ok(())
         }
+        .await;
 
-        // Normal single-write path
-        if let Some(wal) = self.wal.as_ref() {
-            let seq = wal.lock().await.append(&batch).await?;
-            self.last_wal_seq.store(seq, Ordering::Release);
-        } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
-            warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
-        }
-        self.append_to_buffer_and_maybe_flush(batch.clone(), batch_size)
-            .await?;
-
-        // Record write metrics for hot shard detection
-        let write_latency = start_time.elapsed();
-        self.shard_monitor
-            .record_write(&shard_id, batch_size, write_latency);
-
-        Ok(())
+        let result_label = if result.is_ok() { "ok" } else { "error" };
+        telemetry::record_write(row_count, start_time.elapsed().as_secs_f64(), result_label);
+        result
     }
 
     /// Write with split awareness (dual-write to old and new shards)
@@ -341,10 +363,24 @@ impl Ingester {
             .ok_or_else(|| Error::Internal("Split state disappeared".to_string()))?;
 
         if let Some(wal) = self.wal.as_ref() {
-            let seq = wal.lock().await.append(&batch).await?;
+            let seq = match wal.lock().await.append(&batch).await {
+                Ok(seq) => {
+                    telemetry::record_wal_operation("append", "ok");
+                    seq
+                }
+                Err(e) => {
+                    telemetry::record_wal_operation("append", "error");
+                    return Err(e);
+                }
+            };
             self.last_wal_seq.store(seq, Ordering::Release);
-        } else if self.config.wal.enabled && !self.wal_warned.swap(true, Ordering::Relaxed) {
-            warn!("WAL is enabled but not initialized - call ensure_wal() for crash durability");
+        } else if self.config.wal.enabled {
+            telemetry::record_wal_operation("append", "error");
+            if !self.wal_warned.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "WAL is enabled but not initialized - call ensure_wal() for crash durability"
+                );
+            }
         }
 
         // Write to old shard first (for consistency during transition)
@@ -572,6 +608,7 @@ impl Ingester {
             }
 
             if buffer.size_bytes() + batch_size > self.config.max_buffer_size_bytes {
+                telemetry::record_buffer_fullness_ratio(1.0);
                 return Err(Error::BufferFull);
             }
 
@@ -579,6 +616,8 @@ impl Ingester {
                 .take()
                 .ok_or_else(|| Error::Internal("Missing pending batch".to_string()))?;
             buffer.append(incoming)?;
+            let max_buffer_size = self.config.max_buffer_size_bytes.max(1) as f64;
+            telemetry::record_buffer_fullness_ratio(buffer.size_bytes() as f64 / max_buffer_size);
 
             if self.should_flush(&buffer) {
                 let batches = buffer.take();
@@ -652,12 +691,19 @@ impl Ingester {
         let flushed_up_to = self.last_wal_seq.load(Ordering::Acquire);
         if flushed_up_to > 0 {
             if let Some(wal) = self.wal.as_ref() {
-                wal.lock().await.truncate_before(flushed_up_to).await?;
+                if let Err(e) = wal.lock().await.truncate_before(flushed_up_to).await {
+                    telemetry::record_wal_operation("truncate", "error");
+                    return Err(e);
+                }
+                telemetry::record_wal_operation("truncate", "ok");
             }
             self.last_flushed_seq
                 .store(flushed_up_to, Ordering::Release);
             if let Err(e) = persist_flushed_seq(&self.config.wal.wal_dir, flushed_up_to) {
+                telemetry::record_wal_operation("persist_flushed_seq", "error");
                 warn!(error = %e, "Failed to persist flushed WAL sequence number");
+            } else {
+                telemetry::record_wal_operation("persist_flushed_seq", "ok");
             }
         }
 
