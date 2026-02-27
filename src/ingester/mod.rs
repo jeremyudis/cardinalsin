@@ -728,29 +728,45 @@ impl Ingester {
     /// Extract minimum timestamp from batch
     fn extract_min_timestamp(&self, batch: &RecordBatch) -> Result<i64> {
         use arrow_array::cast::AsArray;
-        use arrow_array::types::TimestampNanosecondType;
+        use arrow_array::types::{Int64Type, TimestampNanosecondType};
 
         let col = batch
             .column_by_name("timestamp")
             .ok_or_else(|| Error::InvalidSchema("Missing timestamp column".into()))?;
 
-        let ts_array = col.as_primitive::<TimestampNanosecondType>();
-        let min = arrow::compute::min(ts_array).unwrap_or(0);
-        Ok(min)
+        if let Some(ts_array) = col.as_primitive_opt::<TimestampNanosecondType>() {
+            return Ok(arrow::compute::min(ts_array).unwrap_or(0));
+        }
+        if let Some(ts_array) = col.as_primitive_opt::<Int64Type>() {
+            return Ok(arrow::compute::min(ts_array).unwrap_or(0));
+        }
+
+        Err(Error::InvalidSchema(format!(
+            "Timestamp column must be Timestamp(Nanosecond) or Int64, got {:?}",
+            col.data_type()
+        )))
     }
 
     /// Extract maximum timestamp from batch
     fn extract_max_timestamp(&self, batch: &RecordBatch) -> Result<i64> {
         use arrow_array::cast::AsArray;
-        use arrow_array::types::TimestampNanosecondType;
+        use arrow_array::types::{Int64Type, TimestampNanosecondType};
 
         let col = batch
             .column_by_name("timestamp")
             .ok_or_else(|| Error::InvalidSchema("Missing timestamp column".into()))?;
 
-        let ts_array = col.as_primitive::<TimestampNanosecondType>();
-        let max = arrow::compute::max(ts_array).unwrap_or(0);
-        Ok(max)
+        if let Some(ts_array) = col.as_primitive_opt::<TimestampNanosecondType>() {
+            return Ok(arrow::compute::max(ts_array).unwrap_or(0));
+        }
+        if let Some(ts_array) = col.as_primitive_opt::<Int64Type>() {
+            return Ok(arrow::compute::max(ts_array).unwrap_or(0));
+        }
+
+        Err(Error::InvalidSchema(format!(
+            "Timestamp column must be Timestamp(Nanosecond) or Int64, got {:?}",
+            col.data_type()
+        )))
     }
 
     /// Subscribe to broadcast channel for streaming queries
