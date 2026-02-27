@@ -116,6 +116,34 @@ QUERY_RC=0
 wait "$INGEST_PID" || INGEST_RC=$?
 wait "$QUERY_PID" || QUERY_RC=$?
 
+extract_samples_sent() {
+  local log_file="$1"
+  awk '
+    /^\[Stats\] Samples:/ {
+      value=$3
+      gsub(/[^0-9]/, "", value)
+      if (value != "") last=value
+    }
+    /^Samples sent:[[:space:]]*/ {
+      value=$3
+      gsub(/[^0-9]/, "", value)
+      if (value != "") last=value
+    }
+    END { if (last != "") print last }
+  ' "$log_file"
+}
+
+SAMPLES_SENT="$(extract_samples_sent "$RESULT_DIR/ingest.log" || true)"
+if [[ ! "$SAMPLES_SENT" =~ ^[0-9]+$ || "$SAMPLES_SENT" -eq 0 ]]; then
+  echo "ERROR: test-data-generator did not report successfully sent samples." >&2
+  echo "samples_sent=${SAMPLES_SENT:-unknown}" >&2
+  if [[ "$INGEST_RC" != "0" ]]; then
+    echo "ingest_exit_code=$INGEST_RC" >&2
+  fi
+  tail -n 60 "$RESULT_DIR/ingest.log" >&2 || true
+  exit 1
+fi
+
 prom_query() {
   local expr="$1"
   local raw
