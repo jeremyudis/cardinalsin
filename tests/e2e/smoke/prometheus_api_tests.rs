@@ -374,3 +374,226 @@ async fn test_prometheus_post_with_labels() {
         }
     }
 }
+
+/// Test /api/v1/series endpoint (GET)
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_prometheus_series_endpoint() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    // Write some data with labels
+    let samples = generate_test_samples(10, 2);
+    harness
+        .write_samples(samples)
+        .await
+        .expect("Write should succeed");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Query series endpoint with matcher
+    let resp = harness
+        .http_client
+        .get(format!("{}/api/v1/series", harness.query_url))
+        .query(&[("match[]", "test_metric_0")])
+        .send()
+        .await
+        .expect("Series request should succeed");
+
+    assert!(
+        resp.status().is_success(),
+        "Series endpoint should return 2xx"
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("Should be valid JSON");
+    assert_eq!(
+        body["status"], "success",
+        "Series response should have status 'success'"
+    );
+    assert!(
+        body["data"].is_array(),
+        "Series response should have data array"
+    );
+
+    println!("Series endpoint returned: {:?}", body["data"]);
+}
+
+/// Test /api/v1/series endpoint with time range filtering
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_prometheus_series_with_time_range() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    let now = chrono::Utc::now().timestamp() as f64;
+    let one_hour_ago = now - 3600.0;
+
+    // Query series endpoint with matcher and time range
+    let resp = harness
+        .http_client
+        .get(format!("{}/api/v1/series", harness.query_url))
+        .query(&[
+            ("match[]", "test_metric_0"),
+            ("start", &one_hour_ago.to_string()),
+            ("end", &now.to_string()),
+        ])
+        .send()
+        .await
+        .expect("Series request should succeed");
+
+    assert!(resp.status().is_success());
+
+    let body: serde_json::Value = resp.json().await.expect("Should be valid JSON");
+    assert_eq!(body["status"], "success");
+    assert!(body["data"].is_array());
+
+    println!(
+        "Series endpoint with time range returned: {} series",
+        body["data"].as_array().unwrap().len()
+    );
+}
+
+/// Test /api/v1/series endpoint (POST)
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_prometheus_series_post() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    // Write some data with labels
+    let samples = generate_test_samples(10, 2);
+    harness
+        .write_samples(samples)
+        .await
+        .expect("Write should succeed");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Query series endpoint with POST
+    let params = [("match[]", "test_metric_0")];
+    let resp = harness
+        .http_client
+        .post(format!("{}/api/v1/series", harness.query_url))
+        .form(&params)
+        .send()
+        .await
+        .expect("Series POST request should succeed");
+
+    assert!(
+        resp.status().is_success(),
+        "Series POST endpoint should return 2xx"
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("Should be valid JSON");
+    assert_eq!(body["status"], "success");
+    assert!(body["data"].is_array());
+
+    println!("Series POST endpoint returned: {:?}", body["data"]);
+}
+
+/// Test /api/v1/labels endpoint with POST and filtering
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_prometheus_labels_post_with_filters() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    // Write some data
+    let samples = generate_test_samples(10, 2);
+    harness
+        .write_samples(samples)
+        .await
+        .expect("Write should succeed");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let now = chrono::Utc::now().timestamp() as f64;
+    let one_hour_ago = now - 3600.0;
+
+    // Query labels endpoint with POST and filters
+    let params = [
+        ("match[]", "test_metric_0"),
+        ("start", &one_hour_ago.to_string()),
+        ("end", &now.to_string()),
+    ];
+    let resp = harness
+        .http_client
+        .post(format!("{}/api/v1/labels", harness.query_url))
+        .form(&params)
+        .send()
+        .await
+        .expect("Labels POST request should succeed");
+
+    assert!(
+        resp.status().is_success(),
+        "Labels POST endpoint should return 2xx"
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("Should be valid JSON");
+    assert_eq!(body["status"], "success");
+    assert!(body["data"].is_array());
+
+    println!("Labels POST with filters returned: {:?}", body["data"]);
+}
+
+/// Test /api/v1/label/{name}/values endpoint with filtering
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_prometheus_label_values_with_filters() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    // Write some data
+    let samples = generate_test_samples(10, 2);
+    harness
+        .write_samples(samples)
+        .await
+        .expect("Write should succeed");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let now = chrono::Utc::now().timestamp() as f64;
+    let one_hour_ago = now - 3600.0;
+
+    // Query label values endpoint with filters
+    let resp = harness
+        .http_client
+        .get(format!(
+            "{}/api/v1/label/__name__/values",
+            harness.query_url
+        ))
+        .query(&[
+            ("match[]", "test_metric_0"),
+            ("start", &one_hour_ago.to_string()),
+            ("end", &now.to_string()),
+        ])
+        .send()
+        .await
+        .expect("Label values request should succeed");
+
+    assert!(
+        resp.status().is_success(),
+        "Label values endpoint should return 2xx"
+    );
+
+    let body: serde_json::Value = resp.json().await.expect("Should be valid JSON");
+    assert_eq!(body["status"], "success");
+    assert!(body["data"].is_array());
+
+    println!("Label values with filters returned: {:?}", body["data"]);
+}
