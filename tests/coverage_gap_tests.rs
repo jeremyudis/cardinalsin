@@ -58,6 +58,29 @@ fn create_ts_batch(n: usize, start_ts: i64) -> RecordBatch {
     .unwrap()
 }
 
+/// Helper: create a batch with Int64 timestamps (matches Flight ingest payload shape).
+fn create_int64_ts_batch(n: usize, start_ts: i64) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("timestamp", DataType::Int64, false),
+        Field::new("metric_name", DataType::Utf8, false),
+        Field::new("value_f64", DataType::Float64, true),
+    ]));
+
+    let timestamps: Vec<i64> = (0..n as i64).map(|i| start_ts + i * 1_000_000).collect();
+    let names: Vec<&str> = (0..n).map(|_| "test_metric").collect();
+    let values: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
+
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(timestamps)),
+            Arc::new(StringArray::from(names)),
+            Arc::new(Float64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
 /// Helper: create a batch with multi-value columns (realistic representation of type routing).
 /// When use_int is true, values go to value_i64; otherwise, they go to value_f64.
 fn create_multi_value_batch(n: usize, start_ts: i64, use_int: bool) -> RecordBatch {
@@ -393,6 +416,88 @@ async fn test_multi_value_flush_no_concat_errors() {
 
     // The key assertion: if concat failed, no chunks would be registered
     // With multi-value columns, all schemas are identical and concat succeeds
+}
+
+#[tokio::test]
+async fn test_ingester_mixed_timestamp_column_types_no_panic() {
+    let (ingester, _, metadata) = create_test_ingester(
+        4, // flush when 4 rows are buffered
+        100_000_000,
+    );
+
+    let now = chrono::Utc::now().timestamp_nanos_opt().unwrap();
+
+    // Prometheus/OTLP-style write (Timestamp(Nanosecond)).
+    ingester.write(create_ts_batch(2, now)).await.unwrap();
+
+    // Flight-style writes (Int64). First write forces a schema-mismatch flush,
+    // second write reaches flush threshold for Int64 batch path.
+    ingester
+        .write(create_int64_ts_batch(2, now + 2_000_000))
+        .await
+        .unwrap();
+    ingester
+        .write(create_int64_ts_batch(2, now + 4_000_000))
+        .await
+        .unwrap();
+
+    let chunks = metadata.list_chunks().await.unwrap();
+    assert_eq!(
+        chunks.len(),
+        2,
+        "Expected one flush per timestamp column type"
+    );
+
+    let total_rows: u64 = chunks.iter().map(|c| c.row_count).sum();
+    assert_eq!(
+        total_rows, 6,
+        "All rows should be persisted across mixed ingest"
+    );
+
+    let min_ts = chunks.iter().map(|c| c.min_timestamp).min().unwrap();
+    let max_ts = chunks.iter().map(|c| c.max_timestamp).max().unwrap();
+    assert_eq!(min_ts, now);
+    assert_eq!(max_ts, now + 5_000_000);
+}
+
+#[tokio::test]
+async fn test_ingester_unsupported_timestamp_type_returns_error() {
+    let (ingester, _, _) = create_test_ingester(
+        1, // force immediate flush
+        100_000_000,
+    );
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("timestamp", DataType::UInt64, false),
+        Field::new("metric_name", DataType::Utf8, false),
+        Field::new("value_f64", DataType::Float64, true),
+    ]));
+
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(UInt64Array::from(vec![1_u64])),
+            Arc::new(StringArray::from(vec!["test_metric"])),
+            Arc::new(Float64Array::from(vec![1.0])),
+        ],
+    )
+    .unwrap();
+
+    let err = ingester
+        .write(batch)
+        .await
+        .expect_err("unsupported timestamp type should return a typed error");
+
+    match err {
+        Error::InvalidSchema(msg) => {
+            assert!(
+                msg.contains("Timestamp column must be Timestamp(Nanosecond) or Int64"),
+                "unexpected error message: {}",
+                msg
+            );
+        }
+        other => panic!("Expected InvalidSchema, got: {:?}", other),
+    }
 }
 
 // =========================================================================
