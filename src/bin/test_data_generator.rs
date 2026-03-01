@@ -100,6 +100,29 @@ struct Sample {
     labels: HashMap<String, String>,
 }
 
+#[derive(Debug)]
+struct WriteRequest {
+    timeseries: Vec<TimeSeries>,
+}
+
+#[derive(Debug)]
+struct TimeSeries {
+    labels: Vec<Label>,
+    samples: Vec<ProtoSample>,
+}
+
+#[derive(Debug)]
+struct Label {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug)]
+struct ProtoSample {
+    timestamp_ms: i64,
+    value: f64,
+}
+
 /// Statistics counter
 struct Stats {
     samples_sent: AtomicU64,
@@ -376,14 +399,141 @@ impl IngesterClient {
         }
     }
 
-    fn samples_to_proto(&self, _samples: &[Sample]) -> Vec<u8> {
-        // Simplified: just return empty bytes since the server doesn't parse yet
-        // In production, this would encode to proper protobuf format
-        Vec::new()
+    fn samples_to_proto(&self, samples: &[Sample]) -> WriteRequest {
+        // Group samples by metric name + sorted labels so each unique label-set
+        // becomes one time series in the write request.
+        let mut series_map: HashMap<String, Vec<&Sample>> = HashMap::new();
+
+        for sample in samples {
+            let mut key_parts: Vec<String> = vec![sample.metric_name.clone()];
+            let mut label_items: Vec<_> = sample.labels.iter().collect();
+            label_items.sort_by_key(|(k, _)| *k);
+            for (k, v) in label_items {
+                key_parts.push(format!("{}={}", k, v));
+            }
+            let key = key_parts.join("|");
+            series_map.entry(key).or_default().push(sample);
+        }
+
+        let timeseries: Vec<TimeSeries> = series_map
+            .into_values()
+            .map(|series_samples| {
+                let first = series_samples[0];
+
+                let mut labels = vec![Label {
+                    name: "__name__".to_string(),
+                    value: first.metric_name.clone(),
+                }];
+
+                let mut sorted_labels: Vec<_> = first.labels.iter().collect();
+                sorted_labels.sort_by_key(|(k, _)| *k);
+                for (k, v) in sorted_labels {
+                    labels.push(Label {
+                        name: k.clone(),
+                        value: v.clone(),
+                    });
+                }
+
+                let proto_samples: Vec<ProtoSample> = series_samples
+                    .into_iter()
+                    .map(|s| ProtoSample {
+                        timestamp_ms: s.timestamp_ns / 1_000_000,
+                        value: s.value,
+                    })
+                    .collect();
+
+                TimeSeries {
+                    labels,
+                    samples: proto_samples,
+                }
+            })
+            .collect();
+
+        WriteRequest { timeseries }
     }
 
-    fn encode_proto(&self, _data: &[u8]) -> Vec<u8> {
-        Vec::new()
+    fn encode_proto(&self, req: &WriteRequest) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        for ts in &req.timeseries {
+            // Field 1: timeseries (repeated, length-delimited)
+            let ts_bytes = self.encode_timeseries(ts);
+            buf.push(10);
+            self.write_varint(&mut buf, ts_bytes.len() as u64);
+            buf.extend(ts_bytes);
+        }
+
+        buf
+    }
+
+    fn encode_timeseries(&self, ts: &TimeSeries) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Field 1: labels (repeated, length-delimited)
+        for label in &ts.labels {
+            let label_bytes = self.encode_label(label);
+            buf.push(10);
+            self.write_varint(&mut buf, label_bytes.len() as u64);
+            buf.extend(label_bytes);
+        }
+
+        // Field 2: samples (repeated, length-delimited)
+        for sample in &ts.samples {
+            let sample_bytes = self.encode_sample(sample);
+            buf.push(18);
+            self.write_varint(&mut buf, sample_bytes.len() as u64);
+            buf.extend(sample_bytes);
+        }
+
+        buf
+    }
+
+    fn encode_label(&self, label: &Label) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Field 1: name (string)
+        if !label.name.is_empty() {
+            buf.push(10);
+            self.write_varint(&mut buf, label.name.len() as u64);
+            buf.extend(label.name.as_bytes());
+        }
+
+        // Field 2: value (string)
+        if !label.value.is_empty() {
+            buf.push(18);
+            self.write_varint(&mut buf, label.value.len() as u64);
+            buf.extend(label.value.as_bytes());
+        }
+
+        buf
+    }
+
+    fn encode_sample(&self, sample: &ProtoSample) -> Vec<u8> {
+        let mut buf = Vec::new();
+
+        // Field 1: value (double, 64-bit fixed)
+        buf.push(9);
+        buf.extend(sample.value.to_le_bytes());
+
+        // Field 2: timestamp (int64, varint)
+        buf.push(16);
+        self.write_varint(&mut buf, sample.timestamp_ms as u64);
+
+        buf
+    }
+
+    fn write_varint(&self, buf: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let mut byte = (value & 0x7F) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            buf.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
     }
 }
 

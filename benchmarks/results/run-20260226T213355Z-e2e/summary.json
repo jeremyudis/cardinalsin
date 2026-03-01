@@ -1,0 +1,17 @@
+{
+  "run_id": "run-20260226T213355Z-e2e",
+  "duration": "60s",
+  "ingest_rps_last_5m": 0,
+  "query_error_rps_last_5m": 0,
+  "l0_pending_max": 0,
+  "query_latency_p99_seconds": 0,
+  "cpu_seconds_per_second": 0,
+  "kpi": {
+    "ingest_process_ok": true,
+    "query_process_ok": true,
+    "ingest_rps_pass": false,
+    "query_error_rps_pass": true,
+    "l0_pending_pass": true,
+    "overall_pass": false
+  }
+}
