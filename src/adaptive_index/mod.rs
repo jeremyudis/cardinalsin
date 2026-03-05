@@ -19,6 +19,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
+/// Durable record for an adaptive index, persisted to object storage.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IndexRecord {
+    pub id: String,
+    pub tenant_id: String,
+    pub column_name: String,
+    /// "inverted", "range", "bloom", "dictionary"
+    pub index_type: String,
+    /// "invisible", "visible", "deprecated"
+    pub visibility: String,
+    pub would_have_helped: u64,
+    pub usage_count: u64,
+    /// Unix timestamp (seconds) when the index was created
+    pub created_at_secs: i64,
+    /// Unix timestamp (seconds) when the index was last used
+    pub last_used_secs: Option<i64>,
+}
+
 /// Configuration for adaptive indexing
 #[derive(Debug, Clone)]
 pub struct AdaptiveIndexConfig {
