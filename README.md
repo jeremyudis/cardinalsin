@@ -1,7 +1,5 @@
 # CardinalSin
 
-> *"High cardinality is the cardinal sin of time-series databases. This aims to address that."*
-
 A Rust-based, serverless time-series database built on object storage (S3/GCS/Azure), designed to solve the high-cardinality problem that plagues modern observability systems. Inspired by [turbopuffer](https://turbopuffer.com), [WarpStream](https://warpstream.com), [ClickHouse](https://clickhouse.com), [Datadog Husky](https://www.datadoghq.com/blog/engineering/introducing-husky/), and [InfluxDB IOx](https://www.influxdata.com/blog/announcing-influxdb-iox/).
 
 ## Key Features
