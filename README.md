@@ -4,13 +4,14 @@
 
 A Rust-based, serverless time-series database built on object storage (S3/GCS/Azure), designed to solve the high-cardinality problem that plagues modern observability systems. Inspired by [turbopuffer](https://turbopuffer.com), [WarpStream](https://warpstream.com), [ClickHouse](https://clickhouse.com), [Datadog Husky](https://www.datadoghq.com/blog/engineering/introducing-husky/), and [InfluxDB IOx](https://www.influxdata.com/blog/announcing-influxdb-iox/).
 
-## Key Innovations
+## Key Features
 
 - **Columnar storage** eliminates series-set explosion (no per-tag-combination indexing)
-- **Zero-disk architecture** with stateless compute nodes
+- **Object-storage-first architecture** with stateless compute nodes and WAL-backed ingest durability
 - **3-tier caching** (RAM → NVMe → S3) for cost-efficient performance
-- **Adaptive indexing** automatically promotes hot dimensions based on query patterns
-- **Dynamic sharding** with zero-downtime shard splitting and hot shard rebalancing
+- **Prometheus compatibility (WIP)** for remote-write ingest and query API interoperability
+- **Adaptive indexing (WIP)** for automatic promotion of hot query dimensions
+- **Dynamic sharding (WIP)** for zero-downtime shard splitting and hot-shard rebalancing
 - **Hybrid compaction** (size-tiered + leveled LSM) for optimal read/write tradeoffs
 - Built on battle-tested primitives: **DataFusion**, **Arrow**, **Parquet**
 
@@ -23,7 +24,7 @@ A Rust-based, serverless time-series database built on object storage (S3/GCS/Az
 │                              Control Plane                                   │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
 │  │  Metadata Store │  │  Schema Registry│  │  Coordinator    │              │
-│  │  (FoundationDB) │  │                 │  │  (Assignment)   │              │
+│  │  (S3 + ETags)   │  │                 │  │  (Assignment)   │              │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -34,7 +35,7 @@ A Rust-based, serverless time-series database built on object storage (S3/GCS/Az
 │  (Stateless Rust)   │  │  (Stateless Rust)   │  │  (Stateless Rust)   │
 │                     │  │                     │  │                     │
 │  - Batch writes     │  │  - DataFusion       │  │  - Merge small files│
-│  - Buffer in memory │  │  - Arrow Flight     │  │  - Downsample old   │
+│  - WAL + mem buffer │  │  - Arrow Flight     │  │  - Downsample old   │
 │  - Flush to S3      │  │  - NVMe cache       │  │  - Garbage collect  │
 └─────────────────────┘  └─────────────────────┘  └─────────────────────┘
           │                       │                        │
@@ -48,17 +49,17 @@ A Rust-based, serverless time-series database built on object storage (S3/GCS/Az
 │         chunk_00001.parquet   (time-sorted, columnar)                       │
 │     /indexes/                                                                │
 │       bloom_filters.bin       (per-chunk bloom filters)                     │
-│     /wal/                                                                   │
-│       pending_00001.arrow     (unflushed batches)                           │
+│     /metadata/                                                               │
+│       catalog.json           (single-file CAS metadata catalog)             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Component | Responsibility | Scaling |
 |-----------|---------------|---------|
-| **Ingester** | Buffer writes, batch to Parquet, flush to S3 | Horizontal by write volume |
+| **Ingester** | Append WAL, buffer writes, batch to Parquet, flush to S3 | Horizontal by write volume |
 | **Query Node** | Execute queries via DataFusion, manage cache | Horizontal by query load |
 | **Compactor** | Merge files, downsample, enforce retention | 1-3 per tenant typically |
-| **Metadata Store** | Track files, schemas, assignments | FoundationDB / S3 (MVP) |
+| **Metadata Store** | Track files, schemas, assignments | S3 catalog with ETag CAS (`local` backend in dev) |
 
 ---
 
@@ -161,17 +162,9 @@ Dual-publish parity check:
 scripts/telemetry/compare_dual_publish.sh --mode all --run-id "run-20260222T190000Z"
 ```
 
-### Real-Time Observability Dogfooding
-
-```bash
-RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)"
-scripts/telemetry/run_mixed_workload.sh --duration 30m --run-id "$RUN_ID"
-scripts/telemetry/run_query_pack.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/query-pack"
-scripts/telemetry/compare_dual_publish.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/parity"
-```
-
-Operator runbook: `docs/observability-dogfooding-runbook.md`
-Script reference: `docs/telemetry/mixed-workload-runner.md`
+For the full observability dogfooding workflow, see:
+- `docs/observability-dogfooding-runbook.md`
+- `docs/telemetry/mixed-workload-runner.md`
 
 ## Telemetry Contract
 
@@ -190,7 +183,7 @@ When adding or changing instrumentation, keep dashboards and query-pack assets a
 | Protocol | Port | Transport | Format | Use Case |
 |----------|------|-----------|--------|----------|
 | **OTLP gRPC** | 4317 | HTTP/2 gRPC | Protobuf | OpenTelemetry agents, SDKs |
-| **Prometheus Remote Write** | 8080 (8081 in `docker-compose`) | HTTP POST | Protobuf+Snappy | Prometheus, Grafana Agent |
+| **Prometheus Remote Write (WIP)** | 8080 (8081 in `docker-compose`) | HTTP POST | Protobuf+Snappy | Prometheus / Grafana Agent compatibility |
 | **Arrow Flight DoPut (ingest)** | 4317 | gRPC | Arrow IPC | Bulk data loading |
 
 ### Query Protocols
@@ -198,9 +191,11 @@ When adding or changing instrumentation, keep dashboards and query-pack assets a
 | Protocol | Port | Transport | Format | Use Case |
 |----------|------|-----------|--------|----------|
 | **SQL HTTP** | 8080 | HTTP REST | JSON/Arrow/CSV | Web apps, ad-hoc queries |
-| **Prometheus API** | 8080 | HTTP REST | JSON | Grafana, existing dashboards |
+| **Prometheus API (WIP)** | 8080 | HTTP REST | JSON | Grafana / PromQL compatibility |
 | **Arrow Flight SQL** | 8815 | gRPC | Arrow IPC | Analytics tools, DuckDB |
 | **WebSocket/SSE** | 8080 | WS/HTTP | JSON | Live dashboards, alerting |
+
+Prometheus compatibility is under active development; expect some API/semantic gaps versus upstream Prometheus.
 
 Flight protocol notes:
 - Ingest-side Flight (`:4317`) is write-focused: `DoPut` is fully supported for bulk ingestion.
@@ -219,7 +214,7 @@ curl -X POST http://localhost:8080/api/v1/sql \
   }'
 ```
 
-**Prometheus Query:**
+**Prometheus Query (WIP):**
 ```bash
 curl "http://localhost:8080/api/v1/query?query=rate(http_requests_total[5m])"
 ```
@@ -238,7 +233,7 @@ ws.onmessage = (event) => console.log(JSON.parse(event.data));
 
 ## Write Path
 
-All ingestion protocols converge to a unified path: receive metrics → buffer in memory → batch to Parquet → flush to S3 → register metadata atomically.
+All ingestion protocols converge to a unified path: receive metrics → append to WAL → buffer in memory → batch to Parquet → flush to S3 → update metadata catalog atomically.
 
 ```
 Client (OTLP/Prometheus/Flight)
@@ -246,18 +241,20 @@ Client (OTLP/Prometheus/Flight)
     ▼
 ┌──────────────────────────────────────────────────────────┐
 │                       Ingester                            │
-│  Write Buffer (in-memory) → Arrow Batch → Parquet Writer │
+│  WAL Append → Write Buffer → Arrow Batch → Parquet Writer │
 └──────────────────────────┬───────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────┐
 │                          S3                               │
-│  1. PUT pending/batch_{id}.parquet                        │
-│  2. Update metadata (atomic via ETags / FoundationDB)     │
-│  3. ACK to client                                         │
+│  1. PUT data/.../chunk_{id}.parquet                       │
+│  2. Update metadata/catalog.json (atomic via ETags)       │
+│  3. Truncate WAL up to flushed sequence                   │
 │  4. Broadcast to streaming query subscribers              │
 └──────────────────────────────────────────────────────────┘
 ```
+
+Write ACK happens after WAL append + buffer enqueue (before flush).
 
 **Flush triggers** (whichever comes first):
 - **Time**: 5 minutes (background timer)
@@ -299,9 +296,9 @@ Client (SQL/PromQL)
 
 ---
 
-## Adaptive Indexing
+## Adaptive Indexing (WIP)
 
-The adaptive indexing system automatically detects per-tenant query patterns and promotes frequently-filtered dimensions to dedicated indexed columns.
+The adaptive indexing system is under active development and automatically detects per-tenant query patterns to promote frequently-filtered dimensions to dedicated indexed columns.
 
 **Lifecycle:** `Invisible → Visible → Deprecated`
 
@@ -315,7 +312,9 @@ Each tenant has isolated statistics and configurable quotas (max indexes, max st
 
 ---
 
-## Dynamic Sharding
+## Dynamic Sharding (WIP)
+
+Dynamic sharding is under active development.
 
 **Shard key:** `tenant_id + metric_hash + time_bucket`
 
@@ -345,14 +344,6 @@ Hybrid compaction strategy inspired by Datadog Husky — lazy compaction reduces
 | **L1** | Leveled | 2 GB | After L0 compaction |
 | **L2** | Leveled | 10 GB | After L1 compaction |
 | **L3** | Leveled | 50 GB | After L2 compaction |
-
-**Why 5-minute write granularity:**
-
-| Granularity | Files/Day | Query Slowdown | Latency to Query |
-|-------------|-----------|----------------|------------------|
-| 1-minute | 1,440 | 34x slower | ~1 min |
-| **5-minute** | **288** | **Baseline** | **~5 min** |
-| Hourly | 24 | Best | ~60 min |
 
 ---
 
@@ -400,10 +391,18 @@ CardinalSin supports real-time streaming for live dashboards and alerting by mer
 | `STORAGE_CONTAINER` | — | Container/bucket name for selected provider |
 | `METADATA_BACKEND` | `local` | `local` or `object_store` |
 | `METADATA_CONTAINER` | `STORAGE_CONTAINER` | Metadata container/bucket when using `object_store` backend |
+| `METADATA_PREFIX` | `metadata/` | Prefix/path for metadata objects in object storage |
 | `S3_REGION` | `us-east-1` | AWS region (AWS provider) |
 | `S3_ENDPOINT` | — | AWS S3 endpoint (for MinIO or other S3-compatible storage) |
+| `S3_METADATA_ALLOW_UNSAFE_OVERWRITE` | `false` | Dev-only fallback when conditional writes are unsupported |
+| `WAL_ENABLED` | `true` | Enable ingester write-ahead log |
+| `WAL_DIR` | `/var/lib/cardinalsin/wal` | WAL directory on local disk |
+| `WAL_SYNC_MODE` | `interval_100ms` | WAL sync strategy (`every_write`, `interval_100ms`, `interval_1s`, `on_rotation`, `none`) |
+| `WAL_MAX_SEGMENT_SIZE` | `67108864` | WAL segment size in bytes (64 MB default) |
+| `CACHE_DIR` | — | Query node NVMe cache directory (`--cache-dir`) |
 | `TENANT_ID` | `default` | Tenant identifier |
-| `RUST_LOG` | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`) |
+
+Legacy aliases are still accepted but deprecated (`STORAGE_BACKEND`, `S3_BUCKET`, `METADATA_BUCKET`, `METADATA_BACKEND=s3`).
 
 ### Ingester Options
 
@@ -412,6 +411,8 @@ cardinalsin-ingester \
   --http-port 8080 \
   --grpc-port 4317 \
   --flush-interval-secs 300 \
+  --wal-enabled true \
+  --wal-sync-mode interval_100ms \
   --cloud-provider aws \
   --storage-container my-metrics
 ```
@@ -422,8 +423,8 @@ cardinalsin-ingester \
 cardinalsin-query \
   --http-port 8080 \
   --grpc-port 8815 \
-  --l1-cache-mb 4096 \
-  --l2-cache-mb 102400 \
+  --l1-cache-mb 1024 \
+  --l2-cache-mb 10240 \
   --cache-dir /mnt/nvme
 ```
 
@@ -466,7 +467,7 @@ cardinalsin/
 │   ├── adaptive_index/            # Automatic index management
 │   ├── sharding/                  # Dynamic shard splitting
 │   ├── cluster/                   # Cluster coordination
-│   ├── metadata/                  # S3/FoundationDB metadata layer
+│   ├── metadata/                  # local + object-store metadata layer (S3 catalog CAS)
 │   └── schema/                    # Arrow schema definitions
 ├── tests/                         # 38 integration tests
 ├── benches/                       # Write throughput & query latency benchmarks
