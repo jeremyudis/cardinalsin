@@ -162,15 +162,11 @@ pub struct ObjectStoreMetadataClient {
     catalog_cache: Arc<tokio::sync::RwLock<Option<(MetadataCatalog, Instant)>>>,
     /// Catalog cache TTL duration
     catalog_cache_ttl: Duration,
-    /// Time index bucket granularity in nanoseconds (default: 1 hour)
-    time_granularity_nanos: i64,
 }
 
 impl ObjectStoreMetadataClient {
-    /// Default time granularity: 1 hour in nanoseconds
-    const DEFAULT_TIME_GRANULARITY_NANOS: i64 = 3_600_000_000_000;
-    /// Minimum allowed granularity: 60 seconds in nanoseconds
-    const MIN_TIME_GRANULARITY_NANOS: i64 = 60_000_000_000;
+    /// Nanoseconds per hour constant
+    const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
 
     /// Create a new S3 metadata client
     pub fn new(object_store: Arc<dyn ObjectStore>, config: ObjectStoreMetadataConfig) -> Self {
@@ -179,14 +175,7 @@ impl ObjectStoreMetadataClient {
             config,
             catalog_cache: Arc::new(tokio::sync::RwLock::new(None)),
             catalog_cache_ttl: Duration::from_secs(60),
-            time_granularity_nanos: Self::DEFAULT_TIME_GRANULARITY_NANOS,
         }
-    }
-
-    /// Set a custom time index granularity. Minimum is 60 seconds.
-    pub fn with_time_granularity(mut self, nanos: i64) -> Self {
-        self.time_granularity_nanos = nanos.max(Self::MIN_TIME_GRANULARITY_NANOS);
-        self
     }
 
     async fn put_with_cas(
@@ -349,9 +338,9 @@ impl ObjectStoreMetadataClient {
         }
     }
 
-    /// Calculate time bucket for a timestamp based on configured granularity
-    fn time_bucket(&self, timestamp: i64) -> i64 {
-        (timestamp / self.time_granularity_nanos) * self.time_granularity_nanos
+    /// Calculate hour bucket for a timestamp
+    fn hour_bucket(timestamp: i64) -> i64 {
+        (timestamp / Self::NANOS_PER_HOUR) * Self::NANOS_PER_HOUR
     }
 
     /// Get the S3 path for a chunk's metadata
@@ -765,8 +754,8 @@ impl ObjectStoreMetadataClient {
         let mut time_index = BTreeMap::new();
 
         for (path, extended) in catalog.chunks.iter() {
-            let start_bucket = self.time_bucket(extended.base.min_timestamp);
-            let end_bucket = self.time_bucket(extended.base.max_timestamp);
+            let start_bucket = Self::hour_bucket(extended.base.min_timestamp);
+            let end_bucket = Self::hour_bucket(extended.base.max_timestamp);
 
             let mut bucket = start_bucket;
             while bucket <= end_bucket {
@@ -774,7 +763,7 @@ impl ObjectStoreMetadataClient {
                     .entry(bucket)
                     .or_insert_with(Vec::new)
                     .push(path.clone());
-                bucket += self.time_granularity_nanos;
+                bucket += Self::NANOS_PER_HOUR;
             }
         }
 
@@ -814,8 +803,8 @@ impl ObjectStoreMetadataClient {
             let (mut catalog, etag) = self.load_catalog_with_etag().await?;
             catalog.chunks.insert(path.to_string(), extended.clone());
 
-            let start_bucket = self.time_bucket(metadata.min_timestamp);
-            let end_bucket = self.time_bucket(metadata.max_timestamp);
+            let start_bucket = Self::hour_bucket(metadata.min_timestamp);
+            let end_bucket = Self::hour_bucket(metadata.max_timestamp);
             let mut bucket = start_bucket;
             while bucket <= end_bucket {
                 catalog
@@ -823,7 +812,7 @@ impl ObjectStoreMetadataClient {
                     .entry(bucket)
                     .or_default()
                     .push(path.to_string());
-                bucket += self.time_granularity_nanos;
+                bucket += Self::NANOS_PER_HOUR;
             }
             catalog.version = 2;
 
@@ -1069,46 +1058,6 @@ impl ObjectStoreMetadataClient {
             debug!("Atomically saved {} compaction leases", leases.leases.len());
         })
     }
-
-    /// Maximum unique values per column before skipping inverted index updates
-    const INVERTED_INDEX_CARDINALITY_LIMIT: usize = 10_000;
-
-    fn inverted_index_path(&self, tenant_id: &str) -> Path {
-        Path::from(format!(
-            "{}indexes/{}/inverted.json",
-            self.config.metadata_prefix, tenant_id
-        ))
-    }
-
-    async fn load_inverted_index_with_etag(
-        &self,
-        tenant_id: &str,
-    ) -> Result<(crate::index::inverted::InvertedIndex, String)> {
-        let path = self.inverted_index_path(tenant_id);
-        match self.object_store.get(&path).await {
-            Ok(result) => {
-                let e_tag = result
-                    .meta
-                    .e_tag
-                    .clone()
-                    .unwrap_or_else(|| "no-etag".to_string());
-                let bytes = result
-                    .bytes()
-                    .await
-                    .map_err(|e| Error::Internal(e.to_string()))?;
-                let index: crate::index::inverted::InvertedIndex = serde_json::from_slice(&bytes)
-                    .map_err(|e| {
-                    Error::Internal(format!("Inverted index parse error: {}", e))
-                })?;
-                Ok((index, e_tag))
-            }
-            Err(object_store::Error::NotFound { .. }) => Ok((
-                crate::index::inverted::InvertedIndex::new(),
-                "none".to_string(),
-            )),
-            Err(e) => Err(Error::Internal(e.to_string())),
-        }
-    }
 }
 
 #[async_trait]
@@ -1131,41 +1080,10 @@ impl MetadataClient for ObjectStoreMetadataClient {
         // Load unified catalog (from cache or S3)
         let catalog = self.load_catalog_cached().await?;
 
-        // Try inverted index pre-filter for equality predicates on string columns
-        let eq_predicates: Vec<(String, String)> = predicates
-            .iter()
-            .filter_map(|p| {
-                if let super::predicates::ColumnPredicate::Eq(
-                    column,
-                    super::predicates::PredicateValue::String(value),
-                ) = p
-                {
-                    Some((column.clone(), value.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let inverted_filter: Option<std::collections::HashSet<String>> =
-            if !eq_predicates.is_empty() {
-                match self.query_inverted_index("default", &eq_predicates).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        debug!(
-                            "Inverted index query failed, falling back to full scan: {}",
-                            e
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-        // Find time buckets that overlap with range
-        let start_bucket = self.time_bucket(range.start);
-        let end_bucket = self.time_bucket(range.end);
+        // Find hour buckets that overlap with range
+        let nanos_per_hour = 3_600_000_000_000i64;
+        let start_bucket = (range.start / nanos_per_hour) * nanos_per_hour;
+        let end_bucket = (range.end / nanos_per_hour) * nanos_per_hour;
 
         let mut results = Vec::new();
         let mut pruned_count = 0;
@@ -1177,14 +1095,6 @@ impl MetadataClient for ObjectStoreMetadataClient {
                     continue;
                 }
                 seen.insert(path.clone());
-
-                // Apply inverted index pre-filter if available
-                if let Some(ref allowed) = inverted_filter {
-                    if !allowed.contains(path) {
-                        pruned_count += 1;
-                        continue;
-                    }
-                }
 
                 if let Some(extended) = catalog.chunks.get(path) {
                     let chunk_range =
@@ -1287,7 +1197,8 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 continue;
             }
 
-            let bucket = self.time_bucket(extended.base.min_timestamp);
+            let nanos_per_hour = 3_600_000_000_000i64;
+            let bucket = (extended.base.min_timestamp / nanos_per_hour) * nanos_per_hour;
 
             hour_groups.entry(bucket).or_default().push(path.clone());
         }
@@ -2152,87 +2063,6 @@ impl MetadataClient for ObjectStoreMetadataClient {
         Ok(states
             .values()
             .any(|s| matches!(s.phase, SplitPhase::DualWrite | SplitPhase::Backfill)))
-    }
-
-    async fn update_inverted_index(
-        &self,
-        tenant_id: &str,
-        chunk_path: &str,
-        columns: &[(String, String)],
-    ) -> Result<()> {
-        if columns.is_empty() {
-            return Ok(());
-        }
-        let tenant_id = tenant_id.to_string();
-        let chunk_path = chunk_path.to_string();
-        let columns = columns.to_vec();
-
-        cas_retry!({
-            let (mut index, etag) = self.load_inverted_index_with_etag(&tenant_id).await?;
-
-            // Skip columns at cardinality limit
-            let to_add: Vec<(String, String)> = columns
-                .iter()
-                .filter(|(col, _)| {
-                    !index.at_cardinality_limit(col, Self::INVERTED_INDEX_CARDINALITY_LIMIT)
-                })
-                .cloned()
-                .collect();
-
-            if to_add.is_empty() {
-                return Ok(());
-            }
-
-            index.add_chunk(&chunk_path, &to_add);
-
-            let bytes = serde_json::to_vec(&index)
-                .map_err(|e| Error::Internal(format!("Serialize inverted index: {}", e)))?;
-
-            self.put_with_cas(
-                &self.inverted_index_path(&tenant_id),
-                PutPayload::from(bytes),
-                &etag,
-                "inverted index",
-            )
-            .await?;
-
-            Ok(())
-        })
-    }
-
-    async fn remove_from_inverted_index(&self, tenant_id: &str, chunk_path: &str) -> Result<()> {
-        let tenant_id = tenant_id.to_string();
-        let chunk_path = chunk_path.to_string();
-
-        cas_retry!({
-            let (mut index, etag) = self.load_inverted_index_with_etag(&tenant_id).await?;
-            index.remove_chunk(&chunk_path);
-
-            let bytes = serde_json::to_vec(&index)
-                .map_err(|e| Error::Internal(format!("Serialize inverted index: {}", e)))?;
-
-            self.put_with_cas(
-                &self.inverted_index_path(&tenant_id),
-                PutPayload::from(bytes),
-                &etag,
-                "inverted index",
-            )
-            .await?;
-
-            Ok(())
-        })
-    }
-
-    async fn query_inverted_index(
-        &self,
-        tenant_id: &str,
-        predicates: &[(String, String)],
-    ) -> Result<Option<std::collections::HashSet<String>>> {
-        if predicates.is_empty() {
-            return Ok(None);
-        }
-        let (index, _) = self.load_inverted_index_with_etag(tenant_id).await?;
-        Ok(index.query(predicates))
     }
 }
 

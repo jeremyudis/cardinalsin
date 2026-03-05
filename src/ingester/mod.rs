@@ -448,70 +448,7 @@ impl Ingester {
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
-        // Update inverted index with label column values
-        self.update_inverted_index_for_batch(&path, batch).await;
-
         Ok(())
-    }
-
-    /// Extract label column->value pairs from a batch and update the inverted index.
-    /// Non-fatal: inverted index is a performance optimization.
-    async fn update_inverted_index_for_batch(&self, chunk_path: &str, batch: &RecordBatch) {
-        let col_val_pairs = Self::extract_label_pairs(batch);
-        if col_val_pairs.is_empty() {
-            return;
-        }
-        if let Err(e) = self
-            .metadata
-            .update_inverted_index(&self.storage_config.tenant_id, chunk_path, &col_val_pairs)
-            .await
-        {
-            warn!("Failed to update inverted index: {}", e);
-        }
-    }
-
-    /// Extract unique (column, value) pairs for string label columns from a batch.
-    fn extract_label_pairs(batch: &RecordBatch) -> Vec<(String, String)> {
-        use arrow_array::Array;
-        let mut pairs = Vec::new();
-        for field in batch.schema().fields() {
-            let name = field.name().as_str();
-            if matches!(
-                name,
-                "timestamp"
-                    | "value_f64"
-                    | "value_i64"
-                    | "value_u64"
-                    | "sample_count"
-                    | "metric_name"
-            ) {
-                continue;
-            }
-            if !matches!(
-                field.data_type(),
-                arrow_schema::DataType::Utf8 | arrow_schema::DataType::LargeUtf8
-            ) {
-                continue;
-            }
-            if let Ok(col_idx) = batch.schema().index_of(name) {
-                if let Some(arr) = batch
-                    .column(col_idx)
-                    .as_any()
-                    .downcast_ref::<arrow_array::StringArray>()
-                {
-                    let mut seen = std::collections::HashSet::new();
-                    for i in 0..arr.len() {
-                        if !arr.is_null(i) {
-                            seen.insert(arr.value(i).to_string());
-                        }
-                    }
-                    for val in seen {
-                        pairs.push((name.to_string(), val));
-                    }
-                }
-            }
-        }
-        pairs
     }
 
     /// Split a batch by key range (based on timestamp split point)
@@ -729,9 +666,6 @@ impl Ingester {
             size_bytes: parquet_size,
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
-
-        // Update inverted index with label column values
-        self.update_inverted_index_for_batch(&path, &combined).await;
 
         // Broadcast to streaming query subscribers (legacy)
         if let Err(e) = self.broadcast.send(combined.clone()) {
