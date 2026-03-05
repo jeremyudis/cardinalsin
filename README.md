@@ -7,7 +7,7 @@ A Rust-based, serverless time-series database built on object storage (S3/GCS/Az
 ## Key Innovations
 
 - **Columnar storage** eliminates series-set explosion (no per-tag-combination indexing)
-- **Zero-disk architecture** with stateless compute nodes
+- **Object-storage-first architecture** with stateless compute nodes and WAL-backed ingest durability
 - **3-tier caching** (RAM → NVMe → S3) for cost-efficient performance
 - **Adaptive indexing** automatically promotes hot dimensions based on query patterns
 - **Dynamic sharding** with zero-downtime shard splitting and hot shard rebalancing
@@ -23,7 +23,7 @@ A Rust-based, serverless time-series database built on object storage (S3/GCS/Az
 │                              Control Plane                                   │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐              │
 │  │  Metadata Store │  │  Schema Registry│  │  Coordinator    │              │
-│  │  (FoundationDB) │  │                 │  │  (Assignment)   │              │
+│  │  (S3 + ETags)   │  │                 │  │  (Assignment)   │              │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘              │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -34,7 +34,7 @@ A Rust-based, serverless time-series database built on object storage (S3/GCS/Az
 │  (Stateless Rust)   │  │  (Stateless Rust)   │  │  (Stateless Rust)   │
 │                     │  │                     │  │                     │
 │  - Batch writes     │  │  - DataFusion       │  │  - Merge small files│
-│  - Buffer in memory │  │  - Arrow Flight     │  │  - Downsample old   │
+│  - WAL + mem buffer │  │  - Arrow Flight     │  │  - Downsample old   │
 │  - Flush to S3      │  │  - NVMe cache       │  │  - Garbage collect  │
 └─────────────────────┘  └─────────────────────┘  └─────────────────────┘
           │                       │                        │
@@ -48,17 +48,17 @@ A Rust-based, serverless time-series database built on object storage (S3/GCS/Az
 │         chunk_00001.parquet   (time-sorted, columnar)                       │
 │     /indexes/                                                                │
 │       bloom_filters.bin       (per-chunk bloom filters)                     │
-│     /wal/                                                                   │
-│       pending_00001.arrow     (unflushed batches)                           │
+│     /metadata/                                                               │
+│       catalog.json           (single-file CAS metadata catalog)             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Component | Responsibility | Scaling |
 |-----------|---------------|---------|
-| **Ingester** | Buffer writes, batch to Parquet, flush to S3 | Horizontal by write volume |
+| **Ingester** | Append WAL, buffer writes, batch to Parquet, flush to S3 | Horizontal by write volume |
 | **Query Node** | Execute queries via DataFusion, manage cache | Horizontal by query load |
 | **Compactor** | Merge files, downsample, enforce retention | 1-3 per tenant typically |
-| **Metadata Store** | Track files, schemas, assignments | FoundationDB / S3 (MVP) |
+| **Metadata Store** | Track files, schemas, assignments | S3 catalog with ETag CAS (`local` backend in dev) |
 
 ---
 
@@ -238,7 +238,7 @@ ws.onmessage = (event) => console.log(JSON.parse(event.data));
 
 ## Write Path
 
-All ingestion protocols converge to a unified path: receive metrics → buffer in memory → batch to Parquet → flush to S3 → register metadata atomically.
+All ingestion protocols converge to a unified path: receive metrics → append to WAL → buffer in memory → batch to Parquet → flush to S3 → update metadata catalog atomically.
 
 ```
 Client (OTLP/Prometheus/Flight)
@@ -246,18 +246,20 @@ Client (OTLP/Prometheus/Flight)
     ▼
 ┌──────────────────────────────────────────────────────────┐
 │                       Ingester                            │
-│  Write Buffer (in-memory) → Arrow Batch → Parquet Writer │
+│  WAL Append → Write Buffer → Arrow Batch → Parquet Writer │
 └──────────────────────────┬───────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────┐
 │                          S3                               │
-│  1. PUT pending/batch_{id}.parquet                        │
-│  2. Update metadata (atomic via ETags / FoundationDB)     │
-│  3. ACK to client                                         │
+│  1. PUT data/.../chunk_{id}.parquet                       │
+│  2. Update metadata/catalog.json (atomic via ETags)       │
+│  3. Truncate WAL up to flushed sequence                   │
 │  4. Broadcast to streaming query subscribers              │
 └──────────────────────────────────────────────────────────┘
 ```
+
+Write ACK happens after WAL append + buffer enqueue (before flush).
 
 **Flush triggers** (whichever comes first):
 - **Time**: 5 minutes (background timer)
@@ -345,14 +347,6 @@ Hybrid compaction strategy inspired by Datadog Husky — lazy compaction reduces
 | **L1** | Leveled | 2 GB | After L0 compaction |
 | **L2** | Leveled | 10 GB | After L1 compaction |
 | **L3** | Leveled | 50 GB | After L2 compaction |
-
-**Why 5-minute write granularity:**
-
-| Granularity | Files/Day | Query Slowdown | Latency to Query |
-|-------------|-----------|----------------|------------------|
-| 1-minute | 1,440 | 34x slower | ~1 min |
-| **5-minute** | **288** | **Baseline** | **~5 min** |
-| Hourly | 24 | Best | ~60 min |
 
 ---
 
@@ -466,7 +460,7 @@ cardinalsin/
 │   ├── adaptive_index/            # Automatic index management
 │   ├── sharding/                  # Dynamic shard splitting
 │   ├── cluster/                   # Cluster coordination
-│   ├── metadata/                  # S3/FoundationDB metadata layer
+│   ├── metadata/                  # local + object-store metadata layer (S3 catalog CAS)
 │   └── schema/                    # Arrow schema definitions
 ├── tests/                         # 38 integration tests
 ├── benches/                       # Write throughput & query latency benchmarks
