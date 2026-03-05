@@ -26,6 +26,7 @@ pub mod clock;
 pub mod cluster;
 pub mod compactor;
 pub mod config;
+pub mod index;
 pub mod ingester;
 pub mod metadata;
 pub mod query;

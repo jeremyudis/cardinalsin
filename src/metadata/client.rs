@@ -179,6 +179,32 @@ pub trait MetadataClient: Send + Sync {
         Ok(0)
     }
 
+    /// Add a chunk's column->value pairs to the inverted index.
+    /// Default no-op for backward compatibility.
+    async fn update_inverted_index(
+        &self,
+        _tenant_id: &str,
+        _chunk_path: &str,
+        _columns: &[(String, String)],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Remove a chunk from the inverted index (called during compaction cleanup).
+    async fn remove_from_inverted_index(&self, _tenant_id: &str, _chunk_path: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Query the inverted index for equality predicates.
+    /// Returns None if the index is unavailable (caller falls back to full scan).
+    async fn query_inverted_index(
+        &self,
+        _tenant_id: &str,
+        _predicates: &[(String, String)],
+    ) -> Result<Option<std::collections::HashSet<String>>> {
+        Ok(None)
+    }
+
     /// Check if any shard split is currently in dual-write or backfill phase.
     ///
     /// Used by the query engine to enable deduplication when overlapping
