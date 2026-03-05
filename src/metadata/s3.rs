@@ -1080,6 +1080,40 @@ impl ObjectStoreMetadataClient {
         ))
     }
 
+    fn adaptive_index_records_path(&self, tenant_id: &str) -> Path {
+        Path::from(format!(
+            "{}adaptive_indexes/{}/records.json",
+            self.config.metadata_prefix, tenant_id
+        ))
+    }
+
+    async fn load_index_records_with_etag(
+        &self,
+        tenant_id: &str,
+    ) -> Result<(Vec<crate::adaptive_index::IndexRecord>, String)> {
+        let path = self.adaptive_index_records_path(tenant_id);
+        match self.object_store.get(&path).await {
+            Ok(result) => {
+                let e_tag = result
+                    .meta
+                    .e_tag
+                    .clone()
+                    .unwrap_or_else(|| "no-etag".to_string());
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::Internal(e.to_string()))?;
+                let records: Vec<crate::adaptive_index::IndexRecord> =
+                    serde_json::from_slice(&bytes).map_err(|e| {
+                        Error::Internal(format!("Adaptive index records parse error: {}", e))
+                    })?;
+                Ok((records, e_tag))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok((vec![], "none".to_string())),
+            Err(e) => Err(Error::Internal(e.to_string())),
+        }
+    }
+
     async fn load_inverted_index_with_etag(
         &self,
         tenant_id: &str,
@@ -2152,6 +2186,43 @@ impl MetadataClient for ObjectStoreMetadataClient {
         Ok(states
             .values()
             .any(|s| matches!(s.phase, SplitPhase::DualWrite | SplitPhase::Backfill)))
+    }
+
+    async fn save_index_record(&self, record: &crate::adaptive_index::IndexRecord) -> Result<()> {
+        let tenant_id = record.tenant_id.clone();
+        let record = record.clone();
+
+        cas_retry!({
+            let (mut records, etag) = self.load_index_records_with_etag(&tenant_id).await?;
+
+            // Upsert by id
+            if let Some(existing) = records.iter_mut().find(|r| r.id == record.id) {
+                *existing = record.clone();
+            } else {
+                records.push(record.clone());
+            }
+
+            let bytes = serde_json::to_vec(&records)
+                .map_err(|e| Error::Internal(format!("Serialize index records: {}", e)))?;
+
+            self.put_with_cas(
+                &self.adaptive_index_records_path(&tenant_id),
+                PutPayload::from(bytes),
+                &etag,
+                "adaptive index records",
+            )
+            .await?;
+
+            Ok(())
+        })
+    }
+
+    async fn load_index_records(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<crate::adaptive_index::IndexRecord>> {
+        let (records, _) = self.load_index_records_with_etag(tenant_id).await?;
+        Ok(records)
     }
 
     async fn update_inverted_index(

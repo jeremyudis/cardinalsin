@@ -205,6 +205,19 @@ pub trait MetadataClient: Send + Sync {
         Ok(None)
     }
 
+    /// Persist an adaptive index record to durable storage.
+    async fn save_index_record(&self, _record: &crate::adaptive_index::IndexRecord) -> Result<()> {
+        Ok(())
+    }
+
+    /// Load all index records for a tenant.
+    async fn load_index_records(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<Vec<crate::adaptive_index::IndexRecord>> {
+        Ok(vec![])
+    }
+
     /// Check if any shard split is currently in dual-write or backfill phase.
     ///
     /// Used by the query engine to enable deduplication when overlapping

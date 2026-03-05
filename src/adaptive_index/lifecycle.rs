@@ -1,10 +1,12 @@
 //! Index lifecycle management (Invisible → Visible → Deprecated)
 
-use super::{AdaptiveIndexConfig, IndexRecommendation, IndexType, TenantId};
+use super::{AdaptiveIndexConfig, IndexRecommendation, IndexRecord, IndexType, TenantId};
+use crate::metadata::MetadataClient;
 use crate::Result;
 use dashmap::DashMap;
+use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Index visibility state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,14 +36,91 @@ pub struct IndexMetadata {
 pub struct IndexLifecycleManager {
     config: AdaptiveIndexConfig,
     indexes: DashMap<String, IndexMetadata>,
+    /// Optional metadata client for durable persistence
+    metadata: Option<Arc<dyn MetadataClient>>,
 }
 
 impl IndexLifecycleManager {
-    /// Create a new lifecycle manager
+    /// Create a new lifecycle manager (in-memory only, for backward compat)
     pub fn new(config: AdaptiveIndexConfig) -> Self {
         Self {
             config,
             indexes: DashMap::new(),
+            metadata: None,
+        }
+    }
+
+    /// Create a lifecycle manager with durable persistence
+    pub fn with_metadata(config: AdaptiveIndexConfig, metadata: Arc<dyn MetadataClient>) -> Self {
+        Self {
+            config,
+            indexes: DashMap::new(),
+            metadata: Some(metadata),
+        }
+    }
+
+    /// Bootstrap index state from storage on startup
+    pub async fn bootstrap_from_storage(&self, tenant_id: &str) -> Result<usize> {
+        let metadata = match &self.metadata {
+            Some(m) => m,
+            None => return Ok(0),
+        };
+
+        let records = metadata.load_index_records(tenant_id).await?;
+        let count = records.len();
+
+        for record in records {
+            let visibility = match record.visibility.as_str() {
+                "visible" => IndexVisibility::Visible,
+                "deprecated" => IndexVisibility::Deprecated,
+                _ => IndexVisibility::Invisible,
+            };
+
+            let meta = IndexMetadata {
+                id: record.id.clone(),
+                tenant_id: record.tenant_id,
+                column_name: record.column_name,
+                visibility,
+                created_at: Instant::now(), // Approximation; exact time is in record.created_at_secs
+                last_used: None,
+                usage_count: record.usage_count,
+                would_have_helped: record.would_have_helped,
+            };
+
+            self.indexes.insert(record.id, meta);
+        }
+
+        info!(tenant = %tenant_id, count, "Bootstrapped adaptive indexes from storage");
+        Ok(count)
+    }
+
+    /// Persist an index entry to storage (best-effort; logs on failure)
+    async fn persist_record(&self, index: &IndexMetadata, index_type_str: &str) {
+        let metadata = match &self.metadata {
+            Some(m) => m,
+            None => return,
+        };
+
+        let visibility_str = match index.visibility {
+            IndexVisibility::Invisible => "invisible",
+            IndexVisibility::Visible => "visible",
+            IndexVisibility::Deprecated => "deprecated",
+        };
+
+        let record = IndexRecord {
+            id: index.id.clone(),
+            tenant_id: index.tenant_id.clone(),
+            column_name: index.column_name.clone(),
+            index_type: index_type_str.to_string(),
+            visibility: visibility_str.to_string(),
+            would_have_helped: index.would_have_helped,
+            usage_count: index.usage_count,
+            created_at_secs: chrono::Utc::now().timestamp(),
+            last_used_secs: None,
+        };
+
+        if let Err(e) = metadata.save_index_record(&record).await {
+            warn!(index_id = %index.id, error = %e, "Failed to persist adaptive index record");
         }
     }
 
@@ -60,11 +139,11 @@ impl IndexLifecycleManager {
         &self,
         tenant_id: TenantId,
         column_name: String,
-        _index_type: IndexType,
+        index_type: IndexType,
     ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
 
-        let metadata = IndexMetadata {
+        let index_meta = IndexMetadata {
             id: id.clone(),
             tenant_id,
             column_name,
@@ -75,7 +154,15 @@ impl IndexLifecycleManager {
             would_have_helped: 0,
         };
 
-        self.indexes.insert(id.clone(), metadata);
+        self.indexes.insert(id.clone(), index_meta.clone());
+
+        let type_str = match index_type {
+            IndexType::Inverted => "inverted",
+            IndexType::Range => "range",
+            IndexType::BloomFilter => "bloom",
+            IndexType::Dictionary => "dictionary",
+        };
+        self.persist_record(&index_meta, type_str).await;
 
         debug!(index_id = %id, "Created invisible index");
 
@@ -117,6 +204,7 @@ impl IndexLifecycleManager {
     /// Check if an invisible index should be promoted to visible
     pub async fn visibility_check(&self, index_id: &str) -> Result<bool> {
         let mut should_promote = false;
+        let mut promoted_meta: Option<IndexMetadata> = None;
 
         if let Some(mut entry) = self.indexes.get_mut(index_id) {
             if entry.visibility != IndexVisibility::Invisible {
@@ -127,12 +215,18 @@ impl IndexLifecycleManager {
             if entry.would_have_helped >= 100 {
                 entry.visibility = IndexVisibility::Visible;
                 should_promote = true;
+                promoted_meta = Some(entry.clone());
             } else if entry.created_at.elapsed() > self.config.visibility_check_delay {
                 // Index didn't help, remove it
                 drop(entry);
                 self.indexes.remove(index_id);
                 return Ok(false);
             }
+        }
+
+        // Persist the promotion outside the DashMap lock
+        if let Some(meta) = promoted_meta {
+            self.persist_record(&meta, "inverted").await;
         }
 
         Ok(should_promote)
