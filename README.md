@@ -61,24 +61,22 @@ A Rust-based, serverless time-series database built on object storage (S3/GCS/Az
 
 ---
 
-## The Problem & Our Solution
-
 ### Traditional TSDBs (Prometheus, InfluxDB v1)
 
 ```
-series_id -> {metric="cpu", host="server1", pod="abc123"}
+series_id -> {metric="cpu", service="service1", pod="abc123"}
              Creates inverted index entry for EVERY unique combination
-             1M hosts × 100 pods = 100M index entries (EXPLOSION)
+             1M pods × 100 services = 100M index entries (EXPLOSION)
 ```
 
 ### CardinalSin Approach (ClickHouse/IOx-style)
 
 ```
-| timestamp | metric | host    | pod     | value |
+| timestamp | metric | serice    | pod     | value |
 |-----------|--------|---------|---------|-------|
-| 12345     | cpu    | server1 | abc123  | 0.85  |
+| 12345     | cpu    | service1 | abc123  | 0.85  |
 
-Each label is a column. High-cardinality columns (pod) are NOT indexed.
+Each label/tag is a column. High-cardinality columns (pod) are NOT indexed.
 Queries use columnar scans with predicate pushdown. No cardinality explosion.
 ```
 
