@@ -162,17 +162,9 @@ Dual-publish parity check:
 scripts/telemetry/compare_dual_publish.sh --mode all --run-id "run-20260222T190000Z"
 ```
 
-### Real-Time Observability Dogfooding
-
-```bash
-RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)"
-scripts/telemetry/run_mixed_workload.sh --duration 30m --run-id "$RUN_ID"
-scripts/telemetry/run_query_pack.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/query-pack"
-scripts/telemetry/compare_dual_publish.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/parity"
-```
-
-Operator runbook: `docs/observability-dogfooding-runbook.md`
-Script reference: `docs/telemetry/mixed-workload-runner.md`
+For the full observability dogfooding workflow, see:
+- `docs/observability-dogfooding-runbook.md`
+- `docs/telemetry/mixed-workload-runner.md`
 
 ## Telemetry Contract
 

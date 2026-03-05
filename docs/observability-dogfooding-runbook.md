@@ -15,6 +15,15 @@ This runbook covers the full operator loop for CardinalSin self-observability:
 - `curl` and `jq`
 - open ports `3000`, `8080`, `8081`, `4317`, `4318`, `8815`, `9000`, `9001`, `9090`, `13133`
 
+## Quick Flow (TL;DR)
+
+```bash
+RUN_ID="run-$(date -u +%Y%m%dT%H%M%SZ)"
+scripts/telemetry/run_mixed_workload.sh --duration 30m --run-id "$RUN_ID"
+scripts/telemetry/run_query_pack.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/query-pack"
+scripts/telemetry/compare_dual_publish.sh --mode all --run-id "$RUN_ID" --out-dir "benchmarks/results/$RUN_ID/parity"
+```
+
 ## Signal Map (Step -> Dashboard -> Queries)
 
 | Step | Primary dashboard(s) | Query pack signals |
