@@ -261,8 +261,8 @@ Write ACK happens after WAL append + buffer enqueue (before flush).
 - ZSTD level 3 compression (good ratio, fast)
 - Dictionary encoding for low-cardinality columns
 - `DELTA_BINARY_PACKED` for timestamps (delta-of-delta)
-- Bloom filters for equality predicates (1% FPP)
-- Row group statistics for predicate pushdown
+- Bloom filters on label columns for equality predicates (1% FPP)
+- Row group statistics for predicate pushdown (`EnabledStatistics::Page`)
 
 ---
 
@@ -285,16 +285,28 @@ Client (SQL/PromQL)
 ```
 
 **Query optimization flow:**
-1. **Time index pruning** — metadata query returns only chunks in time range (eliminates 99%+ of data)
-2. **Row group statistics** — skip row groups via min/max on filtered columns (~90% reduction)
-3. **Bloom filters** — confirm values might exist in row group (fast negative lookup)
-4. **Columnar scan** — SIMD-accelerated comparison on remaining data
+1. **Time index pruning** — metadata catalog returns only chunks whose hour-buckets overlap the query time range (eliminates 99%+ of data)
+2. **Column statistics (zone maps)** — per-row-group min/max stats extracted from Parquet metadata enable DataFusion to skip row groups that cannot match filter predicates
+3. **Bloom filters** — when enabled for label columns, provides fast negative lookups for equality predicates
+4. **Columnar scan** — SIMD-accelerated comparison on remaining data via DataFusion/Arrow
+
+### Query Optimization Status
+
+| Technique | Status | Details |
+|-----------|--------|---------|
+| Time-range chunk pruning | Live | Hour-bucket index in metadata catalog |
+| Parquet row-group statistics | Live | `EnabledStatistics::Page`; `extract_column_stats()` reads stats back after write |
+| Dictionary encoding | Live | Enabled for all columns; high-cardinality falls back to plain |
+| DataFusion predicate pushdown | Live | Automatic via Parquet page statistics |
+| Bloom filters (label columns) | Live | 1% FPP on `metric_name`, `host`, `region`, `env`, `service`, `job`, `instance` |
+| Inverted index | In progress | Per-chunk posting lists for low-cardinality label columns |
+| Adaptive index persistence | In progress | Currently in-memory only; durable persistence being added |
 
 ---
 
 ## Adaptive Indexing (WIP)
 
-The adaptive indexing system is under active development and automatically detects per-tenant query patterns to promote frequently-filtered dimensions to dedicated indexed columns.
+The adaptive indexing system automatically detects per-tenant query patterns to promote frequently-filtered dimensions to dedicated indexed columns. The recommendation engine and lifecycle management are implemented; durable persistence of index state is in progress.
 
 **Lifecycle:** `Invisible → Visible → Deprecated`
 
