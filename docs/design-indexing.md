@@ -221,7 +221,14 @@ chunks/
   {chunk_id}.idx          # Index sidecar
 ```
 
-Co-location ensures atomic lifecycle — when a chunk is deleted (compaction cleanup), its index is deleted too. No orphaned indexes.
+Co-location simplifies lifecycle management — when a chunk is deleted (compaction cleanup), its index should be deleted too. However, since S3 objects are deleted independently, a partial failure during cleanup can leave orphan sidecars (`.idx` without a corresponding `.parquet`) or missing sidecars (`.parquet` without `.idx`).
+
+**Garbage collection**: The compactor's cleanup phase must reconcile both objects:
+1. List all `.idx` files in the chunk prefix
+2. For each `.idx`, verify the corresponding `.parquet` exists in metadata; delete orphans
+3. For chunks without sidecars, flag for sidecar rebuild during next compaction
+
+This GC runs as part of the existing `cleanup_completed_jobs` flow. Orphan sidecars are harmless (they waste storage but don't affect correctness), so GC can run at low priority.
 
 ### 3.2 Index Sidecar Binary Format
 
@@ -459,14 +466,20 @@ SQL → parse → extract_filter_columns
       → fetch global.idx (cached)
       → FST lookup: col=val → roaring bitmap of chunk IDs
       → intersect bitmaps across predicates (AND)
-      → result: pruned chunk set
-  → for non-indexed columns:
+      → result: indexed_chunk_set
+  → union with non-indexed chunks (L0 / recently flushed):
+      → metadata.get_chunks(time_range) returns all chunks
+      → chunks NOT in global.idx chunk ID table are "unindexed"
+      → final_chunk_set = indexed_chunk_set ∪ unindexed_chunks
+  → for non-indexed columns on final_chunk_set:
       → fall back to zone map pruning (existing ColumnStats path)
   → register only matching chunks with DataFusion
   → DataFusion executes with Parquet-native pushdown on remaining data
 ```
 
-This extends the existing `get_chunks_with_predicates` method — the inverted index narrows the chunk set before zone map evaluation.
+**Important**: The global index is rebuilt during compaction, not ingestion. Newly flushed L0 chunks are absent from `global.idx` until the next compaction cycle. To avoid false negatives (missing fresh data), the query path must union in any chunks not present in the global index's chunk ID table. These unindexed chunks fall through to zone map pruning, which is the existing behavior. As chunks are compacted and the global index is rebuilt, they move from the "unindexed" path to the fast indexed path.
+
+This extends the existing `get_chunks_with_predicates` method — the inverted index narrows the chunk set before zone map evaluation, while unindexed chunks are handled by the existing fallback.
 
 ### 6.3 AdaptiveIndexController Integration
 
