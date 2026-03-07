@@ -405,6 +405,26 @@ When segment count for a shard exceeds 10, the compactor runs a tiered merge:
 
 This is triggered as a low-priority background task within `run_compaction_cycle()`, after main leveled compaction.
 
+### 4.6 LSM-Style Merge-Tree Optimization Path (Future)
+
+The baseline policy above is intentionally simple for Phase 1. Future iterations can keep the same correctness model (immutable segments + CAS manifests) while adopting more LSM-style merge mechanics for higher sustained throughput.
+
+**Invariants to keep**:
+1. Segment publication remains immutable and manifest-driven
+2. Query correctness must not depend on successful index merge (fallback still valid)
+3. Split protocol integration continues to use `generation` + `frozen` manifest fields
+
+**Planned optimizations**:
+1. **Leveled run sizing**: Move from fixed "count >10" trigger to size-tiered levels (for example 10x level ratio) to bound read amplification and merge churn.
+2. **Streaming k-way term merge**: Keep terms lexicographically sorted in each segment, then merge multiple segments with iterator-style term walkers instead of loading full dictionaries into memory.
+3. **Stable chunk identity for merge-time dedupe**: Add optional `chunk_uid` (stable hash/id) in segment metadata for dedupe and conflict resolution during merge; keep roaring postings on dense segment-local ordinals for query efficiency.
+4. **Sparse term-offset memory index**: Load only term-offset metadata into RAM, mmap section payloads, and lazily hydrate postings to reduce heap pressure during large merges.
+
+**Activation criteria**:
+1. `index_segments_per_shard` regularly exceeds 100 for production shards
+2. `index_segment_build_duration_seconds` merge buckets dominate compactor time
+3. Query planner latency regresses due to high segment fan-out despite pruning effectiveness
+
 ---
 
 ## 5. Rust Crate Selection
@@ -705,11 +725,26 @@ This aligns with the existing `IndexRecommendationEngine` thresholds, with the a
 
 **Deliverable**: Index state persists across restarts. Ingester can optionally accelerate queries on fresh L0 data.
 
-### Phase 4: Segment Merge Optimization + Pre-Aggregation (Future)
+### Phase 4: LSM-Style Merge Optimization + Pre-Aggregation (Future)
 
-**Goal**: Long-running shards with thousands of segments. Star-tree pre-aggregation for dashboard queries.
+**Goal**: Long-running shards with high segment fan-out. Add LSM-style merge improvements before introducing star-tree pre-aggregation.
 
-**Deferred**: Not started until Phase 1-3 are in production and segment proliferation is empirically observed.
+**Changes**:
+- `src/index/merge_planner.rs` (new): Level-aware merge selection by size ratio and compaction budget
+- `src/index/segment.rs`: Streaming k-way term merge path for inverted sections
+- `src/index/manifest.rs`: Optional merge budget/accounting fields (for observability only)
+- `src/metadata/models.rs` (or index metadata equivalent): Optional stable `chunk_uid` field for merge-time dedupe
+- `src/index/metrics.rs` (or equivalent): Add merge amplification/read amplification metrics
+
+**Rollout gates**:
+1. Merge throughput improves by at least 2x versus Phase 1 tiered merge on a shard with 500+ segments
+2. Query p95 for equality predicates does not regress under sustained merge load
+3. No correctness regressions in stale/missing/corrupt index fallback tests
+4. Split and recovery behavior remains unchanged (manifest invariants intact)
+
+**Deliverable**: Segment count growth is bounded under sustained ingest, with predictable merge cost and no change to query correctness semantics.
+
+**Deferred**: Pre-aggregation/star-tree stays future work until LSM-style merge optimization is proven in production.
 
 ---
 
@@ -742,6 +777,19 @@ index_segments_per_shard{tenant, shard}
 
 index_segment_merges_total{tenant, shard, result={ok,error}}
   Counter: tiered segment merges performed
+```
+
+**Phase 4 (future) metrics**:
+
+```
+index_merge_write_amplification{tenant, shard}
+  Gauge: bytes written during index merge / bytes of merged input segments
+
+index_merge_read_amplification{tenant, shard}
+  Gauge: number of segments consulted per predicate lookup (post-cache)
+
+index_merge_backlog_segments{tenant, shard, level}
+  Gauge: segments waiting for merge by level
 ```
 
 ---
@@ -794,6 +842,16 @@ The `indexed_through_ns` watermark makes freshness explicit and measurable:
 
 3. **Split safety**: During splits, watermarks can be frozen independently per shard without affecting query correctness.
 
+### Why Segment-Local Ordinals in Phase 1 Instead of Global IDs?
+
+Phase 1 keeps postings on segment-local dense ordinals because:
+
+1. **Compression efficiency**: Roaring performs best with dense `u32` domains.
+2. **Build simplicity**: No distributed ID allocator or cross-node coordination required.
+3. **Failure isolation**: Segment rebuilds stay local and do not require global ID remapping transactions.
+
+Future LSM-style optimization can add stable `chunk_uid` for merge-time dedupe while retaining dense local ordinals for query-time postings.
+
 ### Why Not Revive the Reverted Inverted-Index API?
 
 PR #152 proposed `update_inverted_index`, `query_inverted_index`, and `remove_from_inverted_index` methods. These were reverted in #156. This design does not re-add them because:
@@ -817,3 +875,7 @@ PR #152 proposed `update_inverted_index`, `query_inverted_index`, and `remove_fr
 4. **Multi-tenant index isolation**: Each tenant has independent manifests and segments. Cross-tenant queries (if ever supported) would union multiple shard results. Current design assumes single-tenant queries.
 
 5. **Adaptive column selection**: Phase 3 will add columns to indexes based on adaptive controller recommendations. How should the compactor handle columns that are removed from recommendations (deprecated indexes)?
+
+6. **Stable chunk identity scope**: Should `chunk_uid` be shard-scoped or tenant-scoped once LSM-style merge optimization is enabled?
+
+7. **Merge policy target**: Should leveled merge use strict size ratio (for example 10x) or adaptive budgeting based on compactor backlog?
