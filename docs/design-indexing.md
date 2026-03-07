@@ -1,12 +1,13 @@
-# Design: Production-Grade Indexing Architecture
+# Design: Production-Grade Indexing Architecture (Converged)
 
-| Field       | Value                                    |
-|-------------|------------------------------------------|
-| **Status**  | Draft                                    |
-| **Authors** | CardinalSin Team                         |
-| **Issue**   | gh-157, cardinalsin-vf6                  |
-| **Date**    | 2026-03-05                               |
-| **Refs**    | Adaptive Indexing Epic (gh-134)          |
+| Field       | Value                                           |
+|-------------|------------------------------------------------|
+| **Status**  | Converged (PR #158 + PR #159)                  |
+| **Authors** | CardinalSin Team                                |
+| **Issue**   | gh-157, cardinalsin-vf6                        |
+| **Date**    | 2026-03-05 → 2026-03-07 (converged)            |
+| **Refs**    | Adaptive Indexing Epic (gh-134)                |
+| **Summary** | Shard-scoped immutable index segments with CAS manifests, compactor-first builds, explicit watermark freshness gate, 4-phase rollout. Supersedes separate `design-indexing-next-evolution.md`. |
 
 ---
 
@@ -45,53 +46,34 @@ CardinalSin targets >1B unique time series stored as columnar Parquet on object 
 
 **Purpose**: Given a predicate like `host = 'web-01'`, return the set of chunk IDs containing that value — without scanning metadata.
 
-**Current state**: `BTreeMap<String, BTreeMap<String, Vec<String>>>` stored as JSON.
+**Current state**: No production inverted index. The prior `BTreeMap<String, BTreeMap<String, Vec<String>>>` JSON design was reverted in #156.
 
-**Production approach**: FST term dictionary + roaring bitmap postings.
+**Production approach**: Shard-scoped immutable `.csi` segments (FST term dictionary + roaring bitmap postings) published via CAS-protected manifests.
 
 #### Architecture
 
 ```
-┌─────────────────────────────────────┐
-│         Per-Chunk Sidecar           │
-│  chunks/{chunk_id}.idx              │
-│                                     │
-│  ┌─────────────┐                    │
-│  │ FST (terms) │  metric_name=cpu   │
-│  │             │  host=web-01       │
-│  │             │  region=us-east-1  │
-│  └──────┬──────┘                    │
-│         │ offset into postings      │
-│  ┌──────▼──────┐                    │
-│  │   Roaring   │  row_group bitmap  │
-│  │   Bitmaps   │  (which row groups │
-│  │             │   contain value)   │
-│  └─────────────┘                    │
-└─────────────────────────────────────┘
+{tenant_id}/indexes/
+  shard={shard_id}/
+    manifest.json  (CAS + indexed_through_ns watermark)
+    segments/
+      seg_{uuid}_{level}.csi   (immutable)
 
-┌─────────────────────────────────────┐
-│      Tenant Global Index            │
-│  indexes/{tenant}/global.idx        │
-│                                     │
-│  FST: col=val  →  roaring bitmap    │
-│                    of chunk_ids     │
-│                                     │
-│  Rebuilt during compaction, not     │
-│  during ingestion (immutable once   │
-│  written)                           │
-└─────────────────────────────────────┘
+Each `.csi` segment contains:
+  [chunk ordinal table]
+  [section directory]
+  [inverted section: FST(term -> postings offset) + roaring postings]
 ```
 
-**Per-chunk sidecar** (built at flush time by ingester):
-- FST maps `column_name=value` terms to offsets
-- Roaring bitmaps at those offsets indicate which **row groups** within the chunk contain the value
-- Small: a chunk with 10 columns × 1000 unique values ≈ FST ~50KB + bitmaps ~20KB
+**Compactor-built segments** (Phase 1, production):
+- Compactor builds one segment per compaction output (level-tagged), then CAS-updates `manifest.json`
+- FST maps `column_name=value` terms to postings offsets
+- Roaring postings contain segment-local chunk ordinals, resolved through the segment's chunk ordinal table
+- Query planner unions postings across all manifest-listed segments, then applies watermark fallback for frontier chunks
 
-**Tenant global index** (built during compaction):
-- FST maps `column_name=value` to roaring bitmaps of **chunk IDs** (integer-mapped)
-- Enables chunk pruning before fetching any Parquet files
-- Rebuilt by merging sidecar indexes during compaction — never mutated in place
-- Chunk ID mapping stored in index header (chunk_path → integer ID)
+**Optional ingester-built segments** (Phase 3, future):
+- Ingester may publish single-chunk `.csi` segments to reduce freshness lag
+- Same file format and manifest semantics; no mutable shared index
 
 #### Why FST + Roaring Bitmaps
 
@@ -116,7 +98,7 @@ FST + roaring is the standard for search/TSDB systems because:
 | **InfluxDB IOx** | Parquet + DataFusion catalog | Per-file, DataFusion handles | Per-file |
 | **Quickwit** | FST (Tantivy) | Roaring bitmaps | Per-split (immutable) |
 | **ClickHouse** | Per-granule skip index | Bloom/minmax/set | Per-part |
-| **CardinalSin (proposed)** | FST (`fst` crate) | Roaring bitmaps (`roaring` crate) | Per-chunk + tenant global |
+| **CardinalSin (proposed)** | FST (`fst` crate) | Roaring bitmaps (`roaring` crate) | Per-shard immutable segments + manifest |
 
 VictoriaMetrics uses a global mutable index (mergeset) because it runs as a single process. CardinalSin's stateless query nodes cannot share mutable state, so the Quickwit model (immutable per-segment indexes merged during compaction) is the right fit.
 
@@ -144,10 +126,10 @@ Since CardinalSin's indexes are immutable after construction, the mutability lim
 
 #### Usage
 
-Standalone fuse filters are written as part of the per-chunk sidecar `.idx` file. The adaptive index controller selects columns with cardinality >100K for fuse filter indexing (below that, the inverted index is more useful).
+Standalone fuse filters are written as sections inside shard `.csi` segments. The adaptive index controller selects columns with cardinality >100K for fuse filter indexing (below that, the inverted index is more useful).
 
 ```
-Sidecar .idx file:
+Segment .csi file:
   [header]
   [inverted index section: FST + roaring bitmaps]
   [fuse filter section: per-column Fuse8 filters]
@@ -205,32 +187,67 @@ Pre-aggregation is valuable for dashboard queries that repeatedly aggregate the 
 | Query speedup | 10-100x for matching patterns |
 | Existing alternative | DataFusion's columnar execution + Parquet predicate pushdown already handles medium-scale aggregation efficiently |
 
-**Recommendation**: **Future phase only.** Document the approach but do not implement. The adaptive index controller already tracks `groupby_stats` — when these indicate repeated patterns on compacted data, star-tree construction can be added to the compaction pipeline. The per-chunk sidecar format (section 3) reserves a section type for pre-aggregation data.
+**Recommendation**: **Future phase only.** Document the approach but do not implement. The adaptive index controller already tracks `groupby_stats` — when these indicate repeated patterns on compacted data, star-tree construction can be added to the compaction pipeline. The `.csi` segment format (section 3) reserves a section type for pre-aggregation data.
 
 ---
 
-## 3. Storage Model
+## 3. Storage Model — Shard-Scoped Index Segments
 
-### 3.1 Per-Chunk Sidecar Files
+### 3.1 Storage Layout
 
-Each chunk's index data is stored alongside the Parquet file:
+Index data is organized per-shard with an immutable segment model:
 
 ```
-chunks/
-  {chunk_id}.parquet      # Data
-  {chunk_id}.idx          # Index sidecar
+{tenant_id}/indexes/
+  shard={shard_id}/
+    manifest.json           # CAS-protected via ETag
+    segments/
+      seg_{uuid}_{level}.csi    # Immutable index segment (same .csi format as section 3.3)
 ```
 
-Co-location simplifies lifecycle management — when a chunk is deleted (compaction cleanup), its index should be deleted too. However, since S3 objects are deleted independently, a partial failure during cleanup can leave orphan sidecars (`.idx` without a corresponding `.parquet`) or missing sidecars (`.parquet` without `.idx`).
+This structure replaces both the per-chunk sidecar approach and tenant-global index from the earlier proposal. The shard-scoped design offers:
 
-**Garbage collection**: The compactor's cleanup phase must reconcile both objects:
-1. List all `.idx` files in the chunk prefix
-2. For each `.idx`, verify the corresponding `.parquet` exists in metadata; delete orphans
-3. For chunks without sidecars, flag for sidecar rebuild during next compaction
+1. **Failure isolation**: A corrupt segment only affects one shard, not the entire tenant
+2. **Compaction alignment**: Segments are built during leveled compaction (L0→L1→L2→L3), one per compaction output
+3. **Split integration**: During shard splits, each new shard gets its own empty manifests and segment directories
+4. **Scalability**: Segment count per shard is bounded by a tiered merge policy (max 10 segments before merging smaller ones)
 
-This GC runs as part of the existing `cleanup_completed_jobs` flow. Orphan sidecars are harmless (they waste storage but don't affect correctness), so GC can run at low priority.
+### 3.2 Manifest Schema
 
-### 3.2 Index Sidecar Binary Format
+```json
+{
+  "version": 1,
+  "shard_id": "shard-abc123",
+  "generation": 42,
+  "indexed_through_ns": 1709654400000000000,
+  "segments": [
+    {
+      "path": "seg_550e8400_L1.csi",
+      "min_time_ns": 1709640000000000000,
+      "max_time_ns": 1709654400000000000,
+      "chunk_count": 15,
+      "level": 1,
+      "size_bytes": 524288,
+      "created_at": "2026-03-05T12:00:00Z"
+    }
+  ],
+  "frozen": false,
+  "etag": ""
+}
+```
+
+**Critical fields**:
+
+- `generation`: Must match `ShardMetadata.generation` to prevent stale manifests during shard splits. Query nodes check this invariant.
+- `indexed_through_ns`: Nanosecond timestamp watermark. Chunks with `max_timestamp > indexed_through_ns` are "frontier" chunks and must be scanned via fallback (zone maps). This watermark advances only when a segment is successfully published.
+- `frozen`: Set to `true` during shard split phases (Preparation through Backfill). Compactor skips index builds for frozen manifests. Unfrozen during Cutover.
+- `segments[].level`: Corresponds to compaction level, used for tiered segment merge decisions.
+
+**Update semantics**: All updates to the manifest use compare-and-swap via the existing ETag-based CAS pattern from `src/metadata/s3.rs`.
+
+### 3.3 Segment Binary Format (`.csi`)
+
+All segments (whether built by compactor or, in Phase 3, by ingester) use the same `.csi` format:
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -239,11 +256,19 @@ This GC runs as part of the existing `cleanup_completed_jobs` flow. Orphan sidec
 │ Flags: u16 (reserved)                        │
 │ Section count: u32                           │
 ├──────────────────────────────────────────────┤
+│ Chunk Ordinal Table:                         │
+│   Count: u32                                 │
+│   Entries (repeated):                        │
+│     Ordinal: u32                             │
+│     Chunk path length: u16                   │
+│     Chunk path: UTF-8 bytes                  │
+├──────────────────────────────────────────────┤
 │ Section Directory (repeated per section):    │
 │   Type: u8                                   │
 │     0x01 = Inverted Index (FST + Roaring)    │
-│     0x02 = Fuse Filter                       │
-│     0x03 = Pre-Aggregation (reserved)        │
+│     0x02 = Fuse Filter (Phase 2)             │
+│     0x03 = Value Dictionary (Phase 2)        │
+│     0x04 = Pre-Aggregation (reserved)        │
 │   Column name length: u16                    │
 │   Column name: UTF-8 bytes                   │
 │   Offset: u64 (from file start)              │
@@ -257,11 +282,13 @@ This GC runs as part of the existing `cleanup_completed_jobs` flow. Orphan sidec
 │   Roaring bitmap count: u32                  │
 │   Roaring bitmaps (serialized sequentially)  │
 │                                              │
-│ [Fuse Filter Section]                        │
-│   Column name length: u16                    │
-│   Column name: UTF-8                         │
+│ [Fuse Filter Section - Phase 2]              │
 │   Filter type: u8 (0x01=Fuse8, 0x02=Fuse16) │
 │   Filter bytes (xorf serialization)          │
+│                                              │
+│ [Value Dictionary Section - Phase 2]         │
+│   FST of all unique values for column        │
+│   (no postings, just terms)                  │
 │                                              │
 ├──────────────────────────────────────────────┤
 │ Footer:                                      │
@@ -270,128 +297,133 @@ This GC runs as part of the existing `cleanup_completed_jobs` flow. Orphan sidec
 └──────────────────────────────────────────────┘
 ```
 
+**Design details**:
+
+The **Chunk Ordinal Table** maps segment-local integer ordinals to chunk paths. Roaring bitmaps in the Inverted Index section contain these ordinals as their elements. When a query looks up `host='web-01'` and gets a roaring bitmap back, the ordinals in that bitmap are resolved via the ordinal table to chunk paths for registration with DataFusion.
+
 **Design rationale**:
 - **Section-based**: New index types can be added without breaking existing readers (skip unknown section types)
 - **Per-section CRC32**: Detect corruption at the section level; a corrupt fuse filter doesn't invalidate the inverted index
 - **Footer magic**: Enables reverse scanning to verify file integrity (same pattern as Parquet)
 - **No compression**: FST and roaring bitmaps are already compressed; additional compression adds latency with minimal benefit
 
-### 3.3 Tenant-Level Index Catalog
+### 3.4 Index Lifecycle: Garbage Collection and Orphan Reconciliation
 
-```
-metadata/indexes/{tenant_id}/catalog.json
-```
+Manifest is the source of truth. The compactor's GC phase (part of `garbage_collect()`) reconciles segments:
 
-```json
-{
-  "version": 1,
-  "columns": {
-    "host": {
-      "index_type": "inverted",
-      "status": "visible",
-      "cardinality_estimate": 5000,
-      "created_at": "2026-03-05T00:00:00Z",
-      "last_used_at": "2026-03-05T12:00:00Z",
-      "usage_count": 1500
-    },
-    "trace_id": {
-      "index_type": "fuse_filter",
-      "status": "visible",
-      "cardinality_estimate": 50000000,
-      "created_at": "2026-03-05T00:00:00Z",
-      "last_used_at": "2026-03-05T11:30:00Z",
-      "usage_count": 300
-    }
-  },
-  "global_index": {
-    "path": "indexes/{tenant_id}/global.idx",
-    "built_at": "2026-03-05T10:00:00Z",
-    "chunk_count": 15000,
-    "etag": "abc123"
-  }
-}
-```
+1. List all `.csi` files under `{tenant_id}/indexes/shard={shard_id}/segments/`
+2. Load manifest for the shard
+3. Compute `manifest_segment_paths = manifest.segments.map(|s| s.path)`
+4. Delete any `.csi` file not in `manifest_segment_paths` (orphan from failed build)
+5. For any segment in manifest whose `.csi` file does not exist on S3: remove from manifest and log a warning
 
-This catalog:
-- Replaces the in-memory-only `DashMap` in `IndexLifecycleManager` with persisted state
-- Is fetched once per query session (lightweight, <1KB typically)
-- Updated during compaction (not during ingestion — avoids CAS contention)
-- Drives the adaptive index controller's decisions
-
-### 3.4 Tenant Global Index
-
-```
-indexes/{tenant_id}/global.idx
-```
-
-Same binary format as sidecar `.idx` files, but the roaring bitmaps map to chunk IDs (integers) instead of row group IDs. The header includes a chunk ID mapping table:
-
-```
-[Global Index Header]
-  Chunk count: u32
-  Chunk ID table: (u32 → string path) repeated
-[Inverted Index Section]
-  FST: col=val → bitmap offset
-  Bitmaps: roaring bitmaps of chunk IDs
-```
-
-**Lifecycle**:
-- Built fresh during L1+ compaction (not incrementally updated)
-- Compactor reads all sidecar indexes for the tenant, merges, writes global index
-- Old global index is replaced atomically (write new file, update catalog, delete old)
-- Query nodes cache global index in TieredCache like any other S3 object
+This runs at low priority, gated by a configurable interval (default: every 10 compaction cycles).
 
 ---
 
 ## 4. Stateless Architecture Implications
 
-### 4.1 Immutability Is the Key Constraint
+### 4.1 Immutability and Failure Semantics
 
-CardinalSin's ingester, query, and compactor nodes are stateless. There is no shared mutable state beyond S3 + metadata CAS. This means:
+CardinalSin's ingester, query, and compactor nodes are stateless. Indexes must be immutable after construction. This enables:
 
-| Constraint | Implication |
-|------------|-------------|
-| No mutable global index | Indexes must be immutable after construction |
-| No inter-node coordination | Index builds are local operations (ingester builds sidecar at flush, compactor builds global during merge) |
-| Crash recovery = re-read from S3 | No index write-ahead log needed — if a flush fails, the chunk and its sidecar are both absent |
-| Multiple query nodes | Each independently caches index files via TieredCache |
+| Property | Benefit |
+|----------|---------|
+| **Crash recovery** | If a segment write fails or a manifest CAS fails, the old state remains in S3. Re-read from S3 on recovery. No WAL needed. |
+| **Query safety** | Queries can never see torn or partially-written indexes. Manifest CAS ensures atomicity of segment list updates. |
+| **Multi-node caching** | Each query node independently caches manifests and segments via TieredCache. No inter-node coordination. |
+| **Split-safety** | Shard manifests can be frozen independently during splits without affecting other shards. |
 
-### 4.2 Index Lifecycle Across Nodes
+### 4.2 Index Lifecycle Across Nodes (Phase 1: Compactor-First)
+
+**Phase 1** (this design): Compactor is the sole index builder.
 
 ```
-Ingester                    Compactor                   Query Node
-────────                    ─────────                   ──────────
-flush():                    compact():                  query():
-  write chunk.parquet         read sidecar .idx files     fetch catalog.json (cached)
-  build sidecar .idx          merge into global.idx       fetch global.idx (cached)
-  upload both to S3           update catalog.json         prune chunks via global index
-  register in metadata        (all via CAS)               fetch sidecar .idx (cached)
-                                                          prune row groups via sidecar
-                                                          read only matching Parquet data
+Compactor                          Query Node
+─────────                          ──────────
+compact():                         query():
+  read source chunk metadata         fetch manifest (cached)
+  merge Parquet data                 check manifest.generation vs shard.generation
+  build segment:                     partition chunks by indexed_through_ns watermark
+    extract string columns             indexed_chunks: use segment FST+roaring
+    build FST dict                     frontier_chunks: use zone map fallback
+    build roaring postings             union both sets
+    serialize .csi                     register unified set with DataFusion
+  CAS-update manifest:               DataFusion executes with Parquet pushdown
+    add segment entry
+    advance indexed_through_ns
 ```
+
+Fresh data ingested by the ingester remains unindexed until the next compaction cycle. The `indexed_through_ns` watermark makes this lag explicit and measurable. During this window, queries fall back to zone map pruning on frontier chunks (the existing behavior).
+
+**Phase 3 enhancement** (future): Ingester builds optional single-chunk `.csi` segments to reduce freshness lag from "compaction interval" to "flush interval". Same `.csi` format, just one ordinal entry per segment.
 
 ### 4.3 Cache Integration
 
 Index files flow through the existing `TieredCache` (RAM → NVMe → S3):
 
-- **Global index** (~1-10MB per tenant): likely stays in L1 (RAM) after first access
-- **Sidecar indexes** (~50-100KB each): cached in L2 (NVMe) alongside their Parquet files
+- **Manifest** (~1KB per shard, cached per-query-session): stays in L1 (RAM) after first access
+- **Segments** (~100KB-1MB each, cached like Parquet data): cached in L2 (NVMe) alongside their data
 - **No special cache eviction** needed — indexes are small relative to Parquet data
 
-The `CachedObjectStore` already handles `.idx` files transparently (they're just S3 objects). Query nodes fetch them the same way they fetch `.parquet` files.
+The `CachedObjectStore` already handles `.csi` files transparently (they're just S3 objects).
 
-### 4.4 Compaction and Index Merging
+### 4.4 Compaction Integration: When Segments Are Built
 
-During compaction (L0→L1→L2→L3):
+Index segments are built as a post-step of `merge_chunks()` in the compactor:
 
-1. Compactor reads source chunk sidecar `.idx` files
-2. For inverted indexes: union the roaring bitmaps, rebuild FST for the merged key set
-3. For fuse filters: rebuild from the merged column data (fuse filters can't be merged)
-4. Write new sidecar `.idx` for the compacted chunk
-5. Rebuild tenant global index from all current sidecar indexes
-6. Update catalog atomically
+```rust
+async fn merge_chunks(&self, paths: &[String], level: Level) -> Result<String> {
+    // ... existing: merge data, write Parquet ...
+    let chunk_path = upload_parquet_to_s3(&parquet_bytes).await?;
 
-**Cost**: Index merging adds ~10-20% to compaction time (dominated by roaring bitmap unions, which are fast — microseconds for million-entry bitmaps).
+    // [NEW] Build index segment for this compaction output
+    if let Some(ref index_builder) = self.index_builder {
+        let shard_id = self.determine_shard_for_chunks(paths)?;
+        // Failure here is logged but does NOT fail the compaction
+        let _ = index_builder.build_and_publish_segment(
+            &sorted_batch,
+            &chunk_path,
+            &shard_id,
+            level,
+        ).await;
+    }
+    Ok(chunk_path)
+}
+```
+
+**Critical design choice: Index build failure must not fail compaction.** If segment construction or manifest CAS fails, the compaction succeeds, data is safe, and the watermark simply does not advance. The next compaction cycle will re-attempt. This preserves "performance degradation only" failure semantics.
+
+### 4.5 Segment Merge Policy
+
+When segment count for a shard exceeds 10, the compactor runs a tiered merge:
+
+1. Sort segments by size ascending
+2. Merge the smallest segments until count is at or below 8
+3. Merging means: union FST dictionaries, union roaring bitmaps (adjusted for ordinal table), write merged `.csi`
+4. Update manifest atomically: remove old entries, add merged entry
+
+This is triggered as a low-priority background task within `run_compaction_cycle()`, after main leveled compaction.
+
+### 4.6 LSM-Style Merge-Tree Optimization Path (Future)
+
+The baseline policy above is intentionally simple for Phase 1. Future iterations can keep the same correctness model (immutable segments + CAS manifests) while adopting more LSM-style merge mechanics for higher sustained throughput.
+
+**Invariants to keep**:
+1. Segment publication remains immutable and manifest-driven
+2. Query correctness must not depend on successful index merge (fallback still valid)
+3. Split protocol integration continues to use `generation` + `frozen` manifest fields
+
+**Planned optimizations**:
+1. **Leveled run sizing**: Move from fixed "count >10" trigger to size-tiered levels (for example 10x level ratio) to bound read amplification and merge churn.
+2. **Streaming k-way term merge**: Keep terms lexicographically sorted in each segment, then merge multiple segments with iterator-style term walkers instead of loading full dictionaries into memory.
+3. **Stable chunk identity for merge-time dedupe**: Add optional `chunk_uid` (stable hash/id) in segment metadata for dedupe and conflict resolution during merge; keep roaring postings on dense segment-local ordinals for query efficiency.
+4. **Sparse term-offset memory index**: Load only term-offset metadata into RAM, mmap section payloads, and lazily hydrate postings to reduce heap pressure during large merges.
+
+**Activation criteria**:
+1. `index_segments_per_shard` regularly exceeds 100 for production shards
+2. `index_segment_build_duration_seconds` merge buckets dominate compactor time
+3. Query planner latency regresses due to high segment fan-out despite pruning effectiveness
 
 ---
 
@@ -416,115 +448,174 @@ During compaction (L0→L1→L2→L3):
 
 ## 6. Integration with Existing Systems
 
-### 6.1 MetadataClient Trait
+### 6.1 New Component: ManifestClient
 
-The existing trait already has inverted index methods:
-
-```rust
-// Existing (keep, but implementation changes)
-async fn update_inverted_index(&self, tenant_id: &str, chunk_path: &str,
-    columns: &[(String, String)]) -> Result<()>;
-async fn remove_from_inverted_index(&self, tenant_id: &str,
-    chunk_path: &str) -> Result<()>;
-async fn query_inverted_index(&self, tenant_id: &str,
-    predicates: &[(String, String)]) -> Result<Option<HashSet<String>>>;
-```
-
-**Changes needed**:
+A new `ManifestClient` struct handles shard-manifest operations (replaces the reverted inverted-index API calls from PR #152):
 
 ```rust
-// New: Index catalog management
-async fn get_index_catalog(&self, tenant_id: &str) -> Result<Option<IndexCatalog>>;
-async fn update_index_catalog(&self, tenant_id: &str,
-    catalog: &IndexCatalog) -> Result<()>;
+// New: src/index/manifest.rs
+pub struct ManifestClient {
+    object_store: Arc<dyn ObjectStore>,
+}
 
-// Existing methods evolve:
-// - update_inverted_index: now writes sidecar .idx file instead of JSON
-// - query_inverted_index: now reads global.idx (FST+roaring) instead of JSON
-// - remove_from_inverted_index: deletes sidecar .idx, triggers global rebuild
+impl ManifestClient {
+    pub async fn load_manifest(&self, tenant_id: &str, shard_id: &str)
+        -> Result<Option<(IndexManifest, String /* etag */)>>;
+
+    pub async fn save_manifest(&self, tenant_id: &str, shard_id: &str,
+        manifest: &IndexManifest, expected_etag: &str) -> Result<()>;
+
+    pub async fn freeze_manifest(&self, tenant_id: &str, shard_id: &str) -> Result<()>;
+
+    pub async fn unfreeze_manifest(&self, tenant_id: &str, shard_id: &str) -> Result<()>;
+}
 ```
 
-The JSON-based inverted index methods can be migrated incrementally:
-1. Phase 1: Write both JSON and sidecar `.idx` (dual-write)
-2. Phase 2: Read from sidecar `.idx`, fall back to JSON
-3. Phase 3: Remove JSON path
+This avoids bloating the existing `MetadataClient` trait (which has 19 methods). Index manifest operations are a separate concern with their own CAS semantics.
 
-### 6.2 QueryEngine Integration
+**Note**: The methods `update_inverted_index`, `remove_from_inverted_index`, and `query_inverted_index` from PR #152 (reverted in #156) are not re-added. The segment+manifest model replaces them entirely.
 
-Current query flow in `execute_with_indexes` (engine.rs:259-300):
+### 6.2 Query Planner Integration: Index-Aware Chunk Pruning
 
-```
-SQL → parse → extract_filter_columns → lifecycle_manager check → DataFusion execute
-```
-
-**Enhanced flow**:
+The existing query path in `QueryNode` (line 158-241 of `src/query/mod.rs`) today flows:
 
 ```
-SQL → parse → extract_filter_columns
-  → fetch index catalog (cached)
-  → for indexed columns:
-      → fetch global.idx (cached)
-      → FST lookup: col=val → roaring bitmap of chunk IDs
-      → intersect bitmaps across predicates (AND)
-      → result: indexed_chunk_set
-  → union with non-indexed chunks (L0 / recently flushed):
-      → metadata.get_chunks(time_range) returns all chunks
-      → chunks NOT in global.idx chunk ID table are "unindexed"
-      → final_chunk_set = indexed_chunk_set ∪ unindexed_chunks
-  → for non-indexed columns on final_chunk_set:
-      → fall back to zone map pruning (existing ColumnStats path)
-  → register only matching chunks with DataFusion
-  → DataFusion executes with Parquet-native pushdown on remaining data
+SQL → extract_time_range → extract_column_predicates
+    → metadata.get_chunks_with_predicates(time_range, predicates)
+    → register_metrics_table_for_chunks(chunk_paths)
+    → engine.execute(sql)
 ```
 
-**Important**: The global index is rebuilt during compaction, not ingestion. Newly flushed L0 chunks are absent from `global.idx` until the next compaction cycle. To avoid false negatives (missing fresh data), the query path must union in any chunks not present in the global index's chunk ID table. These unindexed chunks fall through to zone map pruning, which is the existing behavior. As chunks are compacted and the global index is rebuilt, they move from the "unindexed" path to the fast indexed path.
-
-This extends the existing `get_chunks_with_predicates` method — the inverted index narrows the chunk set before zone map evaluation, while unindexed chunks are handled by the existing fallback.
-
-### 6.3 AdaptiveIndexController Integration
-
-The controller currently makes recommendations but cannot act on them. With the sidecar system:
+Enhanced flow adds index pruning between metadata retrieval and table registration:
 
 ```
-Recommendation Engine
-  → "index column 'host' with inverted index"
-  → update index catalog: host → { index_type: "inverted", status: "invisible" }
+SQL → extract_time_range → extract_column_predicates
+    → metadata.get_chunks_with_predicates(time_range, predicates)
+    → [NEW] index_prune(tenant_id, shard_assignments, equality_predicates)
+    → register_metrics_table_for_chunks(pruned_chunk_paths)
+    → engine.execute(sql)
+```
 
-Ingester (on next flush):
-  → reads catalog, sees 'host' marked for indexing
-  → builds inverted index entries for 'host' in sidecar .idx
-  → (also builds for all columns already marked "visible")
+#### index_prune() Algorithm (Step by Step)
 
-Compactor (on next compaction):
-  → reads all sidecar .idx files
-  → merges into global.idx
-  → updates catalog: host → status: "visible" (after threshold met)
+1. **Determine shard assignments**: Group `chunk_paths` by their `shard_id` field from `ChunkMetadataExtended`
+
+2. **For each shard**:
+   a. Load manifest from cache (`TieredCache`). If missing or `frozen == true`: skip pruning for this shard, pass all chunks through unmodified
+   b. Check `manifest.generation == shard_metadata.generation` (generation CAS invariant)
+   c. Extract `indexed_through_ns` watermark
+   d. Partition chunks into: **indexed** (`max_ts ≤ indexed_through_ns`) and **frontier** (`max_ts > indexed_through_ns`)
+   e. For indexed chunks, extract equality/IN predicates
+   f. For each relevant segment (time range overlap):
+      - Load segment `.csi` file from cache
+      - FST lookup: construct key `column=value`, get roaring bitmap of ordinals
+      - If multiple predicates: AND the roaring bitmaps
+      - Resolve ordinals to chunk paths via ordinal table
+      - Result: `indexed_matching_chunks`
+   g. Emit `indexed_matching_chunks ∪ frontier_chunks` for this shard
+
+3. **Union across all shards** to produce final `pruned_chunk_paths`
+
+4. **Fall through to existing path**: `register_metrics_table_for_chunks()` and DataFusion handles rest with Parquet-native pushdown
+
+#### Safety Invariant
+
+**The index can only prune, never add.** If the index is stale, missing, or corrupt, the fallback is to return all input chunks unchanged. This ensures zero false negatives.
+
+#### Implementation
+
+New `IndexPrefilter` struct injected into `QueryNode`:
+
+```rust
+// New field on QueryNode
+index_prefilter: Option<Arc<IndexPrefilter>>,
+
+// New builder method
+pub fn with_index_prefilter(mut self, prefilter: Arc<IndexPrefilter>) -> Self {
+    self.index_prefilter = Some(prefilter);
+    self
+}
+```
+
+### 6.3 Compactor Integration: IndexBuilder Component
+
+A new `IndexBuilder` struct handles segment construction during compaction:
+
+```rust
+struct IndexBuilder {
+    object_store: Arc<dyn ObjectStore>,
+    segment_writer: SegmentWriter,  // Handles .csi binary format
+    manifest_client: ManifestClient,
+}
+
+impl IndexBuilder {
+    async fn build_and_publish_segment(
+        &self,
+        batch: &RecordBatch,
+        chunk_path: &str,
+        shard_id: &str,
+        level: Level,
+    ) -> Result<()> {
+        // 1. Extract all string columns from the batch
+        // 2. For each column: build FST term dict + roaring bitmaps
+        // 3. Build chunk ordinal table: ordinal -> chunk_path
+        // 4. Serialize to .csi format
+        // 5. Upload segment to S3
+        // 6. CAS-update manifest: add segment, advance watermark
+        // Return Ok(()) even if CAS fails after upload (watermark just doesn't advance)
+    }
+}
+```
+
+**New field on Compactor**:
+
+```rust
+pub struct Compactor {
+    // ... existing fields ...
+    index_builder: Option<IndexBuilder>,  // Optional; enables index builds if present
+}
+
+// New builder method
+pub fn with_index_builder(mut self, builder: IndexBuilder) -> Self {
+    self.index_builder = Some(builder);
+    self
+}
+```
+
+### 6.4 Shard Split Interaction: Manifest Freeze/Unfreeze
+
+The shard split protocol already uses generation-based CAS. Index manifests integrate as follows:
+
+| Split Phase | Manifest Behavior |
+|---|---|
+| **Preparation** | Freeze old shard manifest. Create empty manifests for new shards (watermark=0, generation=1). |
+| **DualWrite** | Old manifest frozen. New manifests writable but watermark=0. |
+| **Backfill** | No index changes. Manifests stay frozen during backfill. |
+| **Cutover** | Unfreeze new manifests. Archive old manifest. |
+| **Cleanup** | Delete old manifest. New shards' watermarks advance naturally as compaction indexes their data. |
+
+Recovery after crash: `SplitProgress.completed_phase` tells the manifest state to expect. Recovery re-applies manifest operations (freeze/unfreeze) as needed.
+
+### 6.5 AdaptiveIndexController Integration (Phase 3)
+
+Phase 3 persists the controller's lifecycle state to the shard manifests:
+
+```
+Adaptive Controller
+  → "column 'host' cardinality=5000, promote from invisible→visible"
+  → update manifest field per shard (not a separate catalog)
+
+Compactor (on compaction):
+  → builds segments as normal
+  → segments are scoped to their shard, automatically incorporate visible-status columns
 
 Query Node:
-  → reads catalog, sees 'host' is "visible"
-  → uses global.idx for host= predicates
-  → tracks "would have helped" for "invisible" columns (existing logic)
+  → reads manifest.segments (no separate catalog fetch)
+  → uses FST+roaring in visible segments for indexed columns
+  → tracks "would have helped" for pre-visible columns
 ```
 
-The key change: `IndexLifecycleManager` persists to `catalog.json` instead of only living in a `DashMap`. This is separately tracked in beads issue `cardinalsin-0ew`.
-
-### 6.4 Ingester Flush Path
-
-In `src/ingester/mod.rs`, after writing the Parquet file:
-
-```rust
-// Existing
-let chunk_path = upload_to_s3(parquet_bytes).await?;
-metadata.register_chunk(&chunk_path, &chunk_metadata).await?;
-
-// New (added after Parquet upload)
-let index_catalog = metadata.get_index_catalog(tenant_id).await?;
-let sidecar = build_sidecar_index(&record_batches, &index_catalog)?;
-upload_to_s3(sidecar_bytes, &format!("{}.idx", chunk_id)).await?;
-metadata.update_inverted_index(tenant_id, &chunk_path, &label_pairs).await?;
-```
-
-Building the sidecar at flush time adds ~5-10ms (FST construction is fast for <10K unique terms per chunk). This is negligible compared to Parquet encoding (~100ms) and S3 upload (~200ms).
+This is deferred to Phase 3 because Phase 1 builds segments with all indexed columns regardless of adaptive status.
 
 ---
 
@@ -552,39 +643,239 @@ This aligns with the existing `IndexRecommendationEngine` thresholds, with the a
 
 ---
 
-## 8. Migration Path
+## 8. Phased Implementation Plan
 
-### Phase 1: Sidecar Infrastructure (This Design)
-- Implement sidecar `.idx` binary format
-- Build inverted index in sidecar at ingester flush
-- Compactor reads sidecars, merges into global index
-- Query nodes use global index for chunk pruning
-- Dual-write JSON + sidecar for rollback safety
+### Phase 0: Correctness Harness (~1 week)
 
-### Phase 2: Fuse Filters
-- Add fuse filter sections to sidecar format
-- Adaptive controller triggers fuse filter creation for high-cardinality columns
-- Query nodes check fuse filters before fetching Parquet files
+**Goal**: Build testing foundation before runtime code.
 
-### Phase 3: Catalog Persistence
-- Migrate `IndexLifecycleManager` state to `catalog.json`
-- Ingester reads catalog to know which columns to index
-- Compactor updates catalog with build status
-- Remove in-memory-only lifecycle state
+**Tasks**:
+1. Implement `.csi` writer/reader with roundtrip tests
+2. Property tests for FST+roaring serialization
+3. Manifest CAS conflict simulation tests
+4. Query correctness tests with forced stale/missing/corrupt indexes
+5. Shard split integration tests with indexing enabled
 
-### Phase 4: Pre-Aggregation (Future)
-- Add star-tree section to sidecar format
-- Compactor builds star-trees for hot GROUP BY patterns
-- Query engine rewrites matching queries to read pre-agg data
+**Deliverable**: `tests/index_*_tests.rs` test suite with 30+ test cases covering serialization, CAS, staleness, and split scenarios.
+
+### Phase 1: Compactor-Built Segment MVP (~2-3 weeks)
+
+**Goal**: End-to-end index build during compaction and index-aware query pruning.
+
+**New module**: `src/index/`
+- `mod.rs` — `IndexPrefilter`, `IndexBuilder` public API
+- `manifest.rs` — `IndexManifest`, `ManifestClient` with CAS
+- `segment.rs` — `SegmentWriter`, `SegmentReader` (.csi format)
+- `fst_builder.rs` — FST construction from RecordBatch columns
+- `postings.rs` — Roaring bitmap construction and query
+- `config.rs` — `IndexConfig` (segment thresholds, merge policies)
+
+**Compactor changes**:
+- Add `index_builder: Option<IndexBuilder>` field
+- Call `index_builder.build_and_publish()` after each `merge_chunks()`
+- Implement GC reconciliation in `garbage_collect()`
+- Implement tiered segment merge when segment count exceeds threshold
+
+**Query changes**:
+- Add `index_prefilter: Option<Arc<IndexPrefilter>>` field to `QueryNode`
+- Call `prefilter.prune(chunks, predicates)` between `get_chunks_with_predicates()` and `register_metrics_table_for_chunks()`
+
+**Metrics (Phase 1)**:
+- `index_planner_pruned_chunks_total` (labels: tenant, shard, result={pruned,passed})
+- `index_frontier_chunk_count` (labels: tenant, shard)
+- `index_manifest_staleness_seconds` (labels: tenant, shard)
+- `index_segment_build_duration_seconds` (labels: tenant, shard, level)
+
+**Rollout gates (Phase 1)**:
+1. Zero correctness regressions in existing test suite
+2. Phase 0 test suite passes with >95% assertion coverage
+3. On a test workload with 1000+ chunks and equality predicates, `pruned_chunks_total` shows ≥50% reduction
+4. With index files deleted, queries return correct results (slower, verified)
+5. Shard split completes with no data loss or false negatives
+6. `index_manifest_staleness_seconds` stays <2× `compactor.check_interval` during normal operation
+
+**Deliverable**: Compactor builds `.csi` segments during compaction, publishes manifests via CAS, query planner uses index for equality/IN predicates with explicit frontier union.
+
+### Phase 2: Prom API + High-Cardinality Extensions (~2 weeks)
+
+**Goal**: Accelerate `/api/v1/labels` and `/api/v1/series` endpoints. Add fuse filters for high-cardinality columns.
+
+**New code**:
+- `src/index/value_dict.rs` — Value dictionary section (FST of unique values, no postings)
+- `src/index/fuse_filter.rs` — Binary fuse filter section
+
+**Changes**:
+- `src/index/segment.rs`: Add section types 0x02 (Fuse8/Fuse16) and 0x03 (value dictionary)
+- `src/api/prometheus.rs` (or equivalent): Use value dictionary for `/api/v1/label/{label_name}/values` queries
+- Add `xorf = "0.11"` to `Cargo.toml`
+- Adaptive controller selects columns with cardinality >100K for fuse filter indexing
+
+**Deliverable**: `/api/v1/labels` returns sub-second results even with millions of unique label values. High-cardinality columns benefit from Fuse8/Fuse16 membership tests during Parquet scanning.
+
+### Phase 3: Adaptive Persistence + Ingester Segments (~2 weeks)
+
+**Goal**: Persist adaptive index lifecycle state. Optionally build per-chunk segments at ingestion to reduce freshness lag.
+
+**Changes**:
+- `src/adaptive_index/lifecycle.rs`: Replace `DashMap<String, IndexMetadata>` with `ManifestClient`-backed persistence
+- `src/ingester/mod.rs`: Optional single-chunk `.csi` segment build at flush (same `.csi` format)
+- `src/index/config.rs`: Add `ingester_segments_enabled: bool` feature flag
+
+**Benefit**: Freshness lag narrows from "compaction interval" (minutes) to "flush interval" (5 minutes default). Same `.csi` format ensures no duplication.
+
+**Deliverable**: Index state persists across restarts. Ingester can optionally accelerate queries on fresh L0 data.
+
+### Phase 4: LSM-Style Merge Optimization + Pre-Aggregation (Future)
+
+**Goal**: Long-running shards with high segment fan-out. Add LSM-style merge improvements before introducing star-tree pre-aggregation.
+
+**Changes**:
+- `src/index/merge_planner.rs` (new): Level-aware merge selection by size ratio and compaction budget
+- `src/index/segment.rs`: Streaming k-way term merge path for inverted sections
+- `src/index/manifest.rs`: Optional merge budget/accounting fields (for observability only)
+- `src/metadata/models.rs` (or index metadata equivalent): Optional stable `chunk_uid` field for merge-time dedupe
+- `src/index/metrics.rs` (or equivalent): Add merge amplification/read amplification metrics
+
+**Rollout gates**:
+1. Merge throughput improves by at least 2x versus Phase 1 tiered merge on a shard with 500+ segments
+2. Query p95 for equality predicates does not regress under sustained merge load
+3. No correctness regressions in stale/missing/corrupt index fallback tests
+4. Split and recovery behavior remains unchanged (manifest invariants intact)
+
+**Deliverable**: Segment count growth is bounded under sustained ingest, with predictable merge cost and no change to query correctness semantics.
+
+**Deferred**: Pre-aggregation/star-tree stays future work until LSM-style merge optimization is proven in production.
 
 ---
 
-## 9. Open Questions
+## 9. New Metrics and Operational SLOs
 
-1. **Global index rebuild frequency** — Should the global index be rebuilt on every compaction, or on a separate schedule? Rebuilding on every compaction ensures freshness but adds work. A separate background job could rebuild periodically (e.g., every 10 minutes).
+**Required metrics**:
 
-2. **Index versioning during compaction** — When the global index is being rebuilt, query nodes may read a stale version. This is acceptable (they'll scan a few extra chunks) but should be documented as expected behavior.
+```
+index_planner_pruned_chunks_total{tenant, shard, result={pruned,passed}}
+  Counter tracking chunks pruned vs passed through by index
 
-3. **Multi-tenant index isolation** — Each tenant has its own catalog and global index. Cross-tenant queries (if ever supported) would need to union multiple global indexes. Current design assumes single-tenant queries only.
+index_frontier_chunk_count{tenant, shard}
+  Gauge: unindexed chunks (newer than indexed_through_ns watermark)
 
-4. **Sidecar upload atomicity** — The Parquet file and sidecar `.idx` are separate S3 objects. If the sidecar upload fails after the Parquet upload succeeds, the chunk exists without an index. This is safe (queries fall back to zone maps) but the compactor should detect and backfill missing sidecars.
+index_manifest_staleness_seconds{tenant, shard}
+  Gauge: seconds since last successful manifest watermark advance
+  Alert if > 2 * compactor.check_interval
+
+index_manifest_cas_conflicts_total{tenant, shard}
+  Counter: manifest CAS conflicts requiring retry
+
+index_lookup_latency_seconds{tenant, shard}
+  Histogram: time to perform FST+roaring query during planner
+
+index_segment_build_duration_seconds{tenant, shard, level}
+  Histogram: time to build segment during compaction
+
+index_segments_per_shard{tenant, shard}
+  Gauge: current segment count per shard
+
+index_segment_merges_total{tenant, shard, result={ok,error}}
+  Counter: tiered segment merges performed
+```
+
+**Phase 4 (future) metrics**:
+
+```
+index_merge_write_amplification{tenant, shard}
+  Gauge: bytes written during index merge / bytes of merged input segments
+
+index_merge_read_amplification{tenant, shard}
+  Gauge: number of segments consulted per predicate lookup (post-cache)
+
+index_merge_backlog_segments{tenant, shard, level}
+  Gauge: segments waiting for merge by level
+```
+
+---
+
+## 10. Failure Modes and Recovery
+
+| Failure | Impact | Recovery |
+|---------|--------|----------|
+| **Segment `.csi` corrupt on S3** | Query planner CRC32 check fails, segment skipped, full scan for time range | Compactor detects via header CRC32 check, rebuilds segment |
+| **Manifest CAS conflict** | Concurrent manifest writers (rare), compactor retries via `cas_retry!` macro (5 attempts) | Automatic exponential backoff |
+| **Compactor crashes mid-build** | Orphan `.csi` on S3, manifest not updated | Manifest is source of truth; orphan detected by GC reconciliation |
+| **Manifest references deleted segment** | Segment load fails during query | Query planner treats as missing index, falls back to full scan |
+| **Watermark stuck** | `index_manifest_staleness_seconds` alert, queries use full scan path | Restart compactor, watermark advances on next successful build |
+| **Stale manifest during split** | `manifest.generation != shard.generation` mismatch | Query planner checks invariant, ignores stale manifest, uses fallback |
+| **Query node crashes during fetch** | Partial manifest load, partial segment load | TieredCache expiration, next query refetches |
+
+---
+
+## 11. Design Decisions and Rationale
+
+### Why Shard-Scoped Segments Instead of Tenant-Global Index?
+
+The initial proposal (pre-convergence revision of this document) used a tenant-global `global.idx` rebuilt during compaction. This was changed to shard-scoped segments for three reasons:
+
+1. **Rebuild cost scales with corpus, not increment**: A tenant-global rebuild processes the entire corpus on every compaction. A shard-scoped rebuild only processes that shard's data. For a 500K-chunk tenant, this is the difference between rebuilding a 10MB FST every 60 seconds vs only the affected shard.
+
+2. **Failure isolation**: A corrupt or stale segment only blinds one shard. A corrupt tenant-global index blinds the entire tenant.
+
+3. **Split alignment**: During shard splits, each new shard gets independent manifests and segment directories. No need to "split the index" as a separate coordination problem.
+
+### Why Compactor-First (Phase 1), Not Ingester Segments?
+
+The proposal evolves builds from ingester (per flush) to compactor (per compaction merge). Rationale:
+
+1. **Ingest latency stable**: The ingester's flush path in `src/ingester/mod.rs` already handles schema heterogeneity, WAL truncation, and topic broadcast. Index construction here increases failure blast radius.
+
+2. **Index quality**: Compactor merges and sorts data, producing high-quality input for FST/roaring construction. Unsorted per-flush data produces less-efficient indexes.
+
+3. **"Degradation only" semantics**: If index build fails, data is safe and queries work (just slower). No new failure modes in the critical write path.
+
+Ingester-built segments (Phase 3) become optional for reducing freshness lag, but are not required for correctness.
+
+### Why Explicit Watermark Instead of Implicit Unindexed Union?
+
+The `indexed_through_ns` watermark makes freshness explicit and measurable:
+
+1. **Operational SLO**: `index_manifest_staleness_seconds` metric tracks lag directly. Teams can set alerts.
+
+2. **Correctness verification**: Watermark proves "this shard's data is indexed up to time X; chunks after X must use fallback". Easy to verify in tests.
+
+3. **Split safety**: During splits, watermarks can be frozen independently per shard without affecting query correctness.
+
+### Why Segment-Local Ordinals in Phase 1 Instead of Global IDs?
+
+Phase 1 keeps postings on segment-local dense ordinals because:
+
+1. **Compression efficiency**: Roaring performs best with dense `u32` domains.
+2. **Build simplicity**: No distributed ID allocator or cross-node coordination required.
+3. **Failure isolation**: Segment rebuilds stay local and do not require global ID remapping transactions.
+
+Future LSM-style optimization can add stable `chunk_uid` for merge-time dedupe while retaining dense local ordinals for query-time postings.
+
+### Why Not Revive the Reverted Inverted-Index API?
+
+PR #152 proposed `update_inverted_index`, `query_inverted_index`, and `remove_from_inverted_index` methods. These were reverted in #156. This design does not re-add them because:
+
+1. **Wrong abstraction**: Those APIs operated on term-level mutations (add/remove label values). The segment model needs manifest operations (add/remove segments, CAS watermark).
+
+2. **Mutable index antipattern**: Those APIs encouraged thinking about a mutable central index. The segment model is intentionally immutable.
+
+3. **New APIs needed**: `ManifestClient` with CAS semantics is the right abstraction for this model.
+
+---
+
+## 12. Open Questions (Convergence Notes)
+
+1. **Segment merge trigger**: Tiered merge is triggered at segment count >10. Is this the right threshold? Should it vary by shard cardinality?
+
+2. **Index build on every compaction**: Should segments be built on every compaction output, or only at higher levels (L1+)? Building on every output maximizes freshness; skipping L0 saves compute.
+
+3. **Watermark granularity**: Is nanosecond precision the right granularity? Microsecond or millisecond would reduce manifest size negligibly but simplify implementation.
+
+4. **Multi-tenant index isolation**: Each tenant has independent manifests and segments. Cross-tenant queries (if ever supported) would union multiple shard results. Current design assumes single-tenant queries.
+
+5. **Adaptive column selection**: Phase 3 will add columns to indexes based on adaptive controller recommendations. How should the compactor handle columns that are removed from recommendations (deprecated indexes)?
+
+6. **Stable chunk identity scope**: Should `chunk_uid` be shard-scoped or tenant-scoped once LSM-style merge optimization is enabled?
+
+7. **Merge policy target**: Should leveled merge use strict size ratio (for example 10x) or adaptive budgeting based on compactor backlog?
