@@ -46,53 +46,34 @@ CardinalSin targets >1B unique time series stored as columnar Parquet on object 
 
 **Purpose**: Given a predicate like `host = 'web-01'`, return the set of chunk IDs containing that value — without scanning metadata.
 
-**Current state**: `BTreeMap<String, BTreeMap<String, Vec<String>>>` stored as JSON.
+**Current state**: No production inverted index. The prior `BTreeMap<String, BTreeMap<String, Vec<String>>>` JSON design was reverted in #156.
 
-**Production approach**: FST term dictionary + roaring bitmap postings.
+**Production approach**: Shard-scoped immutable `.csi` segments (FST term dictionary + roaring bitmap postings) published via CAS-protected manifests.
 
 #### Architecture
 
 ```
-┌─────────────────────────────────────┐
-│         Per-Chunk Sidecar           │
-│  chunks/{chunk_id}.idx              │
-│                                     │
-│  ┌─────────────┐                    │
-│  │ FST (terms) │  metric_name=cpu   │
-│  │             │  host=web-01       │
-│  │             │  region=us-east-1  │
-│  └──────┬──────┘                    │
-│         │ offset into postings      │
-│  ┌──────▼──────┐                    │
-│  │   Roaring   │  row_group bitmap  │
-│  │   Bitmaps   │  (which row groups │
-│  │             │   contain value)   │
-│  └─────────────┘                    │
-└─────────────────────────────────────┘
+{tenant_id}/indexes/
+  shard={shard_id}/
+    manifest.json  (CAS + indexed_through_ns watermark)
+    segments/
+      seg_{uuid}_{level}.csi   (immutable)
 
-┌─────────────────────────────────────┐
-│      Tenant Global Index            │
-│  indexes/{tenant}/global.idx        │
-│                                     │
-│  FST: col=val  →  roaring bitmap    │
-│                    of chunk_ids     │
-│                                     │
-│  Rebuilt during compaction, not     │
-│  during ingestion (immutable once   │
-│  written)                           │
-└─────────────────────────────────────┘
+Each `.csi` segment contains:
+  [chunk ordinal table]
+  [section directory]
+  [inverted section: FST(term -> postings offset) + roaring postings]
 ```
 
-**Per-chunk sidecar** (built at flush time by ingester):
-- FST maps `column_name=value` terms to offsets
-- Roaring bitmaps at those offsets indicate which **row groups** within the chunk contain the value
-- Small: a chunk with 10 columns × 1000 unique values ≈ FST ~50KB + bitmaps ~20KB
+**Compactor-built segments** (Phase 1, production):
+- Compactor builds one segment per compaction output (level-tagged), then CAS-updates `manifest.json`
+- FST maps `column_name=value` terms to postings offsets
+- Roaring postings contain segment-local chunk ordinals, resolved through the segment's chunk ordinal table
+- Query planner unions postings across all manifest-listed segments, then applies watermark fallback for frontier chunks
 
-**Tenant global index** (built during compaction):
-- FST maps `column_name=value` to roaring bitmaps of **chunk IDs** (integer-mapped)
-- Enables chunk pruning before fetching any Parquet files
-- Rebuilt by merging sidecar indexes during compaction — never mutated in place
-- Chunk ID mapping stored in index header (chunk_path → integer ID)
+**Optional ingester-built segments** (Phase 3, future):
+- Ingester may publish single-chunk `.csi` segments to reduce freshness lag
+- Same file format and manifest semantics; no mutable shared index
 
 #### Why FST + Roaring Bitmaps
 
@@ -117,7 +98,7 @@ FST + roaring is the standard for search/TSDB systems because:
 | **InfluxDB IOx** | Parquet + DataFusion catalog | Per-file, DataFusion handles | Per-file |
 | **Quickwit** | FST (Tantivy) | Roaring bitmaps | Per-split (immutable) |
 | **ClickHouse** | Per-granule skip index | Bloom/minmax/set | Per-part |
-| **CardinalSin (proposed)** | FST (`fst` crate) | Roaring bitmaps (`roaring` crate) | Per-chunk + tenant global |
+| **CardinalSin (proposed)** | FST (`fst` crate) | Roaring bitmaps (`roaring` crate) | Per-shard immutable segments + manifest |
 
 VictoriaMetrics uses a global mutable index (mergeset) because it runs as a single process. CardinalSin's stateless query nodes cannot share mutable state, so the Quickwit model (immutable per-segment indexes merged during compaction) is the right fit.
 
@@ -145,10 +126,10 @@ Since CardinalSin's indexes are immutable after construction, the mutability lim
 
 #### Usage
 
-Standalone fuse filters are written as part of the per-chunk sidecar `.idx` file. The adaptive index controller selects columns with cardinality >100K for fuse filter indexing (below that, the inverted index is more useful).
+Standalone fuse filters are written as sections inside shard `.csi` segments. The adaptive index controller selects columns with cardinality >100K for fuse filter indexing (below that, the inverted index is more useful).
 
 ```
-Sidecar .idx file:
+Segment .csi file:
   [header]
   [inverted index section: FST + roaring bitmaps]
   [fuse filter section: per-column Fuse8 filters]
@@ -206,7 +187,7 @@ Pre-aggregation is valuable for dashboard queries that repeatedly aggregate the 
 | Query speedup | 10-100x for matching patterns |
 | Existing alternative | DataFusion's columnar execution + Parquet predicate pushdown already handles medium-scale aggregation efficiently |
 
-**Recommendation**: **Future phase only.** Document the approach but do not implement. The adaptive index controller already tracks `groupby_stats` — when these indicate repeated patterns on compacted data, star-tree construction can be added to the compaction pipeline. The per-chunk sidecar format (section 3) reserves a section type for pre-aggregation data.
+**Recommendation**: **Future phase only.** Document the approach but do not implement. The adaptive index controller already tracks `groupby_stats` — when these indicate repeated patterns on compacted data, star-tree construction can be added to the compaction pipeline. The `.csi` segment format (section 3) reserves a section type for pre-aggregation data.
 
 ---
 
@@ -221,7 +202,7 @@ Index data is organized per-shard with an immutable segment model:
   shard={shard_id}/
     manifest.json           # CAS-protected via ETag
     segments/
-      seg_{uuid}_{level}.csi    # Immutable index segment (same .csi format as section 3.2)
+      seg_{uuid}_{level}.csi    # Immutable index segment (same .csi format as section 3.3)
 ```
 
 This structure replaces both the per-chunk sidecar approach and tenant-global index from the earlier proposal. The shard-scoped design offers:
@@ -711,14 +692,14 @@ This aligns with the existing `IndexRecommendationEngine` thresholds, with the a
 
 **Deliverable**: `/api/v1/labels` returns sub-second results even with millions of unique label values. High-cardinality columns benefit from Fuse8/Fuse16 membership tests during Parquet scanning.
 
-### Phase 3: Adaptive Persistence + Ingester Sidecars (~2 weeks)
+### Phase 3: Adaptive Persistence + Ingester Segments (~2 weeks)
 
 **Goal**: Persist adaptive index lifecycle state. Optionally build per-chunk segments at ingestion to reduce freshness lag.
 
 **Changes**:
 - `src/adaptive_index/lifecycle.rs`: Replace `DashMap<String, IndexMetadata>` with `ManifestClient`-backed persistence
 - `src/ingester/mod.rs`: Optional single-chunk `.csi` segment build at flush (same `.csi` format)
-- `src/index/config.rs`: Add `ingester_sidecars_enabled: bool` feature flag
+- `src/index/config.rs`: Add `ingester_segments_enabled: bool` feature flag
 
 **Benefit**: Freshness lag narrows from "compaction interval" (minutes) to "flush interval" (5 minutes default). Same `.csi` format ensures no duplication.
 
@@ -783,7 +764,7 @@ index_segment_merges_total{tenant, shard, result={ok,error}}
 
 ### Why Shard-Scoped Segments Instead of Tenant-Global Index?
 
-The initial proposal (earlier in this doc, sections 3.3-3.4) used a tenant-global `global.idx` rebuilt during compaction. This was changed to shard-scoped segments for three reasons:
+The initial proposal (pre-convergence revision of this document) used a tenant-global `global.idx` rebuilt during compaction. This was changed to shard-scoped segments for three reasons:
 
 1. **Rebuild cost scales with corpus, not increment**: A tenant-global rebuild processes the entire corpus on every compaction. A shard-scoped rebuild only processes that shard's data. For a 500K-chunk tenant, this is the difference between rebuilding a 10MB FST every 60 seconds vs only the affected shard.
 
@@ -791,7 +772,7 @@ The initial proposal (earlier in this doc, sections 3.3-3.4) used a tenant-globa
 
 3. **Split alignment**: During shard splits, each new shard gets independent manifests and segment directories. No need to "split the index" as a separate coordination problem.
 
-### Why Compactor-First (Phase 1), Not Ingester Sidecars?
+### Why Compactor-First (Phase 1), Not Ingester Segments?
 
 The proposal evolves builds from ingester (per flush) to compactor (per compaction merge). Rationale:
 
@@ -801,7 +782,7 @@ The proposal evolves builds from ingester (per flush) to compactor (per compacti
 
 3. **"Degradation only" semantics**: If index build fails, data is safe and queries work (just slower). No new failure modes in the critical write path.
 
-Ingester sidecars (Phase 3) become optional for reducing freshness lag, but are not required for correctness.
+Ingester-built segments (Phase 3) become optional for reducing freshness lag, but are not required for correctness.
 
 ### Why Explicit Watermark Instead of Implicit Unindexed Union?
 
