@@ -8,6 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Always create a PR after committing and pushing.** Beads issues cannot be closed until the full PR lifecycle is complete: opened → comments addressed → merged. After opening a PR, always check for merge conflicts (`gh pr view <number> --json mergeable`) and resolve them before moving on.
 
+**Never auto-merge PRs without explicit user approval.** Do NOT use `gh pr merge --auto` or merge PRs immediately after opening them. PRs must remain open for review. Only merge when the user explicitly says to merge a specific PR.
+
+**Always create a corresponding GitHub issue for each Beads task.** When creating a Beads issue (`bd create`), also run `gh issue create` with a matching title, description, and appropriate labels. Link the GitHub issue number back to the Beads issue (`bd update <id> --description "... External: gh-<number>"`). This ensures traceability across both tracking systems.
+
 ## Epic Delivery Workflow
 
 When executing an Epic from GitHub issues:
