@@ -10,6 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Never auto-merge PRs without explicit user approval.** Do NOT use `gh pr merge --auto` or merge PRs immediately after opening them. PRs must remain open for review. Only merge when the user explicitly says to merge a specific PR.
 
+**Never run Beads closure sync directly on `main`.** Do not manually push Beads sync commits to `main` (protected branch). Use the existing `Sync Beads Closures` GitHub Action, which should update an automation branch and open/update a PR for review.
+
 **Always create a corresponding GitHub issue for each Beads task.** When creating a Beads issue (`bd create`), also run `gh issue create` with a matching title, description, and appropriate labels. Link the GitHub issue number back to the Beads issue (`bd update <id> --description "... External: gh-<number>"`). This ensures traceability across both tracking systems.
 
 ## Epic Delivery Workflow
