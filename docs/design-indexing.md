@@ -698,7 +698,7 @@ This aligns with the existing `IndexRecommendationEngine` thresholds, with the a
 
 ## 8. Phased Implementation Plan
 
-### Phase 0: Correctness Harness (~1 week)
+### Phase 0: Correctness Harness
 
 **Goal**: Build testing foundation before runtime code.
 
@@ -711,7 +711,7 @@ This aligns with the existing `IndexRecommendationEngine` thresholds, with the a
 
 **Deliverable**: `tests/index_*_tests.rs` test suite with 30+ test cases covering serialization, CAS, staleness, and split scenarios.
 
-### Phase 1: Compactor-Built Segment MVP (~2-3 weeks)
+### Phase 1: Compactor-Built Segment MVP
 
 **Goal**: End-to-end index build during compaction and index-aware query pruning.
 
@@ -751,7 +751,7 @@ This phase intentionally uses the current `QueryNode` execution path first to mi
 
 **Deliverable**: Compactor builds `.csi` segments during compaction, publishes manifests via CAS, query planner uses index for equality/IN predicates with explicit frontier union.
 
-### Phase 1.5: DataFusion-Native Scan Integration (~1-2 weeks)
+### Phase 1.5: DataFusion-Native Scan Integration
 
 **Goal**: Move index coordination from query orchestration into DataFusion table scan planning for simpler control flow and broader SQL-plan coverage.
 
@@ -767,7 +767,9 @@ This phase intentionally uses the current `QueryNode` execution path first to mi
 
 **Deliverable**: DataFusion directly drives index-aware scan pruning; query node no longer needs bespoke filter extraction for scan-time pruning.
 
-### Phase 2: Prom API + High-Cardinality Extensions (~2 weeks)
+**Execution preference**: This phase can be delivered as a single-shot implementation instead of a time-boxed rollout. Keep the same correctness guardrails (fallback on stale/missing/corrupt index state, watermark frontier union, generation checks) and land it when complete.
+
+### Phase 2: Prom API + High-Cardinality Extensions
 
 **Goal**: Accelerate `/api/v1/labels` and `/api/v1/series` endpoints. Add fuse filters for high-cardinality columns.
 
@@ -783,7 +785,7 @@ This phase intentionally uses the current `QueryNode` execution path first to mi
 
 **Deliverable**: `/api/v1/labels` returns sub-second results even with millions of unique label values. High-cardinality columns benefit from Fuse8/Fuse16 membership tests during Parquet scanning.
 
-### Phase 3: Adaptive Persistence + Ingester Segments (~2 weeks)
+### Phase 3: Adaptive Persistence + Ingester Segments
 
 **Goal**: Persist adaptive index lifecycle state. Optionally build per-chunk segments at ingestion to reduce freshness lag.
 
