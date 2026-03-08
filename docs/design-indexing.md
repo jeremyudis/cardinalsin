@@ -475,7 +475,7 @@ This avoids bloating the existing `MetadataClient` trait (which has 19 methods).
 
 **Note**: The methods `update_inverted_index`, `remove_from_inverted_index`, and `query_inverted_index` from PR #152 (reverted in #156) are not re-added. The segment+manifest model replaces them entirely.
 
-### 6.2 Query Planner Integration: Index-Aware Chunk Pruning
+### 6.2 Query Planner Integration: Index-Aware Chunk Pruning (Current Path)
 
 The existing query path in `QueryNode` (line 158-241 of `src/query/mod.rs`) today flows:
 
@@ -536,6 +536,59 @@ pub fn with_index_prefilter(mut self, prefilter: Arc<IndexPrefilter>) -> Self {
     self
 }
 ```
+
+### 6.2a Decoupling Contract with DataFusion
+
+This design intentionally keeps index build/storage decoupled from DataFusion internals:
+
+1. Compactor + manifest pipeline builds and publishes immutable index segments
+2. Query path uses index output only to reduce candidate chunk/file set
+3. DataFusion remains the execution and correctness engine
+
+Coordination occurs at the scan boundary: index code decides "which files may contain matches", then DataFusion executes SQL over those files with normal predicate pushdown and residual filtering.
+
+This preserves the critical invariant: index decisions are advisory/pruning-only. If index state is missing, stale, frozen, or corrupt, the query falls back to the unpruned chunk set and DataFusion still returns correct results.
+
+### 6.2b Recommended Evolution: DataFusion-Native Index Coordination
+
+The current-path integration above is the shortest path to production, but the recommended long-term integration is an **IndexAware TableProvider** that coordinates directly with DataFusion's `scan()` + `supports_filters_pushdown()` hooks.
+
+#### Why this is better
+
+1. Single planning path (eliminates duplicate predicate extraction logic in `QueryNode`)
+2. Better handling of complex SQL plans (including set operations like `UNION`, where each scan branch is planned independently by DataFusion)
+3. Cleaner semantics via DataFusion pushdown contracts:
+   - `Exact`: index guarantees safe pruning for supported predicates
+   - `Inexact`: index is used as a prefilter and DataFusion applies residual filters
+   - `Unsupported`: DataFusion handles filter entirely
+4. Simpler query flow: DataFusion owns predicate decomposition and scan planning end-to-end
+
+#### Execution model
+
+```
+SQL
+  -> DataFusion logical planning
+  -> IndexAwareMetricsTableProvider::supports_filters_pushdown(filters)
+  -> IndexAwareMetricsTableProvider::scan(projection, filters, limit)
+      -> load manifest + segments
+      -> evaluate indexed predicates (bitmap AND/OR where applicable)
+      -> union frontier fallback chunks
+      -> delegate final file list to ListingTable/Parquet scan
+  -> DataFusion executes residual filters, joins, aggregates, set operations
+```
+
+#### Predicate classes (recommended)
+
+1. `Eq` / `In` / conjunctions over indexed columns: `Exact` when watermark/generation checks pass and fallback union is applied
+2. `Or`/boolean expressions: push down as `Exact` only when expression can be fully represented by bitmap operations without false negatives; otherwise `Inexact`
+3. `Not` / `NotIn` / non-sargable expressions: `Unsupported` (or `Inexact` if using probabilistic prefilter), rely on DataFusion residual evaluation
+
+#### Migration strategy
+
+1. Keep Section 6.2 prefilter path for Phase 1 delivery (lowest risk)
+2. Introduce `IndexAwareMetricsTableProvider` in a follow-up phase
+3. Remove query-node-specific predicate extraction once provider path is stable
+4. Retain existing fallback behavior and metrics for staleness/frontier visibility
 
 ### 6.3 Compactor Integration: IndexBuilder Component
 
@@ -680,6 +733,8 @@ This aligns with the existing `IndexRecommendationEngine` thresholds, with the a
 - Add `index_prefilter: Option<Arc<IndexPrefilter>>` field to `QueryNode`
 - Call `prefilter.prune(chunks, predicates)` between `get_chunks_with_predicates()` and `register_metrics_table_for_chunks()`
 
+This phase intentionally uses the current `QueryNode` execution path first to minimize blast radius while validating index correctness and operational behavior.
+
 **Metrics (Phase 1)**:
 - `index_planner_pruned_chunks_total` (labels: tenant, shard, result={pruned,passed})
 - `index_frontier_chunk_count` (labels: tenant, shard)
@@ -695,6 +750,22 @@ This aligns with the existing `IndexRecommendationEngine` thresholds, with the a
 6. `index_manifest_staleness_seconds` stays <2× `compactor.check_interval` during normal operation
 
 **Deliverable**: Compactor builds `.csi` segments during compaction, publishes manifests via CAS, query planner uses index for equality/IN predicates with explicit frontier union.
+
+### Phase 1.5: DataFusion-Native Scan Integration (~1-2 weeks)
+
+**Goal**: Move index coordination from query orchestration into DataFusion table scan planning for simpler control flow and broader SQL-plan coverage.
+
+**New code**:
+- `src/query/index_table_provider.rs` — `IndexAwareMetricsTableProvider` wrapper over listing/parquet scan
+- `src/query/index_filter.rs` — filter-expression to bitmap operation mapper (`Eq`/`In`/`And`/selected `Or`)
+
+**Changes**:
+- Register `metrics` as `IndexAwareMetricsTableProvider` instead of raw `ListingTable`
+- Implement `supports_filters_pushdown()` classification (`Exact`/`Inexact`/`Unsupported`)
+- Implement `scan()` to run manifest/segment pruning and emit pruned file groups before parquet execution
+- Keep same watermark/frontier fallback and generation checks from Section 6.2
+
+**Deliverable**: DataFusion directly drives index-aware scan pruning; query node no longer needs bespoke filter extraction for scan-time pruning.
 
 ### Phase 2: Prom API + High-Cardinality Extensions (~2 weeks)
 
