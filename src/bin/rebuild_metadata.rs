@@ -60,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
                 value == "1" || value.eq_ignore_ascii_case("true")
             })
             .unwrap_or(false),
+        ..Default::default()
     };
 
     let client = ObjectStoreMetadataClient::new(object_store, config);

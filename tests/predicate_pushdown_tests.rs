@@ -18,6 +18,7 @@ fn create_test_client() -> S3MetadataClient {
         metadata_prefix: "test/".to_string(),
         enable_cache: true,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     S3MetadataClient::new(store, config)
 }

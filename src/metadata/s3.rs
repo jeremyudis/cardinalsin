@@ -137,6 +137,8 @@ pub struct ObjectStoreMetadataConfig {
     pub enable_cache: bool,
     /// Allow explicit fallback to unsafe overwrite when CAS update is not supported
     pub allow_unsafe_overwrite: bool,
+    /// Time index bucket size in seconds (default: 3600, min: 60)
+    pub time_index_granularity_seconds: u64,
 }
 
 impl Default for ObjectStoreMetadataConfig {
@@ -146,6 +148,7 @@ impl Default for ObjectStoreMetadataConfig {
             metadata_prefix: "metadata/".to_string(),
             enable_cache: true,
             allow_unsafe_overwrite: false,
+            time_index_granularity_seconds: 3600,
         }
     }
 }
@@ -165,8 +168,11 @@ pub struct ObjectStoreMetadataClient {
 }
 
 impl ObjectStoreMetadataClient {
-    /// Nanoseconds per hour constant
-    const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
+    /// Returns nanoseconds per time index bucket, enforcing a minimum of 60 seconds.
+    fn nanos_per_bucket(&self) -> i64 {
+        let granularity = self.config.time_index_granularity_seconds.max(60);
+        granularity as i64 * 1_000_000_000
+    }
 
     /// Create a new S3 metadata client
     pub fn new(object_store: Arc<dyn ObjectStore>, config: ObjectStoreMetadataConfig) -> Self {
@@ -338,9 +344,9 @@ impl ObjectStoreMetadataClient {
         }
     }
 
-    /// Calculate hour bucket for a timestamp
-    fn hour_bucket(timestamp: i64) -> i64 {
-        (timestamp / Self::NANOS_PER_HOUR) * Self::NANOS_PER_HOUR
+    /// Calculate time index bucket for a timestamp given the bucket size in nanoseconds.
+    fn hour_bucket(timestamp: i64, bucket_size: i64) -> i64 {
+        (timestamp / bucket_size) * bucket_size
     }
 
     /// Get the S3 path for a chunk's metadata
@@ -753,9 +759,10 @@ impl ObjectStoreMetadataClient {
         // Build new time index from chunk metadata
         let mut time_index = BTreeMap::new();
 
+        let bucket_size = self.nanos_per_bucket();
         for (path, extended) in catalog.chunks.iter() {
-            let start_bucket = Self::hour_bucket(extended.base.min_timestamp);
-            let end_bucket = Self::hour_bucket(extended.base.max_timestamp);
+            let start_bucket = Self::hour_bucket(extended.base.min_timestamp, bucket_size);
+            let end_bucket = Self::hour_bucket(extended.base.max_timestamp, bucket_size);
 
             let mut bucket = start_bucket;
             while bucket <= end_bucket {
@@ -763,7 +770,7 @@ impl ObjectStoreMetadataClient {
                     .entry(bucket)
                     .or_insert_with(Vec::new)
                     .push(path.clone());
-                bucket += Self::NANOS_PER_HOUR;
+                bucket += bucket_size;
             }
         }
 
@@ -803,8 +810,9 @@ impl ObjectStoreMetadataClient {
             let (mut catalog, etag) = self.load_catalog_with_etag().await?;
             catalog.chunks.insert(path.to_string(), extended.clone());
 
-            let start_bucket = Self::hour_bucket(metadata.min_timestamp);
-            let end_bucket = Self::hour_bucket(metadata.max_timestamp);
+            let bucket_size = self.nanos_per_bucket();
+            let start_bucket = Self::hour_bucket(metadata.min_timestamp, bucket_size);
+            let end_bucket = Self::hour_bucket(metadata.max_timestamp, bucket_size);
             let mut bucket = start_bucket;
             while bucket <= end_bucket {
                 catalog
@@ -812,7 +820,7 @@ impl ObjectStoreMetadataClient {
                     .entry(bucket)
                     .or_default()
                     .push(path.to_string());
-                bucket += Self::NANOS_PER_HOUR;
+                bucket += bucket_size;
             }
             catalog.version = 2;
 
@@ -1080,10 +1088,10 @@ impl MetadataClient for ObjectStoreMetadataClient {
         // Load unified catalog (from cache or S3)
         let catalog = self.load_catalog_cached().await?;
 
-        // Find hour buckets that overlap with range
-        let nanos_per_hour = 3_600_000_000_000i64;
-        let start_bucket = (range.start / nanos_per_hour) * nanos_per_hour;
-        let end_bucket = (range.end / nanos_per_hour) * nanos_per_hour;
+        // Find buckets that overlap with range
+        let bucket_size = self.nanos_per_bucket();
+        let start_bucket = Self::hour_bucket(range.start, bucket_size);
+        let end_bucket = Self::hour_bucket(range.end, bucket_size);
 
         let mut results = Vec::new();
         let mut pruned_count = 0;
@@ -1197,8 +1205,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 continue;
             }
 
-            let nanos_per_hour = 3_600_000_000_000i64;
-            let bucket = (extended.base.min_timestamp / nanos_per_hour) * nanos_per_hour;
+            let bucket = Self::hour_bucket(extended.base.min_timestamp, self.nanos_per_bucket());
 
             hour_groups.entry(bucket).or_default().push(path.clone());
         }

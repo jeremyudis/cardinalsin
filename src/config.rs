@@ -201,6 +201,7 @@ impl ComponentFactory {
             metadata_prefix: prefix,
             enable_cache: true,
             allow_unsafe_overwrite: Self::read_bool_env("S3_METADATA_ALLOW_UNSAFE_OVERWRITE"),
+            ..Default::default()
         };
 
         Ok(Arc::new(ObjectStoreMetadataClient::new(

@@ -7,6 +7,6 @@
 mod metrics;
 
 pub use metrics::{
-    ColumnDefinition, LabelCardinality, MetricSchema, MetricSchemaBuilder, MetricType,
+    ColumnDefinition, MetricSchema, MetricSchemaBuilder, MetricType, TagCardinality,
     METRIC_NAME_FIELD, TIMESTAMP_FIELD, VALUE_F64_FIELD, VALUE_I64_FIELD, VALUE_U64_FIELD,
 };

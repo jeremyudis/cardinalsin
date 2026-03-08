@@ -205,6 +205,7 @@ async fn test_get_nonexistent_chunk() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -243,6 +244,7 @@ async fn test_list_chunks_uninitialized_metadata() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -281,6 +283,7 @@ async fn test_get_chunks_empty_time_range() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -315,6 +318,7 @@ async fn test_metadata_cas_fails_loudly_when_unsafe_overwrite_disabled() {
         metadata_prefix: "metadata/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
 
     let client = S3MetadataClient::new(object_store, config);
@@ -371,6 +375,7 @@ async fn test_metadata_cas_fallback_overwrite_when_enabled() {
         metadata_prefix: "metadata/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: true,
+        ..Default::default()
     };
 
     let client = S3MetadataClient::new(object_store, config);
@@ -413,6 +418,7 @@ async fn test_delete_nonexistent_chunk() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -429,6 +435,7 @@ async fn test_register_chunk_with_zero_timestamps() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -461,6 +468,7 @@ async fn test_register_duplicate_chunk_path() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -603,6 +611,7 @@ async fn test_compaction_with_single_source() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = Arc::new(S3MetadataClient::new(object_store, config));
 
@@ -654,6 +663,7 @@ async fn test_l0_candidates_empty() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = Arc::new(S3MetadataClient::new(object_store, config));
 
@@ -695,6 +705,7 @@ async fn test_level_candidates_nonexistent_level() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -1043,6 +1054,7 @@ async fn test_concurrent_registration_data_integrity() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = Arc::new(S3MetadataClient::new(object_store, config));
 

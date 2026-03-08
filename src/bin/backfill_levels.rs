@@ -86,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 value == "1" || value.eq_ignore_ascii_case("true")
             })
             .unwrap_or(false),
+        ..Default::default()
     };
 
     let metadata_client = ObjectStoreMetadataClient::new(object_store, config);

@@ -1,12 +1,12 @@
-//! Column promotion (label → dedicated column)
+//! Column promotion (tag → dedicated column)
 
 use super::{IndexType, TenantId};
 use crate::Result;
 
-/// Source of label data
+/// Source of tag data
 #[derive(Debug, Clone)]
-pub enum LabelSource {
-    /// From generic labels column
+pub enum TagSource {
+    /// From generic tags column
     GenericLabels(String),
     /// Already a dedicated column
     Dedicated(String),
@@ -24,7 +24,7 @@ pub struct ColumnTarget {
 pub struct BackfillJob {
     pub id: String,
     pub tenant_id: TenantId,
-    pub source: LabelSource,
+    pub source: TagSource,
     pub target: ColumnTarget,
     pub status: BackfillStatus,
     pub progress: BackfillProgress,
@@ -83,7 +83,7 @@ impl ColumnPromoter {
         let job = BackfillJob {
             id: job_id.clone(),
             tenant_id,
-            source: LabelSource::GenericLabels(label_name.to_string()),
+            source: TagSource::GenericLabels(label_name.to_string()),
             target: ColumnTarget {
                 column_name: label_name.to_string(),
                 index_type,
@@ -159,7 +159,7 @@ mod tests {
 
         let job = promoter.get_job(&job_id).unwrap();
         assert_eq!(job.status, BackfillStatus::Pending);
-        assert!(matches!(job.source, LabelSource::GenericLabels(_)));
+        assert!(matches!(job.source, TagSource::GenericLabels(_)));
     }
 
     #[test]
