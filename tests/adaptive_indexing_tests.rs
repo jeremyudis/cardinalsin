@@ -242,6 +242,44 @@ async fn test_query_node_integration() {
     assert!(Arc::strong_count(&index_controller) >= 2); // query_node + our reference
 }
 
+/// Test query execution records adaptive stats for filter and group-by columns
+#[tokio::test]
+async fn test_query_records_adaptive_stats() {
+    let object_store = Arc::new(InMemory::new());
+    let metadata = Arc::new(LocalMetadataClient::new());
+    let storage_config = StorageConfig::default();
+
+    let index_controller = Arc::new(AdaptiveIndexController::new(AdaptiveIndexConfig::default()));
+
+    let query_node = QueryNode::new(
+        QueryConfig::default(),
+        object_store,
+        metadata,
+        storage_config,
+    )
+    .await
+    .unwrap()
+    .with_adaptive_indexing(index_controller.clone());
+
+    let tenant_id = "tenant-stats".to_string();
+    let sql = "SELECT service, COUNT(*) FROM metrics WHERE host = 'web-01' GROUP BY service";
+
+    let _ = query_node.query_for_tenant(sql, &tenant_id).await.unwrap();
+
+    let stats = index_controller
+        .get_tenant_stats(&tenant_id)
+        .expect("expected adaptive stats after query");
+    assert!(
+        stats.column_filter_stats.contains_key("host"),
+        "expected filter stats for host predicate"
+    );
+    assert_eq!(
+        stats.groupby_stats.get("service"),
+        Some(&1),
+        "expected one GROUP BY observation for service"
+    );
+}
+
 /// Test filter statistics collection
 #[tokio::test]
 async fn test_filter_statistics_collection() {
