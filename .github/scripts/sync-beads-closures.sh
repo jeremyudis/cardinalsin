@@ -20,6 +20,7 @@ fi
 
 pr_number="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH")"
 pr_url="$(jq -r '.pull_request.html_url // empty' "$GITHUB_EVENT_PATH")"
+base_ref="$(jq -r '.pull_request.base.ref // "main"' "$GITHUB_EVENT_PATH")"
 pr_title="$(jq -r '.pull_request.title // ""' "$GITHUB_EVENT_PATH")"
 pr_body="$(jq -r '.pull_request.body // ""' "$GITHUB_EVENT_PATH")"
 
@@ -83,6 +84,41 @@ fi
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git add .beads/issues.jsonl
-git commit -m "chore(beads): sync closures for merged PR #${pr_number}"
-git push
+commit_title="chore(beads): sync closures for merged PR #${pr_number}"
+sync_branch="automation/beads-sync-pr-${pr_number}"
 
+git commit -m "${commit_title}"
+git checkout -B "${sync_branch}"
+if git ls-remote --exit-code --heads origin "${sync_branch}" >/dev/null 2>&1; then
+  git push --force-with-lease origin "${sync_branch}"
+else
+  git push --set-upstream origin "${sync_branch}"
+fi
+
+repo="${GITHUB_REPOSITORY:-}"
+if [[ -z "$repo" ]]; then
+  echo "GITHUB_REPOSITORY is missing; pushed '${sync_branch}' but cannot auto-create PR."
+  exit 0
+fi
+
+existing_pr_url="$(
+  gh pr list \
+    --repo "$repo" \
+    --state open \
+    --base "$base_ref" \
+    --head "$sync_branch" \
+    --json url \
+    --jq '.[0].url // empty'
+)"
+
+if [[ -n "$existing_pr_url" ]]; then
+  echo "Updated existing sync PR: ${existing_pr_url}"
+  exit 0
+fi
+
+gh pr create \
+  --repo "$repo" \
+  --base "$base_ref" \
+  --head "$sync_branch" \
+  --title "${commit_title}" \
+  --body "Automated Beads closure sync for merged PR #${pr_number} (${pr_url})."
