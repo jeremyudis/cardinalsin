@@ -36,6 +36,8 @@ pub struct AdaptiveIndexConfig {
     pub removal_grace_period: Duration,
     /// Statistics window duration
     pub stats_window: Duration,
+    /// Controller loop interval
+    pub check_interval: Duration,
 }
 
 impl Default for AdaptiveIndexConfig {
@@ -48,6 +50,7 @@ impl Default for AdaptiveIndexConfig {
             unused_days_threshold: 30,
             removal_grace_period: Duration::from_secs(7 * 24 * 3600), // 7 days
             stats_window: Duration::from_secs(48 * 3600),             // 48 hours
+            check_interval: Duration::from_secs(300),                 // Check every 5 minutes
         }
     }
 }
@@ -75,6 +78,7 @@ pub struct AdaptiveIndexController {
 impl AdaptiveIndexController {
     /// Create a new adaptive index controller
     pub fn new(config: AdaptiveIndexConfig) -> Self {
+        let check_interval = config.check_interval;
         let stats_collector = Arc::new(QueryStatsCollector::new(config.stats_window));
         let recommendation_engine = IndexRecommendationEngine::new(config.clone());
         let lifecycle_manager = IndexLifecycleManager::new(config.clone());
@@ -85,7 +89,7 @@ impl AdaptiveIndexController {
             recommendation_engine,
             lifecycle_manager,
             tenant_configs: std::sync::RwLock::new(std::collections::HashMap::new()),
-            check_interval: Duration::from_secs(300), // Check every 5 minutes
+            check_interval,
         }
     }
 

@@ -22,6 +22,7 @@ use parking_lot::RwLock;
 use std::collections::{BTreeSet, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 /// Query engine powered by DataFusion
@@ -266,6 +267,7 @@ impl QueryEngine {
         let df = self.ctx.sql(sql).await?;
         let plan = df.logical_plan();
         let filter_columns = Self::extract_filter_columns(plan);
+        let groupby_columns = Self::extract_groupby_columns(plan);
 
         // 2. Get visible indexes for this tenant
         let tenant_string = tenant_id.to_string();
@@ -281,9 +283,22 @@ impl QueryEngine {
         }
 
         // 4. Execute query (DataFusion handles predicate pushdown automatically)
+        let query_started = Instant::now();
         let batches = df.collect().await?;
+        let query_time = query_started.elapsed();
 
-        // 5. Track would-have-helped for invisible indexes
+        // 5. Record stats used by the recommendation cycle.
+        for column in &filter_columns {
+            // Start with conservative selectivity until physical index scans
+            // can measure this directly from filtered row counts.
+            index_controller.record_filter(&tenant_string, column, 0.1, query_time);
+        }
+
+        if !groupby_columns.is_empty() {
+            index_controller.record_groupby(&tenant_string, &groupby_columns);
+        }
+
+        // 6. Track would-have-helped for invisible indexes
         let invisible_indexes = index_controller
             .lifecycle_manager
             .get_invisible_indexes(&tenant_string);
@@ -308,6 +323,15 @@ impl QueryEngine {
         columns
     }
 
+    /// Extract GROUP BY columns from a logical plan
+    fn extract_groupby_columns(plan: &LogicalPlan) -> Vec<String> {
+        let mut columns = Vec::new();
+        Self::extract_groupby_columns_recursive(plan, &mut columns);
+        columns.sort();
+        columns.dedup();
+        columns
+    }
+
     /// Recursively extract filter columns from a logical plan
     fn extract_filter_columns_recursive(plan: &LogicalPlan, columns: &mut Vec<String>) {
         match plan {
@@ -326,6 +350,31 @@ impl QueryEngine {
             }
             LogicalPlan::Aggregate(agg) => {
                 Self::extract_filter_columns_recursive(&agg.input, columns);
+            }
+            _ => {}
+        }
+    }
+
+    /// Recursively extract GROUP BY columns from a logical plan
+    fn extract_groupby_columns_recursive(plan: &LogicalPlan, columns: &mut Vec<String>) {
+        match plan {
+            LogicalPlan::Aggregate(agg) => {
+                for expr in &agg.group_expr {
+                    Self::extract_columns_from_expr(expr, columns);
+                }
+                Self::extract_groupby_columns_recursive(&agg.input, columns);
+            }
+            LogicalPlan::Filter(filter) => {
+                Self::extract_groupby_columns_recursive(&filter.input, columns);
+            }
+            LogicalPlan::Projection(proj) => {
+                Self::extract_groupby_columns_recursive(&proj.input, columns);
+            }
+            LogicalPlan::Sort(sort) => {
+                Self::extract_groupby_columns_recursive(&sort.input, columns);
+            }
+            LogicalPlan::Limit(limit) => {
+                Self::extract_groupby_columns_recursive(&limit.input, columns);
             }
             _ => {}
         }
