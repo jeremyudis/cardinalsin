@@ -218,6 +218,48 @@ async fn test_time_range_query() {
     }
 }
 
+/// Test that CardinalSin's own self-telemetry metrics are ingested (dogfooding)
+///
+/// The ingester, query node, and compactor all emit OTel metrics that flow through
+/// the collector back into CardinalSin. This test validates that pipeline works.
+#[tokio::test]
+#[ignore = "requires running docker-compose stack"]
+async fn test_dogfooding_self_telemetry() {
+    let harness = E2EHarness::from_env();
+    harness
+        .wait_healthy(Duration::from_secs(30))
+        .await
+        .expect("Services should be healthy");
+
+    // Wait for at least one telemetry flush cycle
+    tokio::time::sleep(Duration::from_secs(15)).await;
+
+    let result = harness
+        .query_sql(
+            "SELECT DISTINCT metric_name FROM metrics WHERE metric_name LIKE 'cardinalsin_%' ORDER BY metric_name",
+        )
+        .await;
+
+    match result {
+        Ok(r) => {
+            println!(
+                "Dogfooding metrics found: {} distinct cardinalsin_* metrics",
+                r.rows.len()
+            );
+            for row in &r.rows {
+                println!("  - {}", row[0]);
+            }
+            assert!(
+                !r.rows.is_empty(),
+                "Should have at least 1 self-telemetry metric (cardinalsin_*)"
+            );
+        }
+        Err(e) => {
+            panic!("Dogfooding query failed: {}", e);
+        }
+    }
+}
+
 /// Test query error handling for invalid SQL
 #[tokio::test]
 #[ignore = "requires running docker-compose stack"]

@@ -44,3 +44,74 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --all-targets --all-features
+
+  e2e:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.93.0
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Start docker-compose stack
+        run: docker compose -f deploy/docker-compose.yml up -d --build
+
+      - name: Wait for services to be healthy
+        run: |
+          echo "Waiting for ingester..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8081/health > /dev/null 2>&1; then
+              echo "Ingester healthy after ${i}s"
+              break
+            fi
+            sleep 2
+          done
+          echo "Waiting for query node..."
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/health > /dev/null 2>&1; then
+              echo "Query node healthy after ${i}s"
+              break
+            fi
+            sleep 2
+          done
+          # Verify both are up
+          curl -sf http://localhost:8081/health || (echo "Ingester not healthy" && exit 1)
+          curl -sf http://localhost:8080/health || (echo "Query node not healthy" && exit 1)
+          # Wait for initial telemetry flush
+          echo "Waiting for initial OTel flush..."
+          sleep 15
+
+      - name: Run E2E smoke tests
+        run: cargo test --test e2e_smoke -- --ignored --nocapture --skip known_issues
+
+      - name: Collect container logs
+        if: always()
+        run: |
+          mkdir -p e2e-logs
+          for svc in ingester query compactor otel-collector; do
+            docker logs "cardinalsin-${svc}" > "e2e-logs/${svc}.log" 2>&1 || true
+          done
+
+      - name: Upload E2E logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-container-logs
+          path: e2e-logs/
+          retention-days: 7
+
+      - name: Teardown
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v
