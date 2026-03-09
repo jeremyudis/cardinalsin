@@ -35,6 +35,7 @@ services:
 
   # Ingester node
   ingester:
+    image: ${CARDINALSIN_IMAGE:-}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -69,6 +70,7 @@ services:
 
   # Query node
   query:
+    image: ${CARDINALSIN_IMAGE:-}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -102,6 +104,7 @@ services:
 
   # Compactor
   compactor:
+    image: ${CARDINALSIN_IMAGE:-}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
