@@ -4,5 +4,6 @@
 
 pub mod health_tests;
 pub mod prometheus_api_tests;
+pub mod prometheus_known_issues_tests;
 pub mod protocol_tests;
 pub mod roundtrip_tests;
