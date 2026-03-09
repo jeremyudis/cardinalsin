@@ -829,6 +829,7 @@ async fn test_time_index_rebuild() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -870,6 +871,7 @@ async fn test_compaction_level_tracking_through_metadata() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = Arc::new(S3MetadataClient::new(object_store, config));
 
@@ -1030,6 +1032,7 @@ async fn test_s3_shard_metadata_lifecycle() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = Arc::new(S3MetadataClient::new(object_store, config));
 
@@ -1096,6 +1099,7 @@ async fn test_s3_shard_not_found() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = S3MetadataClient::new(object_store, config);
 
@@ -1117,6 +1121,7 @@ async fn test_s3_split_lifecycle() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = Arc::new(S3MetadataClient::new(object_store, config));
 
@@ -1207,6 +1212,7 @@ async fn test_concurrent_split_and_chunk_registration() {
         metadata_prefix: "test/".to_string(),
         enable_cache: false,
         allow_unsafe_overwrite: false,
+        ..Default::default()
     };
     let client = Arc::new(S3MetadataClient::new(object_store, config));
 

@@ -1,7 +1,7 @@
 //! Metric schema definitions
 //!
-//! Defines the Arrow schema for metrics with label-as-columns model.
-//! Low-cardinality labels use dictionary encoding, high-cardinality labels
+//! Defines the Arrow schema for metrics with tag-as-columns model.
+//! Low-cardinality tags use dictionary encoding, high-cardinality tags
 //! are stored as plain strings without indexing.
 
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
@@ -40,9 +40,9 @@ impl MetricType {
     }
 }
 
-/// Label cardinality classification
+/// Tag cardinality classification
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LabelCardinality {
+pub enum TagCardinality {
     /// Low cardinality (<1K unique values) - uses dictionary encoding + bloom filter
     Low,
     /// Medium cardinality (1K-100K unique values) - uses dictionary encoding
@@ -51,33 +51,33 @@ pub enum LabelCardinality {
     High,
 }
 
-impl LabelCardinality {
+impl TagCardinality {
     /// Estimate cardinality from unique value count
     pub fn from_count(count: u64) -> Self {
         match count {
-            0..=1_000 => LabelCardinality::Low,
-            1_001..=100_000 => LabelCardinality::Medium,
-            _ => LabelCardinality::High,
+            0..=1_000 => TagCardinality::Low,
+            1_001..=100_000 => TagCardinality::Medium,
+            _ => TagCardinality::High,
         }
     }
 
     /// Returns the dictionary key type for this cardinality level
     pub fn dictionary_key_type(&self) -> Option<DataType> {
         match self {
-            LabelCardinality::Low => Some(DataType::UInt16),
-            LabelCardinality::Medium => Some(DataType::UInt32),
-            LabelCardinality::High => None, // No dictionary for high cardinality
+            TagCardinality::Low => Some(DataType::UInt16),
+            TagCardinality::Medium => Some(DataType::UInt32),
+            TagCardinality::High => None, // No dictionary for high cardinality
         }
     }
 }
 
-/// Column definition for a label
+/// Column definition for a tag
 #[derive(Debug, Clone)]
 pub struct ColumnDefinition {
-    /// Column name (label key)
+    /// Column name (tag key)
     pub name: String,
     /// Expected cardinality
-    pub cardinality: LabelCardinality,
+    pub cardinality: TagCardinality,
     /// Whether this column is nullable
     pub nullable: bool,
     /// Description of the column
@@ -86,7 +86,7 @@ pub struct ColumnDefinition {
 
 impl ColumnDefinition {
     /// Create a new column definition
-    pub fn new(name: impl Into<String>, cardinality: LabelCardinality) -> Self {
+    pub fn new(name: impl Into<String>, cardinality: TagCardinality) -> Self {
         Self {
             name: name.into(),
             cardinality,
@@ -126,15 +126,15 @@ impl ColumnDefinition {
 
 /// Schema for metric data
 ///
-/// This schema follows the "labels as columns" model where each label key
+/// This schema follows the "tags as columns" model where each tag key
 /// becomes a column in the schema. This eliminates the need for per-tag-combination
 /// indexing and allows for efficient columnar scans.
 #[derive(Debug, Clone)]
 pub struct MetricSchema {
     /// The Arrow schema
     schema: SchemaRef,
-    /// Label columns by name
-    label_columns: HashMap<String, ColumnDefinition>,
+    /// Tag columns by name
+    tag_columns: HashMap<String, ColumnDefinition>,
     /// Whether to include all value types
     _multi_value: bool,
 }
@@ -150,14 +150,14 @@ impl MetricSchema {
         self.schema.clone()
     }
 
-    /// Get all label column names
-    pub fn label_columns(&self) -> impl Iterator<Item = &str> {
-        self.label_columns.keys().map(|s| s.as_str())
+    /// Get all tag column names
+    pub fn tag_columns(&self) -> impl Iterator<Item = &str> {
+        self.tag_columns.keys().map(|s| s.as_str())
     }
 
-    /// Get a label column definition by name
-    pub fn get_label(&self, name: &str) -> Option<&ColumnDefinition> {
-        self.label_columns.get(name)
+    /// Get a tag column definition by name
+    pub fn get_tag(&self, name: &str) -> Option<&ColumnDefinition> {
+        self.tag_columns.get(name)
     }
 
     /// Check if a column exists
@@ -168,30 +168,29 @@ impl MetricSchema {
     /// Get the default schema for metrics
     pub fn default_metrics() -> Self {
         Self::builder()
-            .with_label(
-                ColumnDefinition::new("host", LabelCardinality::Medium)
+            .with_tag(
+                ColumnDefinition::new("host", TagCardinality::Medium)
                     .description("Host name or IP"),
             )
-            .with_label(
-                ColumnDefinition::new("service", LabelCardinality::Low).description("Service name"),
+            .with_tag(
+                ColumnDefinition::new("service", TagCardinality::Low).description("Service name"),
             )
-            .with_label(
-                ColumnDefinition::new("env", LabelCardinality::Low)
+            .with_tag(
+                ColumnDefinition::new("env", TagCardinality::Low)
                     .description("Environment (prod, staging, dev)"),
             )
-            .with_label(
-                ColumnDefinition::new("region", LabelCardinality::Low).description("Cloud region"),
+            .with_tag(
+                ColumnDefinition::new("region", TagCardinality::Low).description("Cloud region"),
             )
-            .with_label(
-                ColumnDefinition::new("instance", LabelCardinality::Medium)
+            .with_tag(
+                ColumnDefinition::new("instance", TagCardinality::Medium)
                     .description("Instance ID"),
             )
-            .with_label(
-                ColumnDefinition::new("pod", LabelCardinality::High)
-                    .description("Kubernetes pod ID"),
+            .with_tag(
+                ColumnDefinition::new("pod", TagCardinality::High).description("Kubernetes pod ID"),
             )
-            .with_label(
-                ColumnDefinition::new("trace_id", LabelCardinality::High)
+            .with_tag(
+                ColumnDefinition::new("trace_id", TagCardinality::High)
                     .description("Distributed trace ID"),
             )
             .build()
@@ -201,14 +200,14 @@ impl MetricSchema {
 /// Builder for MetricSchema
 #[derive(Debug)]
 pub struct MetricSchemaBuilder {
-    labels: Vec<ColumnDefinition>,
+    tags: Vec<ColumnDefinition>,
     multi_value: bool,
 }
 
 impl Default for MetricSchemaBuilder {
     fn default() -> Self {
         Self {
-            labels: Vec::new(),
+            tags: Vec::new(),
             multi_value: true, // Enable multi-value columns by default
         }
     }
@@ -220,9 +219,9 @@ impl MetricSchemaBuilder {
         Self::default()
     }
 
-    /// Add a label column
-    pub fn with_label(mut self, column: ColumnDefinition) -> Self {
-        self.labels.push(column);
+    /// Add a tag column
+    pub fn with_tag(mut self, column: ColumnDefinition) -> Self {
+        self.tags.push(column);
         self
     }
 
@@ -250,11 +249,11 @@ impl MetricSchemaBuilder {
             false,
         ));
 
-        // Label columns
-        let mut label_columns = HashMap::new();
-        for column in self.labels {
+        // Tag columns
+        let mut tag_columns = HashMap::new();
+        for column in self.tags {
             fields.push(column.to_field());
-            label_columns.insert(column.name.clone(), column);
+            tag_columns.insert(column.name.clone(), column);
         }
 
         // Value fields
@@ -269,7 +268,7 @@ impl MetricSchemaBuilder {
 
         MetricSchema {
             schema,
-            label_columns,
+            tag_columns,
             _multi_value: self.multi_value,
         }
     }
@@ -289,7 +288,7 @@ mod tests {
         assert!(arrow_schema.field_with_name(METRIC_NAME_FIELD).is_ok());
         assert!(arrow_schema.field_with_name(VALUE_F64_FIELD).is_ok());
 
-        // Check label fields
+        // Check tag fields
         assert!(schema.has_column("host"));
         assert!(schema.has_column("service"));
         assert!(schema.has_column("pod"));
@@ -298,23 +297,20 @@ mod tests {
 
     #[test]
     fn test_cardinality_classification() {
-        assert_eq!(LabelCardinality::from_count(100), LabelCardinality::Low);
-        assert_eq!(LabelCardinality::from_count(1000), LabelCardinality::Low);
-        assert_eq!(LabelCardinality::from_count(1001), LabelCardinality::Medium);
-        assert_eq!(
-            LabelCardinality::from_count(50000),
-            LabelCardinality::Medium
-        );
-        assert_eq!(LabelCardinality::from_count(100001), LabelCardinality::High);
+        assert_eq!(TagCardinality::from_count(100), TagCardinality::Low);
+        assert_eq!(TagCardinality::from_count(1000), TagCardinality::Low);
+        assert_eq!(TagCardinality::from_count(1001), TagCardinality::Medium);
+        assert_eq!(TagCardinality::from_count(50000), TagCardinality::Medium);
+        assert_eq!(TagCardinality::from_count(100001), TagCardinality::High);
     }
 
     #[test]
     fn test_dictionary_encoding() {
-        let low = ColumnDefinition::new("env", LabelCardinality::Low);
+        let low = ColumnDefinition::new("env", TagCardinality::Low);
         let field = low.to_field();
         assert!(matches!(field.data_type(), DataType::Dictionary(_, _)));
 
-        let high = ColumnDefinition::new("trace_id", LabelCardinality::High);
+        let high = ColumnDefinition::new("trace_id", TagCardinality::High);
         let field = high.to_field();
         assert!(matches!(field.data_type(), DataType::Utf8));
     }
@@ -322,15 +318,25 @@ mod tests {
     #[test]
     fn test_custom_schema() {
         let schema = MetricSchema::builder()
-            .with_label(ColumnDefinition::new(
-                "custom_label",
-                LabelCardinality::Medium,
-            ))
+            .with_tag(ColumnDefinition::new("custom_tag", TagCardinality::Medium))
             .multi_value(true)
             .build();
 
-        assert!(schema.has_column("custom_label"));
+        assert!(schema.has_column("custom_tag"));
         assert!(schema.has_column(VALUE_I64_FIELD));
         assert!(schema.has_column(VALUE_U64_FIELD));
+    }
+
+    #[test]
+    fn test_tag_columns_and_get_tag() {
+        let schema = MetricSchema::default_metrics();
+        let tag_names: Vec<&str> = schema.tag_columns().collect();
+        assert!(tag_names.contains(&"host"));
+        assert!(tag_names.contains(&"service"));
+
+        let host_def = schema.get_tag("host").unwrap();
+        assert_eq!(host_def.cardinality, TagCardinality::Medium);
+
+        assert!(schema.get_tag("nonexistent").is_none());
     }
 }
