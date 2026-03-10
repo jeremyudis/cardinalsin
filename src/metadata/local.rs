@@ -71,6 +71,13 @@ impl Default for LocalMetadataClient {
 #[async_trait]
 impl MetadataClient for LocalMetadataClient {
     async fn register_chunk(&self, path: &str, metadata: &ChunkMetadata) -> Result<()> {
+        if metadata.shard_id.is_empty() {
+            return Err(crate::Error::Metadata(format!(
+                "chunk {} is missing shard_id",
+                path
+            )));
+        }
+
         // Store chunk metadata
         self.chunks.insert(path.to_string(), metadata.clone());
 
@@ -94,6 +101,14 @@ impl MetadataClient for LocalMetadataClient {
     }
 
     async fn get_chunks(&self, range: TimeRange) -> Result<Vec<TimeIndexEntry>> {
+        self.get_chunks_with_predicates(range, &[]).await
+    }
+
+    async fn get_chunks_with_predicates(
+        &self,
+        range: TimeRange,
+        _predicates: &[super::predicates::ColumnPredicate],
+    ) -> Result<Vec<TimeIndexEntry>> {
         let mut results = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
@@ -127,6 +142,25 @@ impl MetadataClient for LocalMetadataClient {
         results.sort_by_key(|e| e.min_timestamp);
 
         Ok(results)
+    }
+
+    async fn get_chunks_with_predicates_for_shards(
+        &self,
+        range: TimeRange,
+        predicates: &[super::predicates::ColumnPredicate],
+        shard_ids: &[String],
+    ) -> Result<Vec<TimeIndexEntry>> {
+        let chunks = self.get_chunks_with_predicates(range, predicates).await?;
+        if shard_ids.is_empty() {
+            return Ok(chunks);
+        }
+
+        let wanted: std::collections::HashSet<&str> =
+            shard_ids.iter().map(String::as_str).collect();
+        Ok(chunks
+            .into_iter()
+            .filter(|entry| wanted.contains(entry.shard_id.as_str()))
+            .collect())
     }
 
     async fn get_chunk(&self, path: &str) -> Result<Option<ChunkMetadata>> {
@@ -343,10 +377,7 @@ impl MetadataClient for LocalMetadataClient {
         let results: Vec<TimeIndexEntry> = self
             .chunks
             .iter()
-            .filter(|entry| match entry.value().shard_id.as_deref() {
-                Some(chunk_shard) => chunk_shard == shard_id,
-                None => entry.key().contains(shard_id),
-            })
+            .filter(|entry| entry.value().shard_id == shard_id)
             .map(|entry| TimeIndexEntry::from(entry.value()))
             .collect();
 
@@ -521,7 +552,7 @@ mod tests {
             max_timestamp: max_ts,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-            shard_id: None,
+            shard_id: "test-shard".to_string(),
         }
     }
 

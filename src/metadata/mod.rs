@@ -54,7 +54,7 @@ pub struct TimeIndexEntry {
     pub max_timestamp: i64,
     pub row_count: u64,
     pub size_bytes: u64,
-    pub shard_id: Option<String>,
+    pub shard_id: String,
 }
 
 impl From<&ChunkMetadata> for TimeIndexEntry {

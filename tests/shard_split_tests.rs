@@ -157,7 +157,7 @@ async fn test_phase3_backfill() {
         max_timestamp: 5000,
         row_count: 5,
         size_bytes: 1024,
-        shard_id: None,
+        shard_id: shard.shard_id.clone(),
     };
     metadata
         .register_chunk(&chunk_path, &chunk_meta)
@@ -362,7 +362,7 @@ async fn test_phase5_cleanup() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
-        shard_id: None,
+        shard_id: shard.shard_id.clone(),
     };
     metadata
         .register_chunk(&chunk_path, &chunk_meta)
@@ -432,7 +432,7 @@ async fn test_full_split_execution() {
         max_timestamp: 4000,
         row_count: 4,
         size_bytes: 1024,
-        shard_id: None,
+        shard_id: shard.shard_id.clone(),
     };
     metadata
         .register_chunk(&chunk_path, &chunk_meta)
@@ -533,7 +533,7 @@ async fn test_backfill_progress_tracking() {
             max_timestamp: i * 1000 + 1000,
             row_count: 2,
             size_bytes: 1024,
-            shard_id: None,
+            shard_id: shard.shard_id.clone(),
         };
         metadata
             .register_chunk(&chunk_path, &chunk_meta)
@@ -612,7 +612,7 @@ async fn test_backfill_rerun_is_idempotent() {
                 max_timestamp: 5000,
                 row_count: 5,
                 size_bytes: 1024,
-                shard_id: None,
+                shard_id: shard.shard_id.clone(),
             },
         )
         .await
@@ -732,7 +732,7 @@ async fn test_backfill_resume_after_partial_failure() {
                 max_timestamp: 2000,
                 row_count: 3,
                 size_bytes: 1024,
-                shard_id: None,
+                shard_id: shard.shard_id.clone(),
             },
         )
         .await
@@ -748,7 +748,7 @@ async fn test_backfill_resume_after_partial_failure() {
                 max_timestamp: 5000,
                 row_count: 3,
                 size_bytes: 1024,
-                shard_id: None,
+                shard_id: shard.shard_id.clone(),
             },
         )
         .await

@@ -718,7 +718,11 @@ impl ShardSplitter {
             max_timestamp,
             row_count: batch.num_rows() as u64,
             size_bytes: bytes_len as u64,
-            shard_id: path.split('/').next().map(str::to_string),
+            shard_id: path
+                .split('/')
+                .next()
+                .ok_or_else(|| crate::Error::Internal("Invalid shard chunk path".to_string()))?
+                .to_string(),
         };
         self.metadata.register_chunk(path, &metadata).await?;
 

@@ -82,19 +82,11 @@ async fn mixed_batch_flushes_to_separate_shard_paths_and_metadata() {
     let expected: HashSet<_> = [expected_a.clone(), expected_b.clone()]
         .into_iter()
         .collect();
-    let actual: HashSet<_> = chunks
-        .iter()
-        .map(|chunk| {
-            chunk
-                .shard_id
-                .clone()
-                .expect("chunk should record shard_id")
-        })
-        .collect();
+    let actual: HashSet<_> = chunks.iter().map(|chunk| chunk.shard_id.clone()).collect();
     assert_eq!(actual, expected);
 
     for chunk in &chunks {
-        let shard_id = chunk.shard_id.as_deref().unwrap();
+        let shard_id = chunk.shard_id.as_str();
         assert!(
             chunk.chunk_path.contains(&format!("shard={shard_id}")),
             "chunk path should include its shard id: {}",
@@ -129,7 +121,7 @@ async fn local_metadata_prefers_explicit_shard_id_over_path_matching() {
         max_timestamp: 200,
         row_count: 2,
         size_bytes: 128,
-        shard_id: Some("shard-explicit".to_string()),
+        shard_id: "shard-explicit".to_string(),
     };
 
     metadata.register_chunk(&chunk.path, &chunk).await.unwrap();

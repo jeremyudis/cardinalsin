@@ -705,7 +705,7 @@ impl Ingester {
             max_timestamp: self.extract_max_timestamp(&combined)?,
             row_count: combined.num_rows() as u64,
             size_bytes: parquet_size,
-            shard_id: Some(shard_id.to_string()),
+            shard_id: shard_id.to_string(),
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
@@ -895,8 +895,7 @@ pub struct ChunkMetadata {
     pub max_timestamp: i64,
     pub row_count: u64,
     pub size_bytes: u64,
-    #[serde(default)]
-    pub shard_id: Option<String>,
+    pub shard_id: String,
 }
 
 /// Buffer statistics
