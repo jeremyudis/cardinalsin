@@ -36,6 +36,7 @@ async fn test_concurrent_chunk_registration() {
                 max_timestamp: (i + 1) * 1000,
                 row_count: 1000,
                 size_bytes: 1024 * 1024,
+                shard_id: "test-shard".to_string(),
             };
 
             client.register_chunk(&chunk.path, &chunk).await
@@ -80,6 +81,7 @@ async fn test_atomic_retry_on_conflict() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
+        shard_id: "test-shard".to_string(),
     };
     metadata_client
         .register_chunk(&chunk.path, &chunk)
@@ -98,6 +100,7 @@ async fn test_atomic_retry_on_conflict() {
                 max_timestamp: (i + 1) * 1000,
                 row_count: 100,
                 size_bytes: 1024,
+                shard_id: "test-shard".to_string(),
             };
 
             client.register_chunk(&chunk.path, &chunk).await
@@ -157,6 +160,7 @@ async fn test_heavy_concurrent_load() {
                     max_timestamp: ((task_id * CHUNKS_PER_TASK + chunk_id) as i64 + 1) * 1000,
                     row_count: 1000,
                     size_bytes: 1024 * 1024,
+                    shard_id: "test-shard".to_string(),
                 };
 
                 if client.register_chunk(&chunk.path, &chunk).await.is_ok() {
@@ -231,6 +235,7 @@ async fn test_atomic_compaction_completion() {
             max_timestamp: (i as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
+            shard_id: "test-shard".to_string(),
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }
@@ -242,6 +247,7 @@ async fn test_atomic_compaction_completion() {
         max_timestamp: 3000,
         row_count: 3000,
         size_bytes: 3 * 1024 * 1024,
+        shard_id: "test-shard".to_string(),
     };
     metadata_client
         .register_chunk("compacted.parquet", &target_chunk)
@@ -300,6 +306,7 @@ async fn test_concurrent_compactions() {
                 max_timestamp: ((group * 3 + chunk) as i64 + 1) * 1000,
                 row_count: 1000,
                 size_bytes: 1024 * 1024,
+                shard_id: "test-shard".to_string(),
             };
             metadata_client.register_chunk(&path, &meta).await.unwrap();
         }
@@ -312,6 +319,7 @@ async fn test_concurrent_compactions() {
             max_timestamp: ((group * 3) as i64 + 3) * 1000,
             row_count: 3000,
             size_bytes: 3 * 1024 * 1024,
+            shard_id: "test-shard".to_string(),
         };
         metadata_client
             .register_chunk(&target, &meta)

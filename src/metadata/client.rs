@@ -43,11 +43,17 @@ pub trait MetadataClient: Send + Sync {
         &self,
         range: TimeRange,
         _predicates: &[super::predicates::ColumnPredicate],
-    ) -> Result<Vec<TimeIndexEntry>> {
-        // Default implementation: fallback to time-only filtering
-        // (for backwards compatibility with LocalMetadataClient)
-        self.get_chunks(range).await
-    }
+    ) -> Result<Vec<TimeIndexEntry>>;
+
+    /// Get chunks for a time range/predicate set with an optional shard filter.
+    ///
+    /// Implementations should use the shard filter to reduce the amount of metadata scanned.
+    async fn get_chunks_with_predicates_for_shards(
+        &self,
+        range: TimeRange,
+        predicates: &[super::predicates::ColumnPredicate],
+        shard_ids: &[String],
+    ) -> Result<Vec<TimeIndexEntry>>;
 
     /// Get chunk metadata by path
     async fn get_chunk(&self, path: &str) -> Result<Option<ChunkMetadata>>;
@@ -129,6 +135,9 @@ pub trait MetadataClient: Send + Sync {
         metadata: &crate::sharding::ShardMetadata,
         expected_generation: u64,
     ) -> Result<()>;
+
+    /// List all known shard metadata entries.
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>>;
 
     // Compaction lease methods for mutual exclusion
 

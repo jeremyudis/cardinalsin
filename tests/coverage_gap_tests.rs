@@ -842,6 +842,7 @@ async fn test_time_index_rebuild() {
             max_timestamp: (i + 1) * nanos_per_hour - 1,
             row_count: 100,
             size_bytes: 1024,
+            shard_id: "test-shard".to_string(),
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }
@@ -883,6 +884,7 @@ async fn test_compaction_level_tracking_through_metadata() {
             max_timestamp: (i + 1) * 1000 - 1,
             row_count: 10,
             size_bytes: 100,
+            shard_id: "test-shard".to_string(),
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }
@@ -894,6 +896,7 @@ async fn test_compaction_level_tracking_through_metadata() {
         max_timestamp: 2999,
         row_count: 30,
         size_bytes: 300,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&target.path, &target).await.unwrap();
 
@@ -1228,6 +1231,7 @@ async fn test_concurrent_split_and_chunk_registration() {
                 max_timestamp: (i + 1) * 1000,
                 row_count: 10,
                 size_bytes: 100,
+                shard_id: "test-shard".to_string(),
             };
             client.register_chunk(&chunk.path, &chunk).await.unwrap();
         });
@@ -1259,6 +1263,7 @@ async fn test_concurrent_split_and_chunk_registration() {
             max_timestamp: (i + 1) * 1000,
             row_count: 10,
             size_bytes: 100,
+            shard_id: "test-shard".to_string(),
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }

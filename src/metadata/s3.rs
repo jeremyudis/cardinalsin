@@ -96,9 +96,6 @@ pub struct ChunkMetadataExtended {
     /// Version/ETag for atomic operations
     #[serde(default, skip_serializing)]
     pub version: String,
-    /// Shard ID this chunk belongs to (None for legacy data)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shard_id: Option<String>,
 }
 
 /// Unified metadata catalog -- single S3 object, single ETag
@@ -817,7 +814,6 @@ impl ObjectStoreMetadataClient {
             column_stats: HashMap::new(),
             level: 0, // New chunks start at L0
             version: String::new(),
-            shard_id: None,
         };
 
         let catalog = cas_retry!({
@@ -1085,6 +1081,13 @@ impl ObjectStoreMetadataClient {
 #[async_trait]
 impl MetadataClient for ObjectStoreMetadataClient {
     async fn register_chunk(&self, path: &str, metadata: &ChunkMetadata) -> Result<()> {
+        if metadata.shard_id.is_empty() {
+            return Err(Error::Metadata(format!(
+                "chunk {} is missing shard_id",
+                path
+            )));
+        }
+
         // Use atomic registration with retry logic
         self.atomic_register_chunk(path, metadata).await
     }
@@ -1135,6 +1138,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                                 max_timestamp: extended.base.max_timestamp,
                                 row_count: extended.base.row_count,
                                 size_bytes: extended.base.size_bytes,
+                                shard_id: extended.base.shard_id.clone(),
                             });
                         } else {
                             pruned_count += 1;
@@ -1163,6 +1167,74 @@ impl MetadataClient for ObjectStoreMetadataClient {
             .chunks
             .get(path)
             .map(|extended| extended.base.clone()))
+    }
+
+    async fn get_chunks_with_predicates_for_shards(
+        &self,
+        range: TimeRange,
+        predicates: &[super::predicates::ColumnPredicate],
+        shard_ids: &[String],
+    ) -> Result<Vec<TimeIndexEntry>> {
+        if shard_ids.is_empty() {
+            return self.get_chunks_with_predicates(range, predicates).await;
+        }
+
+        let wanted: std::collections::HashSet<&str> =
+            shard_ids.iter().map(String::as_str).collect();
+        let catalog = self.load_catalog_cached().await?;
+
+        let bucket_size = self.nanos_per_bucket()?;
+        let start_bucket = Self::hour_bucket(range.start, bucket_size);
+        let end_bucket = Self::hour_bucket(range.end, bucket_size);
+
+        let mut results = Vec::new();
+        let mut pruned_count = 0;
+        let mut seen = std::collections::HashSet::new();
+
+        for (_bucket, paths) in catalog.time_index.range(start_bucket..=end_bucket) {
+            for path in paths {
+                if seen.contains(path) {
+                    continue;
+                }
+                seen.insert(path.clone());
+
+                if let Some(extended) = catalog.chunks.get(path) {
+                    if !wanted.contains(extended.base.shard_id.as_str()) {
+                        continue;
+                    }
+
+                    let chunk_range =
+                        TimeRange::new(extended.base.min_timestamp, extended.base.max_timestamp);
+                    if chunk_range.overlaps(&range) {
+                        let satisfies_predicates = predicates
+                            .iter()
+                            .all(|pred| pred.evaluate_against_stats(&extended.column_stats));
+
+                        if satisfies_predicates {
+                            results.push(TimeIndexEntry {
+                                chunk_path: path.clone(),
+                                min_timestamp: extended.base.min_timestamp,
+                                max_timestamp: extended.base.max_timestamp,
+                                row_count: extended.base.row_count,
+                                size_bytes: extended.base.size_bytes,
+                                shard_id: extended.base.shard_id.clone(),
+                            });
+                        } else {
+                            pruned_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        results.sort_by_key(|entry| entry.min_timestamp);
+        debug!(
+            "get_chunks_with_predicates_for_shards returned {} chunks for {} shards ({} pruned by column predicates)",
+            results.len(),
+            shard_ids.len(),
+            pruned_count
+        );
+        Ok(results)
     }
 
     async fn delete_chunk(&self, path: &str) -> Result<()> {
@@ -1200,6 +1272,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.base.shard_id.clone(),
             })
             .collect();
 
@@ -1538,24 +1611,17 @@ impl MetadataClient for ObjectStoreMetadataClient {
     async fn get_chunks_for_shard(&self, shard_id: &str) -> Result<Vec<TimeIndexEntry>> {
         let catalog = self.load_catalog_cached().await?;
 
-        // Filter chunks by shard_id field first, fall back to path.contains() for legacy data
         let results: Vec<TimeIndexEntry> = catalog
             .chunks
             .iter()
-            .filter(|(path, extended)| {
-                if let Some(ref chunk_shard) = extended.shard_id {
-                    chunk_shard == shard_id
-                } else {
-                    // Legacy fallback: match by path substring
-                    path.contains(shard_id)
-                }
-            })
+            .filter(|(_, extended)| extended.base.shard_id == shard_id)
             .map(|(path, extended)| TimeIndexEntry {
                 chunk_path: path.clone(),
                 min_timestamp: extended.base.min_timestamp,
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.base.shard_id.clone(),
             })
             .collect();
 
@@ -1618,6 +1684,29 @@ impl MetadataClient for ObjectStoreMetadataClient {
             );
             Ok(())
         })
+    }
+
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
+        use futures::StreamExt;
+
+        let prefix = Path::from_iter([&self.config.metadata_prefix, "shards/"]);
+        let mut stream = self.object_store.list(Some(&prefix));
+        let mut shards = Vec::new();
+
+        while let Some(entry) = stream.next().await {
+            let meta = entry?;
+            if !meta.location.as_ref().ends_with(".json") {
+                continue;
+            }
+
+            let result = self.object_store.get(&meta.location).await?;
+            let bytes = result.bytes().await?;
+            let shard: crate::sharding::ShardMetadata = serde_json::from_slice(&bytes)
+                .map_err(|e| Error::Metadata(format!("Corrupt shard metadata: {}", e)))?;
+            shards.push(shard);
+        }
+
+        Ok(shards)
     }
 
     async fn acquire_lease(

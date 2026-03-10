@@ -1,6 +1,6 @@
 //! Streaming query support (historical + live)
 
-use super::QueryEngine;
+use super::{planner, QueryEngine};
 use crate::ingester::FilteredReceiver;
 use crate::metadata::predicates::{ColumnPredicate, PredicateValue};
 use crate::metadata::MetadataClient;
@@ -103,10 +103,17 @@ impl StreamingQueryExecutor {
         // Parse SQL to extract predicates for live filtering
         let query_filter = QueryFilter::from_sql(sql);
 
+        let shard_ids = if let Some(metric_names) = planner::exact_metric_names(&predicates) {
+            let shards = self.metadata.list_shards().await?;
+            planner::shard_ids_for_metrics(0, time_range, &metric_names, &shards)
+        } else {
+            Vec::new()
+        };
+
         // Get historical chunks with predicate pushdown
         let chunks = self
             .metadata
-            .get_chunks_with_predicates(time_range, &predicates)
+            .get_chunks_with_predicates_for_shards(time_range, &predicates, &shard_ids)
             .await?;
 
         let chunk_paths: Vec<String> = chunks

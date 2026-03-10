@@ -115,6 +115,7 @@ rand = "0.8"
 itertools = "0.13"
 num_cpus = "1"
 regex = "1"
+twox-hash = "2"
 
 # Configuration
 clap = { version = "4", features = ["derive", "env"] }
