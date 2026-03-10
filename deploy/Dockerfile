@@ -46,12 +46,7 @@ RUN touch src/lib.rs src/bin/*.rs
 RUN cargo build --release --bins
 
 # Runtime stage
-#
-# Rust 1.93's distributed linux toolchain produces binaries that require a
-# newer glibc than `debian:bookworm-slim` provides in CI. Reuse the same Rust
-# image family for runtime so the shipped binaries and runtime libc stay in
-# lockstep.
-FROM rust:${RUST_TOOLCHAIN}-${DEBIAN_RELEASE} AS runtime
+FROM debian:${DEBIAN_RELEASE}-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
