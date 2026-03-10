@@ -45,7 +45,11 @@ pub async fn handle_remote_write(State(state): State<ApiState>, body: Bytes) -> 
     };
 
     // 4. Ingest
-    match state.ingester.write(batch).await {
+    let Some(dispatcher) = state.ingest_dispatcher else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+
+    match dispatcher.dispatch(batch).await {
         Ok(_) => StatusCode::NO_CONTENT, // 204 = success
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }

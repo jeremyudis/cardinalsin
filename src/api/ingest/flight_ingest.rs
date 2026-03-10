@@ -2,7 +2,7 @@
 //!
 //! High-performance bulk data loading via Arrow Flight DoPut.
 
-use crate::ingester::Ingester;
+use crate::api::ingest::IngestDispatcher;
 use crate::Result;
 
 use arrow_array::RecordBatch;
@@ -12,13 +12,13 @@ use std::sync::Arc;
 
 /// Arrow Flight ingestion service
 pub struct FlightIngestService {
-    ingester: Arc<Ingester>,
+    dispatcher: Arc<IngestDispatcher>,
 }
 
 impl FlightIngestService {
     /// Create a new Flight ingestion service
-    pub fn new(ingester: Arc<Ingester>) -> Self {
-        Self { ingester }
+    pub fn new(dispatcher: Arc<IngestDispatcher>) -> Self {
+        Self { dispatcher }
     }
 
     /// Process a stream of FlightData messages
@@ -39,7 +39,7 @@ impl FlightIngestService {
         let mut total_rows = 0u64;
         for batch in batches {
             total_rows += batch.num_rows() as u64;
-            self.ingester.write(batch).await?;
+            self.dispatcher.dispatch(batch).await?;
         }
         Ok(total_rows)
     }
@@ -100,7 +100,8 @@ mod tests {
             MetricSchema::default_metrics(),
         ));
 
-        let service = FlightIngestService::new(ingester);
+        let dispatcher = Arc::new(crate::api::ingest::IngestDispatcher::new(ingester, None));
+        let service = FlightIngestService::new(dispatcher);
         let batch = create_test_batch();
         let flight_data = batch_to_flight_data(&batch).unwrap();
         let rows = service

@@ -2,8 +2,8 @@
 
 use crate::api::ingest::flight_ingest::FlightIngestService;
 use crate::api::ingest::otlp::{export_request_to_arrow, OtlpReceiver};
+use crate::api::ingest::IngestDispatcher;
 use crate::api::query::flight_sql::{batches_to_flight_data, FlightSqlQueryService};
-use crate::ingester::Ingester;
 use crate::query::QueryNode;
 use crate::{Error, Result};
 
@@ -60,11 +60,11 @@ const DEFAULT_FLIGHT_SQL_SCHEMA: &str = "public";
 /// Run ingester-side gRPC server (OTLP + Flight ingest).
 pub async fn run_ingester_grpc_server(
     addr: SocketAddr,
-    ingester: Arc<Ingester>,
+    ingest_dispatcher: Arc<IngestDispatcher>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let otlp = OtlpGrpcService::new(ingester.clone());
-    let flight = FlightIngestGrpcService::new(ingester);
+    let otlp = OtlpGrpcService::new(ingest_dispatcher.clone());
+    let flight = FlightIngestGrpcService::new(ingest_dispatcher);
 
     Server::builder()
         .add_service(MetricsServiceServer::new(otlp))
@@ -171,9 +171,9 @@ pub struct OtlpGrpcService {
 }
 
 impl OtlpGrpcService {
-    pub fn new(ingester: Arc<Ingester>) -> Self {
+    pub fn new(dispatcher: Arc<IngestDispatcher>) -> Self {
         Self {
-            receiver: OtlpReceiver::new(ingester),
+            receiver: OtlpReceiver::new(dispatcher),
         }
     }
 }
@@ -200,9 +200,9 @@ pub struct FlightIngestGrpcService {
 }
 
 impl FlightIngestGrpcService {
-    pub fn new(ingester: Arc<Ingester>) -> Self {
+    pub fn new(dispatcher: Arc<IngestDispatcher>) -> Self {
         Self {
-            ingest: Arc::new(FlightIngestService::new(ingester)),
+            ingest: Arc::new(FlightIngestService::new(dispatcher)),
         }
     }
 
