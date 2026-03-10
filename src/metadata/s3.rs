@@ -817,7 +817,7 @@ impl ObjectStoreMetadataClient {
             column_stats: HashMap::new(),
             level: 0, // New chunks start at L0
             version: String::new(),
-            shard_id: None,
+            shard_id: metadata.shard_id.clone(),
         };
 
         let catalog = cas_retry!({
@@ -1135,6 +1135,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                                 max_timestamp: extended.base.max_timestamp,
                                 row_count: extended.base.row_count,
                                 size_bytes: extended.base.size_bytes,
+                                shard_id: extended.shard_id.clone(),
                             });
                         } else {
                             pruned_count += 1;
@@ -1200,6 +1201,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.shard_id.clone(),
             })
             .collect();
 
@@ -1556,6 +1558,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.shard_id.clone(),
             })
             .collect();
 
@@ -1618,6 +1621,29 @@ impl MetadataClient for ObjectStoreMetadataClient {
             );
             Ok(())
         })
+    }
+
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
+        use futures::StreamExt;
+
+        let prefix = Path::from_iter([&self.config.metadata_prefix, "shards/"]);
+        let mut stream = self.object_store.list(Some(&prefix));
+        let mut shards = Vec::new();
+
+        while let Some(entry) = stream.next().await {
+            let meta = entry?;
+            if !meta.location.as_ref().ends_with(".json") {
+                continue;
+            }
+
+            let result = self.object_store.get(&meta.location).await?;
+            let bytes = result.bytes().await?;
+            let shard: crate::sharding::ShardMetadata = serde_json::from_slice(&bytes)
+                .map_err(|e| Error::Metadata(format!("Corrupt shard metadata: {}", e)))?;
+            shards.push(shard);
+        }
+
+        Ok(shards)
     }
 
     async fn acquire_lease(

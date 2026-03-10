@@ -9,6 +9,7 @@ mod cache;
 mod cached_store;
 mod dedup;
 mod engine;
+mod planner;
 mod router;
 mod streaming;
 mod telemetry;
@@ -183,10 +184,22 @@ impl QueryNode {
                 (Err(e), _) | (_, Err(e)) => return Err(e),
             };
 
+            let shard_ids = if let Some(metric_names) = planner::exact_metric_names(&predicates) {
+                let shards = self.metadata.list_shards().await?;
+                planner::shard_ids_for_metrics(
+                    planner::tenant_id_for_sharding(tenant_id),
+                    time_range,
+                    &metric_names,
+                    &shards,
+                )
+            } else {
+                Vec::new()
+            };
+
             // Get relevant chunks from metadata with predicate pushdown
             let chunks = self
                 .metadata
-                .get_chunks_with_predicates(time_range, &predicates)
+                .get_chunks_with_predicates_for_shards(time_range, &predicates, &shard_ids)
                 .await?;
             let bytes_scanned = chunks.iter().map(|chunk| chunk.size_bytes).sum::<u64>();
 
