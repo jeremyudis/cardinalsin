@@ -1,0 +1,23 @@
+ARG DEBIAN_RELEASE=bookworm
+
+# Packages pre-built binaries from target/release/ into the runtime image.
+# Used by CI: cargo build --release --bins is run natively (with Swatinem cache),
+# then this Dockerfile copies the binaries in seconds.
+FROM debian:${DEBIAN_RELEASE}-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY target/release/cardinalsin-ingester /usr/local/bin/
+COPY target/release/cardinalsin-query /usr/local/bin/
+COPY target/release/cardinalsin-compactor /usr/local/bin/
+
+RUN useradd -m -s /bin/bash cardinalsin
+USER cardinalsin
+
+# No default CMD — this image runs all three services.
+# The command is always specified by docker-compose (command: ["cardinalsin-ingester"] etc.)

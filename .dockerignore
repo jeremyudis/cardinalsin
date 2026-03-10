@@ -1,0 +1,15 @@
+# Exclude everything by default
+**
+
+# Allow only the pre-built binaries needed by Dockerfile.prebuilt
+!target/release/cardinalsin-ingester
+!target/release/cardinalsin-query
+!target/release/cardinalsin-compactor
+
+# Allow source files needed by the standard Dockerfile
+!src/
+!tests/
+!benches/
+!Cargo.toml
+!Cargo.lock
+!deploy/
