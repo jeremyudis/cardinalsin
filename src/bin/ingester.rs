@@ -3,6 +3,10 @@
 //! Stateless ingester node that receives metrics and writes to object storage.
 
 use cardinalsin::api;
+use cardinalsin::api::ingest::{IngestDispatcher, RoutingContext};
+use cardinalsin::cluster::{
+    AssignmentStrategy, DistributedWriteRouter, NodeInfo, NodeRegistry, NodeType, ShardAssignment,
+};
 use cardinalsin::config::ComponentFactory;
 use cardinalsin::ingester::{Ingester, IngesterConfig, WalConfig, WalSyncMode};
 use cardinalsin::query::{QueryConfig, QueryNode};
@@ -45,6 +49,18 @@ struct Args {
     /// Tenant ID
     #[arg(long, env = "TENANT_ID", default_value = "default")]
     tenant_id: String,
+
+    /// Stable node identifier used for distributed shard routing
+    #[arg(long, env = "NODE_ID")]
+    node_id: Option<String>,
+
+    /// HTTP address other ingesters should use when forwarding shard batches
+    #[arg(long, env = "ADVERTISE_HTTP_ADDR")]
+    advertise_http_addr: Option<SocketAddr>,
+
+    /// Other ingester nodes in the cluster as `node-id=host:port`
+    #[arg(long, env = "INGESTER_PEERS", value_delimiter = ',')]
+    ingester_peers: Vec<String>,
 
     /// Flush interval in seconds
     #[arg(long, default_value = "300")]
@@ -133,6 +149,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let ingester = Arc::new(ingester);
 
+    let routing_context = build_routing_context(
+        args.node_id.clone(),
+        args.advertise_http_addr,
+        args.http_port,
+        &args.ingester_peers,
+        &args.tenant_id,
+    )
+    .await?;
+    let ingest_dispatcher = Arc::new(IngestDispatcher::new(ingester.clone(), routing_context));
+
     // Start flush timer
     let ingester_timer = ingester.clone();
     tokio::spawn(async move {
@@ -155,7 +181,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Build HTTP router
-    let router = api::build_http_router(ingester.clone(), query_node);
+    let router = api::build_http_router(
+        Some(ingester.clone()),
+        Some(ingest_dispatcher.clone()),
+        query_node,
+    );
 
     // Start HTTP server
     let addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));
@@ -181,7 +211,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .map_err(|e| Error::Internal(format!("HTTP server error: {e}")))
     };
-    let grpc_server = api::grpc::run_ingester_grpc_server(grpc_addr, ingester, grpc_shutdown);
+    let grpc_server =
+        api::grpc::run_ingester_grpc_server(grpc_addr, ingest_dispatcher, grpc_shutdown);
     tokio::try_join!(http_server, grpc_server)?;
 
     info!("Ingester shutting down");
@@ -218,4 +249,59 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
         return;
     }
     let _ = shutdown.changed().await;
+}
+
+async fn build_routing_context(
+    node_id: Option<String>,
+    advertise_http_addr: Option<SocketAddr>,
+    http_port: u16,
+    ingester_peers: &[String],
+    tenant_id: &str,
+) -> Result<Option<RoutingContext>, Box<dyn std::error::Error>> {
+    if node_id.is_none() && ingester_peers.is_empty() {
+        return Ok(None);
+    }
+
+    let local_node_id = node_id.unwrap_or_else(|| format!("ingester-{}", http_port));
+    let local_addr =
+        advertise_http_addr.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], http_port)));
+
+    let nodes = Arc::new(NodeRegistry::new(30));
+    nodes
+        .register_node(NodeInfo::new(
+            local_node_id.clone(),
+            local_addr,
+            NodeType::Ingester,
+        ))
+        .await;
+
+    for peer in ingester_peers {
+        nodes.register_node(parse_ingester_peer(peer)?).await;
+    }
+
+    let assignments = Arc::new(ShardAssignment::new(
+        nodes.clone(),
+        AssignmentStrategy::ConsistentHash,
+    ));
+    let router = Arc::new(DistributedWriteRouter::new(assignments, nodes));
+
+    Ok(Some(RoutingContext::new(
+        router,
+        local_node_id,
+        tenant_id.to_string(),
+    )))
+}
+
+fn parse_ingester_peer(spec: &str) -> Result<NodeInfo, Box<dyn std::error::Error>> {
+    let (node_id, addr) = spec.split_once('=').ok_or_else(|| {
+        format!(
+            "invalid ingester peer '{}': expected node-id=host:port",
+            spec
+        )
+    })?;
+    Ok(NodeInfo::new(
+        node_id.to_string(),
+        addr.parse()?,
+        NodeType::Ingester,
+    ))
 }

@@ -40,7 +40,8 @@ impl Default for ApiServerConfig {
 
 /// Build the HTTP API router
 pub fn build_http_router(
-    ingester: Arc<crate::ingester::Ingester>,
+    ingester: Option<Arc<crate::ingester::Ingester>>,
+    ingest_dispatcher: Option<Arc<crate::api::ingest::IngestDispatcher>>,
     query_node: Arc<crate::query::QueryNode>,
 ) -> Router {
     use axum::routing::{get, post};
@@ -51,7 +52,10 @@ pub fn build_http_router(
         .allow_methods(Any)
         .allow_headers(Any);
 
-    Router::new()
+    let ingest_enabled = ingest_dispatcher.is_some();
+    let internal_ingest_enabled = ingester.is_some();
+
+    let mut router = Router::new()
         // Health check
         .route("/health", get(health_check))
         .route("/ready", get(ready_check))
@@ -71,15 +75,26 @@ pub fn build_http_router(
         .route("/api/v1/series", get(query::prometheus_api::series))
         .route("/api/v1/series", post(query::prometheus_api::series_post))
 
-        // Prometheus Remote Write
-        .route("/api/v1/write", post(ingest::prometheus::handle_remote_write))
-
         // Streaming
-        .route("/api/v1/stream", get(query::streaming::websocket_handler))
+        .route("/api/v1/stream", get(query::streaming::websocket_handler));
 
-        // State
+    if ingest_enabled {
+        router = router.route(
+            "/api/v1/write",
+            post(ingest::prometheus::handle_remote_write),
+        );
+    }
+    if internal_ingest_enabled {
+        router = router.route(
+            "/internal/v1/ingest/arrow",
+            post(ingest::handle_internal_arrow_ingest),
+        );
+    }
+
+    router
         .with_state(ApiState {
             ingester,
+            ingest_dispatcher,
             query_node,
         })
         .layer(cors)
@@ -88,7 +103,8 @@ pub fn build_http_router(
 /// Shared API state
 #[derive(Clone)]
 pub struct ApiState {
-    pub ingester: Arc<crate::ingester::Ingester>,
+    pub ingester: Option<Arc<crate::ingester::Ingester>>,
+    pub ingest_dispatcher: Option<Arc<crate::api::ingest::IngestDispatcher>>,
     pub query_node: Arc<crate::query::QueryNode>,
 }
 

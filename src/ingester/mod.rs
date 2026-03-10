@@ -7,6 +7,7 @@
 //! - Broadcasting new data to streaming query subscribers
 //! - Tracking shard metrics for hot shard detection
 
+mod arrow_ipc;
 mod broadcast;
 mod buffer;
 mod parquet_writer;
@@ -14,6 +15,7 @@ mod telemetry;
 mod topic_broadcast;
 mod wal;
 
+pub use arrow_ipc::{decode_record_batch_ipc, encode_record_batch_ipc};
 pub use broadcast::BroadcastChannel;
 pub use buffer::WriteBuffer;
 pub use parquet_writer::ParquetWriter;
@@ -446,6 +448,14 @@ impl Ingester {
     fn should_flush(&self, buffer: &WriteBuffer) -> bool {
         buffer.row_count() >= self.config.flush_row_count
             || buffer.size_bytes() >= self.config.flush_size_bytes
+    }
+
+    /// Partition a batch into shard-local sub-batches for distributed routing.
+    pub async fn partition_batch_for_routing(
+        &self,
+        batch: &RecordBatch,
+    ) -> Result<HashMap<String, RecordBatch>> {
+        self.partition_batch_by_shard(batch).await
     }
 
     async fn total_buffer_rows(&self) -> usize {

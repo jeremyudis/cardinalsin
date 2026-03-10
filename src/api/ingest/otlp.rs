@@ -2,7 +2,7 @@
 //!
 //! Supports both gRPC and HTTP endpoints for OTLP metrics ingestion.
 
-use crate::ingester::Ingester;
+use crate::api::ingest::IngestDispatcher;
 use crate::schema::{METRIC_NAME_FIELD, TIMESTAMP_FIELD, VALUE_F64_FIELD};
 use crate::Result;
 
@@ -17,13 +17,13 @@ use std::sync::Arc;
 
 /// OTLP metrics receiver
 pub struct OtlpReceiver {
-    ingester: Arc<Ingester>,
+    dispatcher: Arc<IngestDispatcher>,
     _schema: Arc<Schema>,
 }
 
 impl OtlpReceiver {
     /// Create a new OTLP receiver
-    pub fn new(ingester: Arc<Ingester>) -> Self {
+    pub fn new(dispatcher: Arc<IngestDispatcher>) -> Self {
         // Build schema for converted metrics
         let schema = Arc::new(Schema::new(vec![
             Field::new(
@@ -37,7 +37,7 @@ impl OtlpReceiver {
         ]));
 
         Self {
-            ingester,
+            dispatcher,
             _schema: schema,
         }
     }
@@ -83,7 +83,7 @@ impl OtlpReceiver {
 
     /// Ingest metrics
     pub async fn ingest(&self, batch: RecordBatch) -> Result<()> {
-        self.ingester.write(batch).await
+        self.dispatcher.dispatch(batch).await
     }
 }
 

@@ -5,8 +5,11 @@
 
 use super::node_registry::{NodeInfo, NodeRegistry};
 use super::shard_assignment::ShardAssignment;
+use crate::api::ingest::ShardWriteRouter;
+use crate::ingester::encode_record_batch_ipc;
 use crate::Result;
 use arrow_array::RecordBatch;
+use async_trait::async_trait;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -16,66 +19,33 @@ pub struct DistributedWriteRouter {
     assignments: Arc<ShardAssignment>,
     /// Node registry
     nodes: Arc<NodeRegistry>,
+    /// Shared HTTP client for remote forwarding
+    http_client: reqwest::Client,
 }
 
 impl DistributedWriteRouter {
     /// Create a new distributed write router
     pub fn new(assignments: Arc<ShardAssignment>, nodes: Arc<NodeRegistry>) -> Self {
-        Self { assignments, nodes }
-    }
-
-    /// Route a write to the appropriate ingester node
-    ///
-    /// If the write is for a shard owned by this node, returns None (handle locally).
-    /// If the write is for a shard owned by another node, returns the target node info.
-    pub async fn route_write(&self, shard_id: &str) -> Result<Option<NodeInfo>> {
-        // Get assigned node for this shard
-        let node_id = self.assignments.assign_shard(shard_id).await?;
-
-        // Get node info
-        if let Some(node) = self.nodes.get_node(&node_id).await {
-            if node.can_accept_writes() {
-                debug!("Routing write for shard {} to node {}", shard_id, node_id);
-                return Ok(Some(node));
-            } else {
-                warn!(
-                    "Assigned node {} cannot accept writes, reassigning",
-                    node_id
-                );
-                self.assignments.unassign_shard(shard_id).await;
-                // Retry assignment (boxed to avoid infinite recursion)
-                return Box::pin(self.route_write(shard_id)).await;
-            }
+        Self {
+            assignments,
+            nodes,
+            http_client: reqwest::Client::new(),
         }
-
-        Err(crate::Error::Internal(format!(
-            "No healthy node available for shard {}",
-            shard_id
-        )))
     }
 
-    /// Forward a write request to another ingester node
-    ///
-    /// This is called when the current node receives a write for a shard
-    /// it doesn't own. The write is forwarded to the owning node via HTTP.
-    ///
-    /// TODO: Implement actual HTTP forwarding with Arrow IPC serialization.
-    /// This requires adding reqwest dependency and implementing batch serialization.
+    /// Route a write to the appropriate ingester node.
+    pub async fn route_write(&self, shard_id: &str) -> Result<Option<NodeInfo>> {
+        <Self as ShardWriteRouter>::route_write(self, shard_id).await
+    }
+
+    /// Forward a shard-local Arrow batch to another ingester node.
     pub async fn forward_write(
         &self,
         target_node: &NodeInfo,
-        _batch: &RecordBatch,
-        _tenant_id: &str,
+        batch: &RecordBatch,
+        tenant_id: &str,
     ) -> Result<()> {
-        let url = format!("http://{}/api/v1/write", target_node.addr);
-
-        // Placeholder implementation
-        debug!(
-            "Forwarding write to node {} at {} (TODO: implement HTTP forwarding)",
-            target_node.id, url
-        );
-
-        Ok(())
+        <Self as ShardWriteRouter>::forward_write(self, target_node, batch, tenant_id).await
     }
 
     /// Get routing statistics
@@ -108,6 +78,68 @@ impl DistributedWriteRouter {
             avg_shards_per_node,
             imbalance,
         }
+    }
+}
+
+#[async_trait]
+impl ShardWriteRouter for DistributedWriteRouter {
+    /// Route a write to the appropriate ingester node.
+    async fn route_write(&self, shard_id: &str) -> Result<Option<NodeInfo>> {
+        let node_id = self.assignments.assign_shard(shard_id).await?;
+
+        if let Some(node) = self.nodes.get_node(&node_id).await {
+            if node.can_accept_writes() {
+                debug!("Routing write for shard {} to node {}", shard_id, node_id);
+                return Ok(Some(node));
+            }
+
+            warn!(
+                "Assigned node {} cannot accept writes, reassigning",
+                node_id
+            );
+            self.assignments.unassign_shard(shard_id).await;
+            return Box::pin(self.route_write(shard_id)).await;
+        }
+
+        Err(crate::Error::Internal(format!(
+            "No healthy node available for shard {}",
+            shard_id
+        )))
+    }
+
+    /// Forward a shard-local Arrow batch to another ingester node.
+    async fn forward_write(
+        &self,
+        target_node: &NodeInfo,
+        batch: &RecordBatch,
+        tenant_id: &str,
+    ) -> Result<()> {
+        let url = format!("http://{}/internal/v1/ingest/arrow", target_node.addr);
+        let payload = encode_record_batch_ipc(batch)?;
+        let response = self
+            .http_client
+            .post(&url)
+            .header("content-type", "application/vnd.apache.arrow.stream")
+            .header("x-cardinalsin-tenant-id", tenant_id)
+            .body(payload)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::Error::Internal(format!(
+                    "Failed to forward shard write to {}: {}",
+                    target_node.id, e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            return Err(crate::Error::Internal(format!(
+                "Remote ingester {} rejected forwarded shard write with status {}",
+                target_node.id,
+                response.status()
+            )));
+        }
+
+        Ok(())
     }
 }
 

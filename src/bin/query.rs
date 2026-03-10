@@ -4,9 +4,7 @@
 
 use cardinalsin::api;
 use cardinalsin::config::ComponentFactory;
-use cardinalsin::ingester::{Ingester, IngesterConfig};
 use cardinalsin::query::{QueryConfig, QueryNode};
-use cardinalsin::schema::MetricSchema;
 use cardinalsin::telemetry::Telemetry;
 use cardinalsin::Error;
 
@@ -103,17 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?,
     );
 
-    // Create a dummy ingester for the API (in production, query nodes don't ingest)
-    let ingester = Arc::new(Ingester::new(
-        IngesterConfig::default(),
-        object_store,
-        metadata,
-        storage_config,
-        MetricSchema::default_metrics(),
-    ));
-
     // Build HTTP router
-    let router = api::build_http_router(ingester, query_node.clone());
+    let router = api::build_http_router(None, None, query_node.clone());
 
     // Start HTTP server
     let addr = SocketAddr::from(([0, 0, 0, 0], args.http_port));

@@ -87,7 +87,19 @@ async fn handle_connection(mut socket: WebSocket, state: ApiState) {
 
     // Stream live data if requested
     if request.live {
-        let mut rx = state.ingester.subscribe();
+        let Some(ingester) = state.ingester else {
+            let _ = socket
+                .send(Message::Text(
+                    serde_json::to_string(&StreamMessage {
+                        msg_type: "error".to_string(),
+                        data: serde_json::json!({ "error": "live ingest stream unavailable on this node" }),
+                    })
+                    .unwrap(),
+                ))
+                .await;
+            return;
+        };
+        let mut rx = ingester.subscribe();
 
         loop {
             tokio::select! {
