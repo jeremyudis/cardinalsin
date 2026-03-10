@@ -3,7 +3,7 @@
 //! Each phase transition is persisted to object storage so that a crash at any
 //! point can be recovered by calling `resume_split()`.
 
-use super::{ShardId, ShardMetadata, ShardState, TimeBucket};
+use super::{midpoint_bytes, ShardId, ShardKey, ShardMetadata, ShardState, TimeBucket};
 use crate::ingester::ChunkMetadata;
 use crate::metadata::MetadataClient;
 use crate::Result;
@@ -331,7 +331,7 @@ impl ShardSplitter {
 
         let current_generation = old_metadata.generation;
         let split_ts =
-            i64::from_be_bytes(split_state.split_point[..8].try_into().unwrap_or([0u8; 8]));
+            Self::split_timestamp(&split_state.split_point).unwrap_or(old_metadata.max_time);
 
         // Step 1: Create shard A (idempotent — skipped if already done)
         if !progress.shard_a_created {
@@ -619,7 +619,7 @@ impl ShardSplitter {
 
     // ── Helpers ──────────────────────────────────────────────────────
 
-    /// Split a RecordBatch into two based on timestamp split point
+    /// Split a RecordBatch into two based on either a full shard-key or a legacy timestamp split point.
     fn split_batch(
         &self,
         batch: &RecordBatch,
@@ -643,15 +643,24 @@ impl ShardSplitter {
         let mut indices_a = Vec::new();
         let mut indices_b = Vec::new();
 
-        let split_ts = i64::from_be_bytes(
-            split_point
-                .try_into()
-                .map_err(|_| crate::Error::Internal("Invalid split point".to_string()))?,
-        );
-
         for i in 0..batch.num_rows() {
-            let ts = ts_array.value(i);
-            if ts < split_ts {
+            let split_left = match split_point.len() {
+                8 => {
+                    ts_array.value(i)
+                        < Self::split_timestamp(split_point).ok_or_else(|| {
+                            crate::Error::Internal("Invalid timestamp split point".to_string())
+                        })?
+                }
+                14 => self.row_key_for_split(batch, i, split_point)?.as_slice() < split_point,
+                _ => {
+                    return Err(crate::Error::Internal(format!(
+                        "Unsupported split point width {}",
+                        split_point.len()
+                    )))
+                }
+            };
+
+            if split_left {
                 indices_a.push(i as u32);
             } else {
                 indices_b.push(i as u32);
@@ -709,6 +718,7 @@ impl ShardSplitter {
             max_timestamp,
             row_count: batch.num_rows() as u64,
             size_bytes: bytes_len as u64,
+            shard_id: path.split('/').next().map(str::to_string),
         };
         self.metadata.register_chunk(path, &metadata).await?;
 
@@ -738,13 +748,49 @@ impl ShardSplitter {
         out
     }
 
-    /// Calculate the split point based on time
+    /// Calculate the split point from the shard's key range when possible.
     fn calculate_split_point(&self, shard: &ShardMetadata) -> Vec<u8> {
+        if let Some(midpoint) = midpoint_bytes(&shard.key_range.0, &shard.key_range.1) {
+            return midpoint;
+        }
+
         let time_range = shard.max_time - shard.min_time;
         let mid_time = shard.min_time + time_range / 2;
+        TimeBucket::round_to_5min(mid_time).to_be_bytes().to_vec()
+    }
 
-        let rounded = TimeBucket::round_to_5min(mid_time);
-        rounded.to_be_bytes().to_vec()
+    fn split_timestamp(split_point: &[u8]) -> Option<i64> {
+        match split_point.len() {
+            8 => Some(i64::from_be_bytes(split_point.try_into().ok()?)),
+            14 => Some(i64::from_be_bytes(split_point[6..14].try_into().ok()?)),
+            _ => None,
+        }
+    }
+
+    fn row_key_for_split(
+        &self,
+        batch: &RecordBatch,
+        row_idx: usize,
+        split_point: &[u8],
+    ) -> Result<Vec<u8>> {
+        let tenant_id =
+            u32::from_be_bytes(split_point[0..4].try_into().map_err(|_| {
+                crate::Error::Internal("Invalid shard-key split point".to_string())
+            })?);
+        let metric_name = batch
+            .column_by_name("metric_name")
+            .and_then(|column| column.as_any().downcast_ref::<arrow::array::StringArray>())
+            .ok_or_else(|| crate::Error::Internal("Missing metric_name column".to_string()))?
+            .value(row_idx);
+        let timestamp = batch
+            .column_by_name("timestamp")
+            .ok_or_else(|| crate::Error::Internal("Missing timestamp column".to_string()))?
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .ok_or_else(|| crate::Error::Internal("Timestamp not Int64".to_string()))?
+            .value(row_idx);
+
+        Ok(ShardKey::new(tenant_id, metric_name, timestamp).to_bytes())
     }
 }
 
@@ -801,7 +847,32 @@ mod tests {
         let split_point = splitter.calculate_split_point(&shard);
 
         assert!(!split_point.is_empty());
-        assert_eq!(split_point.len(), 8); // i64 bytes
+        assert_eq!(split_point.len(), shard.key_range.0.len());
+    }
+
+    #[tokio::test]
+    async fn test_split_point_uses_full_key_midpoint_when_available() {
+        let metadata = Arc::new(LocalMetadataClient::new());
+        let object_store = Arc::new(InMemory::new());
+        let splitter = ShardSplitter::new(metadata, object_store);
+
+        let start = ShardKey::new(0, "cpu", 0).to_bytes();
+        let end = ShardKey::new(0, "cpu", 600_000_000_000).to_bytes();
+        let shard = ShardMetadata {
+            shard_id: "shard-1".to_string(),
+            generation: 1,
+            key_range: (start.clone(), end.clone()),
+            replicas: vec![],
+            state: ShardState::Active,
+            min_time: 0,
+            max_time: 600_000_000_000,
+        };
+
+        let split_point = splitter.calculate_split_point(&shard);
+
+        assert_eq!(split_point.len(), 14);
+        assert!(split_point > start);
+        assert!(split_point < end);
     }
 
     #[tokio::test]

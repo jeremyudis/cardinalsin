@@ -49,6 +49,33 @@ pub trait MetadataClient: Send + Sync {
         self.get_chunks(range).await
     }
 
+    /// Get chunks for a time range/predicate set with an optional shard filter.
+    ///
+    /// Implementations may use the shard filter to reduce the amount of metadata scanned.
+    /// The default implementation preserves correctness for legacy data by keeping chunks
+    /// that do not yet carry explicit shard identity.
+    async fn get_chunks_with_predicates_for_shards(
+        &self,
+        range: TimeRange,
+        predicates: &[super::predicates::ColumnPredicate],
+        shard_ids: &[String],
+    ) -> Result<Vec<TimeIndexEntry>> {
+        let chunks = self.get_chunks_with_predicates(range, predicates).await?;
+        if shard_ids.is_empty() {
+            return Ok(chunks);
+        }
+
+        let wanted: std::collections::HashSet<&str> =
+            shard_ids.iter().map(String::as_str).collect();
+        Ok(chunks
+            .into_iter()
+            .filter(|entry| match entry.shard_id.as_deref() {
+                Some(shard_id) => wanted.contains(shard_id),
+                None => true,
+            })
+            .collect())
+    }
+
     /// Get chunk metadata by path
     async fn get_chunk(&self, path: &str) -> Result<Option<ChunkMetadata>>;
 
@@ -129,6 +156,11 @@ pub trait MetadataClient: Send + Sync {
         metadata: &crate::sharding::ShardMetadata,
         expected_generation: u64,
     ) -> Result<()>;
+
+    /// List all known shard metadata entries.
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
+        Ok(Vec::new())
+    }
 
     // Compaction lease methods for mutual exclusion
 

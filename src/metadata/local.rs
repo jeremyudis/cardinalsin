@@ -340,12 +340,13 @@ impl MetadataClient for LocalMetadataClient {
     }
 
     async fn get_chunks_for_shard(&self, shard_id: &str) -> Result<Vec<TimeIndexEntry>> {
-        // In a real implementation, we'd have shard-to-chunk mappings
-        // For now, filter chunks by path pattern
         let results: Vec<TimeIndexEntry> = self
             .chunks
             .iter()
-            .filter(|entry| entry.key().contains(shard_id))
+            .filter(|entry| match entry.value().shard_id.as_deref() {
+                Some(chunk_shard) => chunk_shard == shard_id,
+                None => entry.key().contains(shard_id),
+            })
             .map(|entry| TimeIndexEntry::from(entry.value()))
             .collect();
 
@@ -384,6 +385,14 @@ impl MetadataClient for LocalMetadataClient {
             .insert(shard_id.to_string(), new_metadata);
 
         Ok(())
+    }
+
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
+        Ok(self
+            .shard_metadata
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect())
     }
 
     async fn acquire_lease(
@@ -512,6 +521,7 @@ mod tests {
             max_timestamp: max_ts,
             row_count: 1000,
             size_bytes: 1024 * 1024,
+            shard_id: None,
         }
     }
 
