@@ -60,17 +60,23 @@ jobs:
         with:
           toolchain: 1.93.0
 
-      - name: Cache Rust artifacts (release)
+      - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: e2e-release-${{ hashFiles('**/Cargo.lock') }}
-          cache-on-failure: true
+          key: e2e-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build release binaries
-        run: cargo build --release --bin cardinalsin-ingester --bin cardinalsin-query --bin cardinalsin-compactor
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Package binaries into Docker image
-        run: docker build -f deploy/Dockerfile.prebuilt -t cardinalsin:ci .
+      - name: Build cardinalsin image (with layer cache)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          load: true
+          tags: cardinalsin:ci
+          cache-from: type=gha,scope=cardinalsin-image
+          cache-to: type=gha,mode=max,scope=cardinalsin-image
 
       - name: Start docker-compose stack
         run: CARDINALSIN_IMAGE=cardinalsin:ci docker compose -f deploy/docker-compose.yml up -d
