@@ -137,9 +137,7 @@ pub trait MetadataClient: Send + Sync {
     ) -> Result<()>;
 
     /// List all known shard metadata entries.
-    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
-        Ok(Vec::new())
-    }
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>>;
 
     // Compaction lease methods for mutual exclusion
 

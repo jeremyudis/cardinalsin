@@ -13,7 +13,8 @@ pub use rebalancer::RebalanceStrategy;
 pub use router::ShardRouter;
 pub use splitter::{ShardSplitter, SplitPhase, SplitProgress};
 
-use std::time::Duration;
+use std::{hash::Hasher, time::Duration};
+use twox_hash::XxHash64;
 
 /// Shard identifier
 pub type ShardId = String;
@@ -110,12 +111,10 @@ impl ShardKey {
 
     /// Compute a stable 16-bit metric hash for shard routing.
     pub fn hash_metric_name(metric_name: &str) -> u16 {
-        let mut hash = 0xcbf29ce484222325u64;
-        for byte in metric_name.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        (hash & 0xFFFF) as u16
+        // Preserve the existing 16-bit routing space while using a standard xxHash64 implementation.
+        let mut hasher = XxHash64::with_seed(0);
+        hasher.write(metric_name.as_bytes());
+        (hasher.finish() & 0xFFFF) as u16
     }
 }
 
@@ -240,5 +239,24 @@ impl ShardMetadata {
     /// Check if the shard is active
     pub fn is_active(&self) -> bool {
         self.state == ShardState::Active
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShardKey;
+    use std::hash::Hasher;
+    use twox_hash::XxHash64;
+
+    #[test]
+    fn hash_metric_name_matches_xxhash64_low_bits() {
+        let metric_names = ["cpu.usage", "mem.free", "http_requests_total"];
+
+        for metric_name in metric_names {
+            let mut hasher = XxHash64::with_seed(0);
+            hasher.write(metric_name.as_bytes());
+            let expected = (hasher.finish() & 0xFFFF) as u16;
+            assert_eq!(ShardKey::hash_metric_name(metric_name), expected);
+        }
     }
 }
