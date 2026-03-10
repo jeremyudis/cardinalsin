@@ -19,4 +19,5 @@ COPY target/release/cardinalsin-compactor /usr/local/bin/
 RUN useradd -m -s /bin/bash cardinalsin
 USER cardinalsin
 
-CMD ["cardinalsin-query"]
+# No default CMD — this image runs all three services.
+# The command is always specified by docker-compose (command: ["cardinalsin-ingester"] etc.)
