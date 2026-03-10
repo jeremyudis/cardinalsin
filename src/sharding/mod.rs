@@ -18,6 +18,9 @@ use std::time::Duration;
 /// Shard identifier
 pub type ShardId = String;
 
+/// Bootstrap shard window size in nanoseconds.
+pub const BOOTSTRAP_SHARD_WINDOW_NANOS: i64 = 60 * 60 * 1_000_000_000;
+
 /// Time bucket for sharding
 #[derive(Debug, Clone, Copy)]
 pub struct TimeBucket {
@@ -106,6 +109,44 @@ impl ShardKey {
     /// Convert to a stable shard identifier derived from the full shard key bytes.
     pub fn shard_id(&self) -> ShardId {
         format!("shard-{}", hex_encode(&self.to_bytes()))
+    }
+
+    /// Start of the deterministic bootstrap shard window for this key.
+    pub fn bootstrap_window_start(&self) -> i64 {
+        (self.time_bucket.start / BOOTSTRAP_SHARD_WINDOW_NANOS) * BOOTSTRAP_SHARD_WINDOW_NANOS
+    }
+
+    /// End of the deterministic bootstrap shard window for this key.
+    pub fn bootstrap_window_end(&self) -> i64 {
+        self.bootstrap_window_start() + BOOTSTRAP_SHARD_WINDOW_NANOS
+    }
+
+    /// Deterministic shard identifier used before a shard has been split or rebalanced.
+    pub fn bootstrap_shard_id(&self) -> ShardId {
+        let start = ShardKey::from_metric_hash(
+            self.tenant_id,
+            self.metric_hash,
+            self.bootstrap_window_start(),
+        )
+        .to_bytes();
+        format!("shard-{}", hex_encode(&start))
+    }
+
+    /// Key range used when auto-creating shard metadata for a new shard family.
+    pub fn bootstrap_key_range(&self) -> (Vec<u8>, Vec<u8>) {
+        let start = ShardKey::from_metric_hash(
+            self.tenant_id,
+            self.metric_hash,
+            self.bootstrap_window_start(),
+        )
+        .to_bytes();
+        let end = ShardKey::from_metric_hash(
+            self.tenant_id,
+            self.metric_hash,
+            self.bootstrap_window_end(),
+        )
+        .to_bytes();
+        (start, end)
     }
 
     /// Compute a stable 16-bit metric hash for shard routing.
@@ -198,6 +239,31 @@ pub fn hex_encode(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0x0f) as usize] as char);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bootstrap_range_groups_adjacent_five_minute_buckets() {
+        let ts = 1_700_000_000_000_000_000i64;
+        let first = ShardKey::new(7, "cpu_usage", ts);
+        let second = ShardKey::new(7, "cpu_usage", ts + 5 * 60 * 1_000_000_000);
+
+        assert_eq!(
+            first.bootstrap_window_start(),
+            second.bootstrap_window_start()
+        );
+        assert_eq!(first.bootstrap_shard_id(), second.bootstrap_shard_id());
+
+        let (start, end) = first.bootstrap_key_range();
+        assert!(key_in_range(
+            &first.to_bytes(),
+            &(start.clone(), end.clone())
+        ));
+        assert!(key_in_range(&second.to_bytes(), &(start, end)));
+    }
 }
 
 /// Shard state
