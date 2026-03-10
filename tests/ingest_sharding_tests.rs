@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,7 +59,7 @@ fn make_ingester(
 }
 
 #[tokio::test]
-async fn mixed_batch_flushes_to_separate_shard_paths_and_metadata() {
+async fn same_hour_metric_batches_share_a_partition_shard() {
     let metadata = Arc::new(LocalMetadataClient::new());
     let ingester = make_ingester(metadata.clone(), 7, 1);
 
@@ -71,45 +70,81 @@ async fn mixed_batch_flushes_to_separate_shard_paths_and_metadata() {
     ingester.write(batch).await.unwrap();
 
     let chunks = metadata.list_chunks().await.unwrap();
+    assert_eq!(chunks.len(), 1, "same-hour writes should flush together");
+
+    let chunk = &chunks[0];
+    assert_eq!(
+        chunk.row_count, 2,
+        "the shard-local flush should keep both rows"
+    );
+    assert_eq!(
+        chunk.shard_id,
+        ShardKey::new(7, "cpu_usage", ts_a).partition_shard_id()
+    );
+    assert!(
+        chunk
+            .chunk_path
+            .contains(&format!("shard={}", chunk.shard_id)),
+        "chunk path should include its shard id: {}",
+        chunk.chunk_path
+    );
+
+    let shards = metadata.list_shards().await.unwrap();
+    assert_eq!(
+        shards.len(),
+        1,
+        "the partition should create one default shard"
+    );
+
+    let shard = &shards[0];
+    let key_a = ShardKey::new(7, "cpu_usage", ts_a).to_bytes();
+    let key_b = ShardKey::new(7, "cpu_usage", ts_b).to_bytes();
+    assert!(
+        cardinalsin::sharding::key_in_range(&key_a, &shard.key_range),
+        "bootstrap shard should contain the first five-minute bucket"
+    );
+    assert!(
+        cardinalsin::sharding::key_in_range(&key_b, &shard.key_range),
+        "bootstrap shard should contain the adjacent five-minute bucket"
+    );
+    assert_eq!(
+        metadata
+            .get_chunks_for_shard(&chunk.shard_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn hour_boundary_creates_a_new_partition_shard() {
+    let metadata = Arc::new(LocalMetadataClient::new());
+    let ingester = make_ingester(metadata.clone(), 7, 1);
+
+    let ts_a = 1_700_000_000_000_000_000i64;
+    let ts_b = ts_a + (60 * 60 * 1_000_000_000i64);
+    let batch = make_batch(&[(ts_a, "cpu_usage"), (ts_b, "cpu_usage")]);
+
+    ingester.write(batch).await.unwrap();
+
+    let chunks = metadata.list_chunks().await.unwrap();
     assert_eq!(
         chunks.len(),
         2,
-        "mixed-shard writes should flush separately"
+        "cross-hour writes should split by bootstrap shard"
     );
 
-    let expected_a = ShardKey::new(7, "cpu_usage", ts_a).shard_id();
-    let expected_b = ShardKey::new(7, "cpu_usage", ts_b).shard_id();
-    let expected: HashSet<_> = [expected_a.clone(), expected_b.clone()]
-        .into_iter()
-        .collect();
-    let actual: HashSet<_> = chunks.iter().map(|chunk| chunk.shard_id.clone()).collect();
+    let actual: std::collections::HashSet<_> =
+        chunks.iter().map(|chunk| chunk.shard_id.clone()).collect();
+    let expected: std::collections::HashSet<_> = [
+        ShardKey::new(7, "cpu_usage", ts_a).partition_shard_id(),
+        ShardKey::new(7, "cpu_usage", ts_b).partition_shard_id(),
+    ]
+    .into_iter()
+    .collect();
+
     assert_eq!(actual, expected);
-
-    for chunk in &chunks {
-        let shard_id = chunk.shard_id.as_str();
-        assert!(
-            chunk.chunk_path.contains(&format!("shard={shard_id}")),
-            "chunk path should include its shard id: {}",
-            chunk.chunk_path
-        );
-    }
-
-    assert_eq!(
-        metadata
-            .get_chunks_for_shard(&expected_a)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        metadata
-            .get_chunks_for_shard(&expected_b)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
 }
 
 #[tokio::test]

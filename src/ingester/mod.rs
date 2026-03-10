@@ -26,7 +26,7 @@ use crate::clock::BoundedClock;
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
 use crate::sharding::{
-    key_in_range, next_key_bytes, HotShardConfig, ShardKey, ShardMetadata, ShardMonitor, ShardState,
+    key_in_range, HotShardConfig, ShardKey, ShardMetadata, ShardMonitor, ShardState,
 };
 use crate::{Error, Result, StorageConfig};
 
@@ -563,23 +563,21 @@ impl Ingester {
     }
 
     async fn ensure_shard_metadata(&self, key: &ShardKey) -> Result<ShardMetadata> {
-        let shard_id = key.shard_id();
+        let shard_id = key.partition_shard_id();
         if let Some(existing) = self.metadata.get_shard_metadata(&shard_id).await? {
             return Ok(existing);
         }
 
-        let key_bytes = key.to_bytes();
-        let range_end = next_key_bytes(&key_bytes).ok_or_else(|| {
-            Error::Internal("Cannot derive shard end key from maximum key".to_string())
-        })?;
+        let key_range = key.partition_key_range();
+        let partition = key.time_partition();
         let metadata = ShardMetadata {
             shard_id: shard_id.clone(),
             generation: 0,
-            key_range: (key_bytes, range_end),
+            key_range,
             replicas: Vec::new(),
             state: ShardState::Active,
-            min_time: key.time_bucket.start,
-            max_time: key.time_bucket.start + key.time_bucket.duration.as_nanos() as i64,
+            min_time: partition.start,
+            max_time: partition.end(),
         };
 
         match self
