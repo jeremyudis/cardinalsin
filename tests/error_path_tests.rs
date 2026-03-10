@@ -225,7 +225,7 @@ async fn test_get_nonexistent_chunk() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
 
@@ -265,7 +265,7 @@ async fn test_list_chunks_uninitialized_metadata() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
     client.delete_chunk("temp.parquet").await.unwrap();
@@ -296,7 +296,7 @@ async fn test_get_chunks_empty_time_range() {
         max_timestamp: 2000,
         row_count: 100,
         size_bytes: 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
 
@@ -332,7 +332,7 @@ async fn test_metadata_cas_fails_loudly_when_unsafe_overwrite_disabled() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
 
     client
@@ -346,7 +346,7 @@ async fn test_metadata_cas_fails_loudly_when_unsafe_overwrite_disabled() {
         max_timestamp: 3000,
         row_count: 20,
         size_bytes: 200,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
 
     let result = client.register_chunk(&second.path, &second).await;
@@ -391,7 +391,7 @@ async fn test_metadata_cas_fallback_overwrite_when_enabled() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
 
     client
@@ -405,7 +405,7 @@ async fn test_metadata_cas_fallback_overwrite_when_enabled() {
         max_timestamp: 3000,
         row_count: 20,
         size_bytes: 200,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
 
     client
@@ -452,7 +452,7 @@ async fn test_register_chunk_with_zero_timestamps() {
         max_timestamp: 0,
         row_count: 0,
         size_bytes: 0,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
 
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
@@ -486,7 +486,7 @@ async fn test_register_duplicate_chunk_path() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
 
     let chunk2 = ChunkMetadata {
@@ -495,7 +495,7 @@ async fn test_register_duplicate_chunk_path() {
         max_timestamp: 3000,
         row_count: 200,
         size_bytes: 2048,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
 
     client.register_chunk(&chunk1.path, &chunk1).await.unwrap();
@@ -632,7 +632,7 @@ async fn test_compaction_with_single_source() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&source.path, &source).await.unwrap();
 
@@ -642,7 +642,7 @@ async fn test_compaction_with_single_source() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&target.path, &target).await.unwrap();
 
@@ -686,7 +686,7 @@ async fn test_l0_candidates_empty() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
     let target = ChunkMetadata {
@@ -695,7 +695,7 @@ async fn test_l0_candidates_empty() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&target.path, &target).await.unwrap();
     client
@@ -730,7 +730,7 @@ async fn test_level_candidates_nonexistent_level() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
 
@@ -1088,7 +1088,7 @@ async fn test_concurrent_registration_data_integrity() {
                 max_timestamp: (i + 1) * 1000,
                 row_count: (i + 1) as u64 * 100, // Unique row count per chunk
                 size_bytes: (i + 1) as u64 * 1024,
-                shard_id: None,
+                shard_id: "test-shard".to_string(),
             };
             client.register_chunk(&chunk.path, &chunk).await.unwrap();
             (i, chunk.row_count)

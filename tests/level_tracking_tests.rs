@@ -29,7 +29,7 @@ async fn test_new_chunks_start_at_l0() {
         max_timestamp: 1000,
         row_count: 1000,
         size_bytes: 1024 * 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
 
     metadata_client
@@ -75,7 +75,7 @@ async fn test_l0_to_l1_progression() {
             max_timestamp: (i as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-            shard_id: None,
+            shard_id: "test-shard".to_string(),
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }
@@ -87,7 +87,7 @@ async fn test_l0_to_l1_progression() {
         max_timestamp: 3000,
         row_count: 3000,
         size_bytes: 3 * 1024 * 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     metadata_client
         .register_chunk(&l1_chunk.path, &l1_chunk)
@@ -147,7 +147,7 @@ async fn test_l1_to_l2_progression() {
             max_timestamp: (i as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-            shard_id: None,
+            shard_id: "test-shard".to_string(),
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }
@@ -158,7 +158,7 @@ async fn test_l1_to_l2_progression() {
         max_timestamp: 2000,
         row_count: 2000,
         size_bytes: 2 * 1024 * 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     metadata_client
         .register_chunk(&l1_chunk_1.path, &l1_chunk_1)
@@ -179,7 +179,7 @@ async fn test_l1_to_l2_progression() {
             max_timestamp: ((i + 2) as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-            shard_id: None,
+            shard_id: "test-shard".to_string(),
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }
@@ -190,7 +190,7 @@ async fn test_l1_to_l2_progression() {
         max_timestamp: 4000,
         row_count: 2000,
         size_bytes: 2 * 1024 * 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     metadata_client
         .register_chunk(&l1_chunk_2.path, &l1_chunk_2)
@@ -209,7 +209,7 @@ async fn test_l1_to_l2_progression() {
         max_timestamp: 4000,
         row_count: 4000,
         size_bytes: 4 * 1024 * 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     metadata_client
         .register_chunk(&l2_chunk.path, &l2_chunk)
@@ -282,7 +282,7 @@ async fn test_full_level_progression() {
             max_timestamp: max_ts,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-            shard_id: None,
+            shard_id: "test-shard".to_string(),
         };
         client.register_chunk(target, &chunk).await.unwrap();
 
@@ -303,7 +303,7 @@ async fn test_full_level_progression() {
             max_timestamp: (i + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-            shard_id: None,
+            shard_id: "test-shard".to_string(),
         };
         metadata_client.register_chunk(&path, &chunk).await.unwrap();
     }
@@ -360,7 +360,7 @@ async fn test_full_level_progression() {
             max_timestamp: (i + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-            shard_id: None,
+            shard_id: "test-shard".to_string(),
         };
         metadata_client.register_chunk(&path, &chunk).await.unwrap();
     }
@@ -431,7 +431,7 @@ async fn test_level_filtering() {
         max_timestamp: 1000,
         row_count: 1000,
         size_bytes: 1024 * 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     metadata_client
         .register_chunk(&l0_chunk.path, &l0_chunk)
@@ -447,7 +447,7 @@ async fn test_level_filtering() {
             max_timestamp: ((i + 1) as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-            shard_id: None,
+            shard_id: "test-shard".to_string(),
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }
@@ -458,7 +458,7 @@ async fn test_level_filtering() {
         max_timestamp: 3000,
         row_count: 2000,
         size_bytes: 2 * 1024 * 1024,
-        shard_id: None,
+        shard_id: "test-shard".to_string(),
     };
     metadata_client
         .register_chunk(&l1_target.path, &l1_target)

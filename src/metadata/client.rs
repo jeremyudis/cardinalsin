@@ -43,38 +43,17 @@ pub trait MetadataClient: Send + Sync {
         &self,
         range: TimeRange,
         _predicates: &[super::predicates::ColumnPredicate],
-    ) -> Result<Vec<TimeIndexEntry>> {
-        // Default implementation: fallback to time-only filtering
-        // (for backwards compatibility with LocalMetadataClient)
-        self.get_chunks(range).await
-    }
+    ) -> Result<Vec<TimeIndexEntry>>;
 
     /// Get chunks for a time range/predicate set with an optional shard filter.
     ///
-    /// Implementations may use the shard filter to reduce the amount of metadata scanned.
-    /// The default implementation preserves correctness for legacy data by keeping chunks
-    /// that do not yet carry explicit shard identity.
+    /// Implementations should use the shard filter to reduce the amount of metadata scanned.
     async fn get_chunks_with_predicates_for_shards(
         &self,
         range: TimeRange,
         predicates: &[super::predicates::ColumnPredicate],
         shard_ids: &[String],
-    ) -> Result<Vec<TimeIndexEntry>> {
-        let chunks = self.get_chunks_with_predicates(range, predicates).await?;
-        if shard_ids.is_empty() {
-            return Ok(chunks);
-        }
-
-        let wanted: std::collections::HashSet<&str> =
-            shard_ids.iter().map(String::as_str).collect();
-        Ok(chunks
-            .into_iter()
-            .filter(|entry| match entry.shard_id.as_deref() {
-                Some(shard_id) => wanted.contains(shard_id),
-                None => true,
-            })
-            .collect())
-    }
+    ) -> Result<Vec<TimeIndexEntry>>;
 
     /// Get chunk metadata by path
     async fn get_chunk(&self, path: &str) -> Result<Option<ChunkMetadata>>;
