@@ -165,7 +165,7 @@ async fn dispatcher_routes_local_and_remote_shards_separately() {
         1,
         "only the local shard should be ingested locally"
     );
-    assert_eq!(chunks[0].shard_id.as_deref(), Some(shard_a.as_str()));
+    assert_eq!(chunks[0].shard_id.as_str(), shard_a.as_str());
 
     let forwarded = router.forwarded.lock().await.clone();
     assert_eq!(
