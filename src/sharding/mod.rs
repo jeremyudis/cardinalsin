@@ -18,10 +18,53 @@ use std::time::Duration;
 /// Shard identifier
 pub type ShardId = String;
 
-/// Bootstrap shard window size in nanoseconds.
-pub const BOOTSTRAP_SHARD_WINDOW_NANOS: i64 = 60 * 60 * 1_000_000_000;
+/// Default time partition size in nanoseconds.
+pub const TIME_PARTITION_NANOS: i64 = 60 * 60 * 1_000_000_000;
 
-/// Time bucket for sharding
+/// Coarse time partition used to group shard families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimePartition {
+    /// Start of the partition (nanoseconds)
+    pub start: i64,
+    /// Duration of the partition
+    pub duration: Duration,
+}
+
+impl TimePartition {
+    /// Create an hourly partition for a timestamp.
+    pub fn hourly(timestamp: i64) -> Self {
+        let start = (timestamp / TIME_PARTITION_NANOS) * TIME_PARTITION_NANOS;
+        Self {
+            start,
+            duration: Duration::from_secs(3600),
+        }
+    }
+
+    /// End of the partition in nanoseconds.
+    pub fn end(&self) -> i64 {
+        self.start + self.duration.as_nanos() as i64
+    }
+
+    /// Enumerate all partition starts overlapping a time range.
+    pub fn starts_in_range(start: i64, end: i64) -> Vec<i64> {
+        if end < start {
+            return Vec::new();
+        }
+
+        let mut partitions = Vec::new();
+        let mut current = Self::hourly(start).start;
+        let last = Self::hourly(end).start;
+
+        while current <= last {
+            partitions.push(current);
+            current += TIME_PARTITION_NANOS;
+        }
+
+        partitions
+    }
+}
+
+/// Fine-grained routing bucket inside a time partition.
 #[derive(Debug, Clone, Copy)]
 pub struct TimeBucket {
     /// Start of the bucket (nanoseconds)
@@ -47,7 +90,7 @@ impl TimeBucket {
         (timestamp / nanos_per_5min) * nanos_per_5min
     }
 
-    /// Enumerate all 5-minute bucket starts overlapping a time range.
+    /// Enumerate all routing bucket starts overlapping a time range.
     pub fn bucket_starts_in_range(start: i64, end: i64) -> Vec<i64> {
         if end < start {
             return Vec::new();
@@ -67,7 +110,7 @@ impl TimeBucket {
     }
 }
 
-/// Shard key structure
+/// Fine-grained routing key used for shard lookup and split-safe query pruning.
 #[derive(Debug, Clone)]
 pub struct ShardKey {
     pub tenant_id: u32,
@@ -106,46 +149,31 @@ impl ShardKey {
         bytes
     }
 
-    /// Convert to a stable shard identifier derived from the full shard key bytes.
+    /// Convert to a stable identifier derived from the full routing key bytes.
     pub fn shard_id(&self) -> ShardId {
         format!("shard-{}", hex_encode(&self.to_bytes()))
     }
 
-    /// Start of the deterministic bootstrap shard window for this key.
-    pub fn bootstrap_window_start(&self) -> i64 {
-        (self.time_bucket.start / BOOTSTRAP_SHARD_WINDOW_NANOS) * BOOTSTRAP_SHARD_WINDOW_NANOS
+    /// Time partition this routing key belongs to.
+    pub fn time_partition(&self) -> TimePartition {
+        TimePartition::hourly(self.time_bucket.start)
     }
 
-    /// End of the deterministic bootstrap shard window for this key.
-    pub fn bootstrap_window_end(&self) -> i64 {
-        self.bootstrap_window_start() + BOOTSTRAP_SHARD_WINDOW_NANOS
-    }
-
-    /// Deterministic shard identifier used before a shard has been split or rebalanced.
-    pub fn bootstrap_shard_id(&self) -> ShardId {
-        let start = ShardKey::from_metric_hash(
-            self.tenant_id,
-            self.metric_hash,
-            self.bootstrap_window_start(),
-        )
-        .to_bytes();
+    /// Deterministic default shard identifier for this key's partition and metric hash.
+    pub fn partition_shard_id(&self) -> ShardId {
+        let partition = self.time_partition();
+        let start = ShardKey::from_metric_hash(self.tenant_id, self.metric_hash, partition.start)
+            .to_bytes();
         format!("shard-{}", hex_encode(&start))
     }
 
-    /// Key range used when auto-creating shard metadata for a new shard family.
-    pub fn bootstrap_key_range(&self) -> (Vec<u8>, Vec<u8>) {
-        let start = ShardKey::from_metric_hash(
-            self.tenant_id,
-            self.metric_hash,
-            self.bootstrap_window_start(),
-        )
-        .to_bytes();
-        let end = ShardKey::from_metric_hash(
-            self.tenant_id,
-            self.metric_hash,
-            self.bootstrap_window_end(),
-        )
-        .to_bytes();
+    /// Key range used when auto-creating the default shard for a partition.
+    pub fn partition_key_range(&self) -> (Vec<u8>, Vec<u8>) {
+        let partition = self.time_partition();
+        let start = ShardKey::from_metric_hash(self.tenant_id, self.metric_hash, partition.start)
+            .to_bytes();
+        let end = ShardKey::from_metric_hash(self.tenant_id, self.metric_hash, partition.end())
+            .to_bytes();
         (start, end)
     }
 
@@ -246,23 +274,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bootstrap_range_groups_adjacent_five_minute_buckets() {
+    fn partition_range_groups_adjacent_five_minute_buckets() {
         let ts = 1_700_000_000_000_000_000i64;
         let first = ShardKey::new(7, "cpu_usage", ts);
         let second = ShardKey::new(7, "cpu_usage", ts + 5 * 60 * 1_000_000_000);
 
-        assert_eq!(
-            first.bootstrap_window_start(),
-            second.bootstrap_window_start()
-        );
-        assert_eq!(first.bootstrap_shard_id(), second.bootstrap_shard_id());
+        assert_eq!(first.time_partition().start, second.time_partition().start);
+        assert_eq!(first.partition_shard_id(), second.partition_shard_id());
 
-        let (start, end) = first.bootstrap_key_range();
+        let (start, end) = first.partition_key_range();
         assert!(key_in_range(
             &first.to_bytes(),
             &(start.clone(), end.clone())
         ));
         assert!(key_in_range(&second.to_bytes(), &(start, end)));
+    }
+
+    #[test]
+    fn hourly_partitions_cover_time_ranges() {
+        let start = 1_700_000_000_000_000_000i64;
+        let end = start + (2 * TIME_PARTITION_NANOS) + 1;
+
+        let partitions = TimePartition::starts_in_range(start, end);
+
+        assert_eq!(partitions.len(), 3);
+        assert_eq!(partitions[1] - partitions[0], TIME_PARTITION_NANOS);
+        assert_eq!(partitions[2] - partitions[1], TIME_PARTITION_NANOS);
     }
 }
 

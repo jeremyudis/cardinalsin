@@ -232,17 +232,15 @@ async fn make_engine() -> QueryEngine {
 
 fn shard_for(metric_name: &str, ts: i64) -> ShardMetadata {
     let key = ShardKey::new(0, metric_name, ts);
-    let start = key.to_bytes();
-    let mut end = start.clone();
-    *end.last_mut().unwrap() += 1;
+    let (start, end) = key.partition_key_range();
     ShardMetadata {
-        shard_id: key.shard_id(),
+        shard_id: key.partition_shard_id(),
         generation: 1,
         key_range: (start, end),
         replicas: Vec::new(),
         state: ShardState::Active,
-        min_time: ts,
-        max_time: ts + 300_000_000_000,
+        min_time: key.time_partition().start,
+        max_time: key.time_partition().end(),
     }
 }
 

@@ -59,7 +59,7 @@ fn make_ingester(
 }
 
 #[tokio::test]
-async fn same_hour_metric_batches_share_a_bootstrap_shard() {
+async fn same_hour_metric_batches_share_a_partition_shard() {
     let metadata = Arc::new(LocalMetadataClient::new());
     let ingester = make_ingester(metadata.clone(), 7, 1);
 
@@ -79,7 +79,7 @@ async fn same_hour_metric_batches_share_a_bootstrap_shard() {
     );
     assert_eq!(
         chunk.shard_id,
-        ShardKey::new(7, "cpu_usage", ts_a).bootstrap_shard_id()
+        ShardKey::new(7, "cpu_usage", ts_a).partition_shard_id()
     );
     assert!(
         chunk
@@ -90,7 +90,11 @@ async fn same_hour_metric_batches_share_a_bootstrap_shard() {
     );
 
     let shards = metadata.list_shards().await.unwrap();
-    assert_eq!(shards.len(), 1, "bootstrap should create one coarse shard");
+    assert_eq!(
+        shards.len(),
+        1,
+        "the partition should create one default shard"
+    );
 
     let shard = &shards[0];
     let key_a = ShardKey::new(7, "cpu_usage", ts_a).to_bytes();
@@ -114,7 +118,7 @@ async fn same_hour_metric_batches_share_a_bootstrap_shard() {
 }
 
 #[tokio::test]
-async fn hour_boundary_creates_a_new_bootstrap_shard() {
+async fn hour_boundary_creates_a_new_partition_shard() {
     let metadata = Arc::new(LocalMetadataClient::new());
     let ingester = make_ingester(metadata.clone(), 7, 1);
 
@@ -134,8 +138,8 @@ async fn hour_boundary_creates_a_new_bootstrap_shard() {
     let actual: std::collections::HashSet<_> =
         chunks.iter().map(|chunk| chunk.shard_id.clone()).collect();
     let expected: std::collections::HashSet<_> = [
-        ShardKey::new(7, "cpu_usage", ts_a).bootstrap_shard_id(),
-        ShardKey::new(7, "cpu_usage", ts_b).bootstrap_shard_id(),
+        ShardKey::new(7, "cpu_usage", ts_a).partition_shard_id(),
+        ShardKey::new(7, "cpu_usage", ts_b).partition_shard_id(),
     ]
     .into_iter()
     .collect();

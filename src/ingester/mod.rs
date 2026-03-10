@@ -563,20 +563,21 @@ impl Ingester {
     }
 
     async fn ensure_shard_metadata(&self, key: &ShardKey) -> Result<ShardMetadata> {
-        let shard_id = key.bootstrap_shard_id();
+        let shard_id = key.partition_shard_id();
         if let Some(existing) = self.metadata.get_shard_metadata(&shard_id).await? {
             return Ok(existing);
         }
 
-        let key_range = key.bootstrap_key_range();
+        let key_range = key.partition_key_range();
+        let partition = key.time_partition();
         let metadata = ShardMetadata {
             shard_id: shard_id.clone(),
             generation: 0,
             key_range,
             replicas: Vec::new(),
             state: ShardState::Active,
-            min_time: key.bootstrap_window_start(),
-            max_time: key.bootstrap_window_end(),
+            min_time: partition.start,
+            max_time: partition.end(),
         };
 
         match self

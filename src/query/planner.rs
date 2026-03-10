@@ -38,6 +38,8 @@ pub(crate) fn shard_ids_for_metrics(
         return Vec::new();
     }
 
+    // Probe fine-grained routing buckets within the query range so shard pruning
+    // remains correct even when a partition has been subdivided by a split.
     let bucket_starts = TimeBucket::bucket_starts_in_range(time_range.start, time_range.end);
     if bucket_starts.is_empty() {
         return Vec::new();
@@ -172,17 +174,15 @@ mod tests {
 
     fn shard_for(metric_name: &str, ts: i64) -> ShardMetadata {
         let key = ShardKey::new(0, metric_name, ts);
-        let start = key.to_bytes();
-        let mut end = start.clone();
-        *end.last_mut().unwrap() += 1;
+        let (start, end) = key.partition_key_range();
         ShardMetadata {
-            shard_id: key.shard_id(),
+            shard_id: key.partition_shard_id(),
             generation: 1,
             key_range: (start, end),
             replicas: Vec::new(),
             state: ShardState::Active,
-            min_time: ts,
-            max_time: ts + 300_000_000_000,
+            min_time: key.time_partition().start,
+            max_time: key.time_partition().end(),
         }
     }
 
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn shard_ids_for_metrics_matches_full_shard_keys() {
+    fn shard_ids_for_metrics_match_partition_shards() {
         let ts = 1_700_000_000_000_000_000i64;
         let shards = vec![shard_for("cpu", ts), shard_for("mem", ts)];
         let metrics = BTreeSet::from(["cpu".to_string()]);
