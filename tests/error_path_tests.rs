@@ -225,6 +225,7 @@ async fn test_get_nonexistent_chunk() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
+        shard_id: 0,
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
 
@@ -264,6 +265,7 @@ async fn test_list_chunks_uninitialized_metadata() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
+        shard_id: 0,
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
     client.delete_chunk("temp.parquet").await.unwrap();
@@ -294,6 +296,7 @@ async fn test_get_chunks_empty_time_range() {
         max_timestamp: 2000,
         row_count: 100,
         size_bytes: 1024,
+        shard_id: 0,
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
 
@@ -329,6 +332,7 @@ async fn test_metadata_cas_fails_loudly_when_unsafe_overwrite_disabled() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
+        shard_id: 0,
     };
 
     client
@@ -342,6 +346,7 @@ async fn test_metadata_cas_fails_loudly_when_unsafe_overwrite_disabled() {
         max_timestamp: 3000,
         row_count: 20,
         size_bytes: 200,
+        shard_id: 0,
     };
 
     let result = client.register_chunk(&second.path, &second).await;
@@ -386,6 +391,7 @@ async fn test_metadata_cas_fallback_overwrite_when_enabled() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
+        shard_id: 0,
     };
 
     client
@@ -399,6 +405,7 @@ async fn test_metadata_cas_fallback_overwrite_when_enabled() {
         max_timestamp: 3000,
         row_count: 20,
         size_bytes: 200,
+        shard_id: 0,
     };
 
     client
@@ -445,6 +452,7 @@ async fn test_register_chunk_with_zero_timestamps() {
         max_timestamp: 0,
         row_count: 0,
         size_bytes: 0,
+        shard_id: 0,
     };
 
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
@@ -478,6 +486,7 @@ async fn test_register_duplicate_chunk_path() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
+        shard_id: 0,
     };
 
     let chunk2 = ChunkMetadata {
@@ -486,6 +495,7 @@ async fn test_register_duplicate_chunk_path() {
         max_timestamp: 3000,
         row_count: 200,
         size_bytes: 2048,
+        shard_id: 0,
     };
 
     client.register_chunk(&chunk1.path, &chunk1).await.unwrap();
@@ -511,7 +521,8 @@ async fn test_cas_stale_generation_error_format() {
     let metadata = Arc::new(LocalMetadataClient::new());
 
     let shard = ShardMetadata {
-        shard_id: "shard-1".to_string(),
+        shard_id: 1,
+        hash_range: (0, 0x10000),
         generation: 0,
         key_range: (vec![0u8; 8], vec![255u8; 8]),
         replicas: vec![ReplicaInfo {
@@ -526,13 +537,13 @@ async fn test_cas_stale_generation_error_format() {
 
     // Create with generation 0
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     // Try with stale generation
     let result = metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await;
 
     assert!(result.is_err());
@@ -561,7 +572,8 @@ async fn test_cas_max_generation_values() {
     let metadata = Arc::new(LocalMetadataClient::new());
 
     let shard = ShardMetadata {
-        shard_id: "shard-large-gen".to_string(),
+        shard_id: 99,
+        hash_range: (0, 0x10000),
         generation: 0,
         key_range: (vec![0u8; 8], vec![255u8; 8]),
         replicas: vec![],
@@ -572,27 +584,27 @@ async fn test_cas_max_generation_values() {
 
     // Initial creation
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     // Perform many updates to get a high generation number
     for gen in 1..=100u64 {
         let current = metadata
-            .get_shard_metadata(&shard.shard_id)
+            .get_shard_metadata(&shard.shard_id.to_string())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(current.generation, gen);
 
         metadata
-            .update_shard_metadata(&shard.shard_id, &current, gen)
+            .update_shard_metadata(&shard.shard_id.to_string(), &current, gen)
             .await
             .unwrap();
     }
 
     let final_shard = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .unwrap();
@@ -622,6 +634,7 @@ async fn test_compaction_with_single_source() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
+        shard_id: 0,
     };
     client.register_chunk(&source.path, &source).await.unwrap();
 
@@ -631,6 +644,7 @@ async fn test_compaction_with_single_source() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
+        shard_id: 0,
     };
     client.register_chunk(&target.path, &target).await.unwrap();
 
@@ -674,6 +688,7 @@ async fn test_l0_candidates_empty() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
+        shard_id: 0,
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
     let target = ChunkMetadata {
@@ -682,6 +697,7 @@ async fn test_l0_candidates_empty() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
+        shard_id: 0,
     };
     client.register_chunk(&target.path, &target).await.unwrap();
     client
@@ -716,6 +732,7 @@ async fn test_level_candidates_nonexistent_level() {
         max_timestamp: 1000,
         row_count: 10,
         size_bytes: 100,
+        shard_id: 0,
     };
     client.register_chunk(&chunk.path, &chunk).await.unwrap();
 
@@ -1070,6 +1087,7 @@ async fn test_concurrent_registration_data_integrity() {
                 max_timestamp: (i + 1) * 1000,
                 row_count: (i + 1) as u64 * 100, // Unique row count per chunk
                 size_bytes: (i + 1) as u64 * 1024,
+        shard_id: 0,
             };
             client.register_chunk(&chunk.path, &chunk).await.unwrap();
             (i, chunk.row_count)

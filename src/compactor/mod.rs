@@ -319,7 +319,7 @@ impl Compactor {
                     // Spawn the split process in the background so it doesn't block the main loop
                     tokio::spawn(async move {
                         let shard_metadata =
-                            match metadata_client.get_shard_metadata(&shard_id).await {
+                            match metadata_client.get_shard_metadata(&shard_id.to_string()).await {
                                 Ok(Some(meta)) => meta,
                                 Ok(None) => {
                                     error!("Cannot split shard {}: metadata not found.", shard_id);

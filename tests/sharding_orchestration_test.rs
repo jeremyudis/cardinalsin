@@ -2,7 +2,7 @@
 
 use cardinalsin::compactor::{Compactor, CompactorConfig};
 use cardinalsin::metadata::{LocalMetadataClient, MetadataClient};
-use cardinalsin::sharding::{HotShardConfig, ReplicaInfo, ShardMetadata, ShardMonitor, ShardState};
+use cardinalsin::sharding::{HotShardConfig, ReplicaInfo, ShardId, ShardMetadata, ShardMonitor, ShardState};
 use cardinalsin::StorageConfig;
 use object_store::memory::InMemory;
 use object_store::ObjectStore;
@@ -10,12 +10,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// Sets up a test environment with a compactor and its dependencies.
-/// Returns the compactor, metadata client, shard monitor, and the ID of an initial shard.
+/// Returns the compactor, metadata client, shard monitor, the string key and numeric ShardId.
 async fn setup_test_env() -> (
     Arc<Compactor>,
     Arc<dyn MetadataClient>,
     Arc<ShardMonitor>,
     String,
+    ShardId,
 ) {
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let metadata: Arc<dyn MetadataClient> = Arc::new(LocalMetadataClient::new());
@@ -45,9 +46,13 @@ async fn setup_test_env() -> (
     ));
 
     // Create an initial shard to be split
-    let initial_shard_id = "shard-hot".to_string();
+    // Use the numeric shard_id as the metadata key so the compactor can find it
+    // via shard_id.to_string() after ShardAction::Split(shard_id)
+    let numeric_shard_id: ShardId = 100;
+    let initial_shard_id = numeric_shard_id.to_string();
     let initial_shard = ShardMetadata {
-        shard_id: initial_shard_id.clone(),
+        shard_id: numeric_shard_id,
+        hash_range: (0, 0x10000),
         generation: 1,
         key_range: (vec![], vec![]), // Simplified for test
         replicas: vec![ReplicaInfo {
@@ -64,18 +69,18 @@ async fn setup_test_env() -> (
         .await
         .unwrap();
 
-    (compactor, metadata, shard_monitor, initial_shard_id)
+    (compactor, metadata, shard_monitor, initial_shard_id, 100)
 }
 
 #[tokio::test]
 async fn test_compactor_triggers_shard_split() {
-    let (compactor, metadata, shard_monitor, hot_shard_id) = setup_test_env().await;
+    let (compactor, metadata, shard_monitor, hot_shard_id, hot_shard_numeric) = setup_test_env().await;
 
     // Simulate high write traffic to the hot shard.
     // The monitor requires one evaluation to mark hot, then another after the
     // detection window to trigger a split action.
     for _ in 0..20 {
-        shard_monitor.record_write(&hot_shard_id, 500, Duration::from_millis(10));
+        shard_monitor.record_write(&hot_shard_numeric, 500, Duration::from_millis(10));
     }
 
     // First cycle marks the shard as hot (no split yet).
@@ -84,7 +89,7 @@ async fn test_compactor_triggers_shard_split() {
     // Keep the shard hot across the detection window, then evaluate again.
     tokio::time::sleep(Duration::from_secs(2)).await;
     for _ in 0..20 {
-        shard_monitor.record_write(&hot_shard_id, 500, Duration::from_millis(10));
+        shard_monitor.record_write(&hot_shard_numeric, 500, Duration::from_millis(10));
     }
 
     // Second cycle should now trigger split orchestration.

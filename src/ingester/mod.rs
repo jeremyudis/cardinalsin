@@ -25,7 +25,7 @@ pub use wal::{load_flushed_seq, persist_flushed_seq, WalConfig, WalSyncMode, Wri
 use crate::clock::BoundedClock;
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
-use crate::sharding::{HotShardConfig, ShardKey, ShardMonitor};
+use crate::sharding::{HotShardConfig, ShardId, ShardMonitor};
 use crate::{Error, Result, StorageConfig};
 
 use arrow_array::RecordBatch;
@@ -305,14 +305,14 @@ impl Ingester {
         let shard_id = self.compute_shard_id(&batch);
         let result = async {
             // Check if shard is being split - if so, use dual-write
-            if let Some(split_state) = self.metadata.get_split_state(&shard_id).await? {
+            if let Some(split_state) = self.metadata.get_split_state(&shard_id.to_string()).await? {
                 use crate::sharding::SplitPhase;
                 if matches!(
                     split_state.phase,
                     SplitPhase::DualWrite | SplitPhase::Backfill
                 ) {
                     info!("Shard {} is splitting, enabling dual-write mode", shard_id);
-                    return self.write_with_split_awareness(batch, &shard_id).await;
+                    return self.write_with_split_awareness(batch, shard_id).await;
                 }
             }
 
@@ -355,10 +355,10 @@ impl Ingester {
     }
 
     /// Write with split awareness (dual-write to old and new shards)
-    async fn write_with_split_awareness(&self, batch: RecordBatch, shard_id: &str) -> Result<()> {
+    async fn write_with_split_awareness(&self, batch: RecordBatch, shard_id: ShardId) -> Result<()> {
         let split_state = self
             .metadata
-            .get_split_state(shard_id)
+            .get_split_state(&shard_id.to_string())
             .await?
             .ok_or_else(|| Error::Internal("Split state disappeared".to_string()))?;
 
@@ -445,6 +445,7 @@ impl Ingester {
             max_timestamp: self.extract_max_timestamp(batch)?,
             row_count: batch.num_rows() as u64,
             size_bytes: parquet_size,
+            shard_id: 0,
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
@@ -500,8 +501,7 @@ impl Ingester {
     }
 
     /// Compute shard ID for a batch based on tenant and metric
-    fn compute_shard_id(&self, batch: &RecordBatch) -> String {
-        // Extract metric name if available for shard key computation
+    fn compute_shard_id(&self, batch: &RecordBatch) -> ShardId {
         let metric_name = if let Some(col) = batch.column_by_name("metric_name") {
             use arrow_array::cast::AsArray;
             if let Some(arr) = col.as_string_opt::<i32>() {
@@ -513,27 +513,9 @@ impl Ingester {
             "unknown".to_string()
         };
 
-        // Extract timestamp for time-based sharding
-        let timestamp = if let Some(col) = batch.column_by_name("timestamp") {
-            use arrow_array::cast::AsArray;
-            if let Some(arr) = col.as_primitive_opt::<arrow_array::types::TimestampNanosecondType>()
-            {
-                arr.value(0)
-            } else if let Some(arr) = col.as_primitive_opt::<arrow_array::types::Int64Type>() {
-                arr.value(0)
-            } else {
-                self.clock.now_nanos()
-            }
-        } else {
-            self.clock.now_nanos()
-        };
-
-        // Create shard key and convert to shard ID
-        let shard_key = ShardKey::new(self.default_tenant_id, &metric_name, timestamp);
-        format!(
-            "shard-{:x}",
-            u64::from_be_bytes(shard_key.to_bytes()[0..8].try_into().unwrap_or([0u8; 8]))
-        )
+        let hash = crate::sharding::hash_metric_name(&metric_name);
+        // For now, return hash as u32 (shard resolution will use cached ranges later)
+        hash as ShardId
     }
 
     /// Extract all unique metric names from a batch for topic routing
@@ -658,12 +640,14 @@ impl Ingester {
             .await?;
 
         // Register in metadata store
+        let shard_id = self.compute_shard_id(&combined);
         let chunk_metadata = ChunkMetadata {
             path: path.clone(),
             min_timestamp: self.extract_min_timestamp(&combined)?,
             max_timestamp: self.extract_max_timestamp(&combined)?,
             row_count: combined.num_rows() as u64,
             size_bytes: parquet_size,
+            shard_id,
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
@@ -673,12 +657,11 @@ impl Ingester {
         }
 
         // Broadcast to topic-aware streaming query subscribers
-        let shard_id = self.compute_shard_id(&combined);
         let metrics = self.extract_metrics(&combined);
         let topic_batch = TopicBatch {
             batch: combined,
             metadata: BatchMetadata {
-                shard_id,
+                shard_id: shard_id.to_string(),
                 tenant_id: self.default_tenant_id,
                 metrics,
             },
@@ -839,6 +822,8 @@ pub struct ChunkMetadata {
     pub max_timestamp: i64,
     pub row_count: u64,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub shard_id: crate::sharding::ShardId,
 }
 
 /// Buffer statistics

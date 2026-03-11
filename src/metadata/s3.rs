@@ -96,9 +96,6 @@ pub struct ChunkMetadataExtended {
     /// Version/ETag for atomic operations
     #[serde(default, skip_serializing)]
     pub version: String,
-    /// Shard ID this chunk belongs to (None for legacy data)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shard_id: Option<String>,
 }
 
 /// Unified metadata catalog -- single S3 object, single ETag
@@ -817,7 +814,6 @@ impl ObjectStoreMetadataClient {
             column_stats: HashMap::new(),
             level: 0, // New chunks start at L0
             version: String::new(),
-            shard_id: None,
         };
 
         let catalog = cas_retry!({
@@ -1135,6 +1131,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                                 max_timestamp: extended.base.max_timestamp,
                                 row_count: extended.base.row_count,
                                 size_bytes: extended.base.size_bytes,
+                                shard_id: extended.base.shard_id,
                             });
                         } else {
                             pruned_count += 1;
@@ -1200,6 +1197,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.base.shard_id,
             })
             .collect();
 
@@ -1538,13 +1536,14 @@ impl MetadataClient for ObjectStoreMetadataClient {
     async fn get_chunks_for_shard(&self, shard_id: &str) -> Result<Vec<TimeIndexEntry>> {
         let catalog = self.load_catalog_cached().await?;
 
-        // Filter chunks by shard_id field first, fall back to path.contains() for legacy data
+        // Filter chunks by numeric shard_id field, fall back to path.contains() for legacy data
         let results: Vec<TimeIndexEntry> = catalog
             .chunks
             .iter()
             .filter(|(path, extended)| {
-                if let Some(ref chunk_shard) = extended.shard_id {
-                    chunk_shard == shard_id
+                // Try numeric match first, fall back to path pattern for legacy data
+                if let Ok(numeric_id) = shard_id.parse::<crate::sharding::ShardId>() {
+                    extended.base.shard_id == numeric_id
                 } else {
                     // Legacy fallback: match by path substring
                     path.contains(shard_id)
@@ -1556,6 +1555,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.base.shard_id,
             })
             .collect();
 
@@ -2084,6 +2084,80 @@ impl MetadataClient for ObjectStoreMetadataClient {
         Ok(states
             .values()
             .any(|s| matches!(s.phase, SplitPhase::DualWrite | SplitPhase::Backfill)))
+    }
+
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
+        use futures::TryStreamExt;
+
+        let prefix = Path::from_iter([&self.config.metadata_prefix, "shards/"]);
+        let list_result = self.object_store.list(Some(&prefix));
+        let objects: Vec<_> = list_result.try_collect().await.map_err(|e| {
+            Error::Internal(format!("Failed to list shard metadata: {}", e))
+        })?;
+
+        let mut shards = Vec::new();
+        for obj in objects {
+            let key = obj.location.to_string();
+            if !key.ends_with(".json") {
+                continue;
+            }
+            match self.object_store.get(&obj.location).await {
+                Ok(result) => {
+                    let bytes = result.bytes().await?;
+                    let content = String::from_utf8_lossy(&bytes);
+                    match serde_json::from_str::<crate::sharding::ShardMetadata>(&content) {
+                        Ok(metadata) => shards.push(metadata),
+                        Err(e) => {
+                            warn!("Failed to parse shard metadata at {}: {}", key, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load shard metadata at {}: {}", key, e);
+                }
+            }
+        }
+
+        Ok(shards)
+    }
+
+    async fn get_chunks_for_shards(
+        &self,
+        range: TimeRange,
+        _predicates: &[super::predicates::ColumnPredicate],
+        shard_ids: &[crate::sharding::ShardId],
+    ) -> Result<Vec<TimeIndexEntry>> {
+        let catalog = self.load_catalog_cached().await?;
+
+        if shard_ids.is_empty() {
+            // No shard filter -- return all chunks in range
+            return self.get_chunks(range).await;
+        }
+
+        let wanted: std::collections::HashSet<crate::sharding::ShardId> =
+            shard_ids.iter().copied().collect();
+
+        let results: Vec<TimeIndexEntry> = catalog
+            .chunks
+            .iter()
+            .filter(|(_, extended)| {
+                wanted.contains(&extended.base.shard_id)
+                    && range.overlaps(&TimeRange::new(
+                        extended.base.min_timestamp,
+                        extended.base.max_timestamp,
+                    ))
+            })
+            .map(|(path, extended)| TimeIndexEntry {
+                chunk_path: path.clone(),
+                min_timestamp: extended.base.min_timestamp,
+                max_timestamp: extended.base.max_timestamp,
+                row_count: extended.base.row_count,
+                size_bytes: extended.base.size_bytes,
+                shard_id: extended.base.shard_id,
+            })
+            .collect();
+
+        Ok(results)
     }
 }
 

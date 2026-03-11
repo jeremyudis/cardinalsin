@@ -116,7 +116,8 @@ mod tests {
         let strategy = RebalanceStrategy::default();
 
         let shard = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1,
+            hash_range: (0, 0x10000),
             generation: 1,
             key_range: (vec![], vec![]),
             replicas: vec![

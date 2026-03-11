@@ -72,7 +72,7 @@ impl ShardRouter {
     /// Rejects updates with a lower generation than the cached entry to
     /// prevent stale metadata from overwriting fresher data.
     pub fn update_routing(&self, shard: ShardMetadata) {
-        let shard_id = shard.shard_id.clone();
+        let shard_id = shard.shard_id;
         // Only update if the new generation is >= the cached generation
         if let Some(existing) = self.cache.get(&shard_id) {
             if shard.generation < existing.shard.generation {
@@ -161,7 +161,8 @@ mod tests {
         let router = ShardRouter::default();
 
         let shard = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1u32,
+            hash_range: (0, 0x10000),
             generation: 1,
             key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
             replicas: vec![],
@@ -176,7 +177,7 @@ mod tests {
         let found = router.get_shard(&key);
 
         assert!(found.is_some());
-        assert_eq!(found.unwrap().shard_id, "shard-1");
+        assert_eq!(found.unwrap().shard_id, 1);
     }
 
     #[test]
@@ -184,12 +185,13 @@ mod tests {
         let router = ShardRouter::default();
 
         let shard = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1u32,
+            hash_range: (0, 0x10000),
             generation: 1,
             key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
             replicas: vec![],
             state: ShardState::Splitting {
-                new_shards: vec!["shard-1a".to_string(), "shard-1b".to_string()],
+                new_shards: vec![16, 17],
             },
             min_time: 0,
             max_time: 0,
@@ -209,7 +211,8 @@ mod tests {
         let router = ShardRouter::default();
 
         let shard_v2 = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1u32,
+            hash_range: (0, 0x10000),
             generation: 2,
             key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
             replicas: vec![],
@@ -221,7 +224,8 @@ mod tests {
 
         // Try to update with older generation
         let shard_v1 = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1u32,
+            hash_range: (0, 0x10000),
             generation: 1,
             key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
             replicas: vec![],
@@ -241,7 +245,8 @@ mod tests {
         let router = ShardRouter::default();
 
         let shard = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1u32,
+            hash_range: (0, 0x10000),
             generation: 3,
             key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
             replicas: vec![],
@@ -264,7 +269,8 @@ mod tests {
         let router = ShardRouter::default();
 
         let shard = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1u32,
+            hash_range: (0, 0x10000),
             generation: 1,
             key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
             replicas: vec![],
@@ -274,7 +280,7 @@ mod tests {
         };
 
         router.update_routing(shard);
-        router.invalidate(&"shard-1".to_string());
+        router.invalidate(&1);
 
         let key = ShardKey::new(1, "cpu", 1000000000);
         let found = router.get_shard(&key);

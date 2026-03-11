@@ -678,7 +678,7 @@ async fn test_complete_split_on_nonexistent_shard() {
 #[test]
 fn test_shard_monitor_metrics_after_writes() {
     let monitor = ShardMonitor::new(HotShardConfig::default());
-    let shard_id = "shard-metrics".to_string();
+    let shard_id: u32 = 1;
 
     // Record several writes
     for _ in 0..10 {
@@ -704,7 +704,7 @@ fn test_shard_monitor_metrics_after_writes() {
 #[test]
 fn test_shard_monitor_cpu_recording() {
     let monitor = ShardMonitor::new(HotShardConfig::default());
-    let shard_id = "shard-cpu".to_string();
+    let shard_id: u32 = 2;
 
     monitor.record_cpu(&shard_id, 0.65);
     monitor.record_cpu(&shard_id, 0.70);
@@ -730,7 +730,7 @@ fn test_shard_monitor_cool_shard() {
     let monitor = ShardMonitor::new(HotShardConfig::default());
 
     // Record a single small write - should not be hot
-    let shard_id = "shard-1".to_string();
+    let shard_id: u32 = 1;
     monitor.record_write(&shard_id, 100, Duration::from_millis(1));
 
     let actions = monitor.evaluate_shards();
@@ -742,12 +742,12 @@ fn test_shard_monitor_metrics_retrieval() {
     let monitor = ShardMonitor::new(HotShardConfig::default());
 
     // No metrics for unknown shard
-    assert!(monitor.get_metrics(&"unknown".to_string()).is_none());
+    assert!(monitor.get_metrics(&99u32).is_none());
 
     // Record a write, then verify metrics exist
-    let shard_id = "shard-1".to_string();
+    let shard_id: u32 = 1;
     monitor.record_write(&shard_id, 1000, Duration::from_millis(5));
-    let metrics = monitor.get_metrics(&"shard-1".to_string());
+    let metrics = monitor.get_metrics(&1u32);
     assert!(
         metrics.is_some(),
         "Should have metrics after recording write"
@@ -842,6 +842,7 @@ async fn test_time_index_rebuild() {
             max_timestamp: (i + 1) * nanos_per_hour - 1,
             row_count: 100,
             size_bytes: 1024,
+        shard_id: 0,
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }
@@ -883,6 +884,7 @@ async fn test_compaction_level_tracking_through_metadata() {
             max_timestamp: (i + 1) * 1000 - 1,
             row_count: 10,
             size_bytes: 100,
+        shard_id: 0,
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }
@@ -894,6 +896,7 @@ async fn test_compaction_level_tracking_through_metadata() {
         max_timestamp: 2999,
         row_count: 30,
         size_bytes: 300,
+        shard_id: 0,
     };
     client.register_chunk(&target.path, &target).await.unwrap();
 
@@ -1037,7 +1040,8 @@ async fn test_s3_shard_metadata_lifecycle() {
     let client = Arc::new(S3MetadataClient::new(object_store, config));
 
     let shard = ShardMetadata {
-        shard_id: "shard-s3-test".to_string(),
+        shard_id: 1,
+        hash_range: (0, 0x10000),
         generation: 0,
         key_range: (vec![0u8; 8], vec![255u8; 8]),
         replicas: vec![ReplicaInfo {
@@ -1052,12 +1056,12 @@ async fn test_s3_shard_metadata_lifecycle() {
 
     // Create shard (generation 0 -> 1)
     client
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     // Verify it exists
-    let retrieved = client.get_shard_metadata("shard-s3-test").await.unwrap();
+    let retrieved = client.get_shard_metadata(&shard.shard_id.to_string()).await.unwrap();
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.generation, 1);
@@ -1065,13 +1069,13 @@ async fn test_s3_shard_metadata_lifecycle() {
 
     // Update with correct generation (1 -> 2)
     client
-        .update_shard_metadata("shard-s3-test", &retrieved, 1)
+        .update_shard_metadata(&shard.shard_id.to_string(), &retrieved, 1)
         .await
         .unwrap();
 
     // Verify generation incremented
     let updated = client
-        .get_shard_metadata("shard-s3-test")
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .unwrap();
@@ -1079,7 +1083,7 @@ async fn test_s3_shard_metadata_lifecycle() {
 
     // Stale generation should fail
     let result = client
-        .update_shard_metadata("shard-s3-test", &updated, 1) // stale: actual is 2
+        .update_shard_metadata(&shard.shard_id.to_string(), &updated, 1) // stale: actual is 2
         .await;
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -1228,6 +1232,7 @@ async fn test_concurrent_split_and_chunk_registration() {
                 max_timestamp: (i + 1) * 1000,
                 row_count: 10,
                 size_bytes: 100,
+        shard_id: 0,
             };
             client.register_chunk(&chunk.path, &chunk).await.unwrap();
         });
@@ -1259,6 +1264,7 @@ async fn test_concurrent_split_and_chunk_registration() {
             max_timestamp: (i + 1) * 1000,
             row_count: 10,
             size_bytes: 100,
+        shard_id: 0,
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }

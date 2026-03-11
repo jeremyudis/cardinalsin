@@ -186,4 +186,20 @@ pub trait MetadataClient: Send + Sync {
     async fn has_active_split(&self) -> Result<bool> {
         Ok(false) // Default: no splits active
     }
+
+    /// Get chunks for multiple shards
+    async fn get_chunks_for_shards(
+        &self,
+        range: TimeRange,
+        predicates: &[super::predicates::ColumnPredicate],
+        _shard_ids: &[crate::sharding::ShardId],
+    ) -> Result<Vec<TimeIndexEntry>> {
+        // Default: fall back to predicate-only query
+        self.get_chunks_with_predicates(range, predicates).await
+    }
+
+    /// List all shard metadata
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
+        Ok(vec![])
+    }
 }
