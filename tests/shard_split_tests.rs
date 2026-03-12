@@ -16,7 +16,8 @@ use std::sync::Arc;
 /// Helper to create a test shard
 fn create_test_shard() -> ShardMetadata {
     ShardMetadata {
-        shard_id: "test-shard-1".to_string(),
+        shard_id: 1,
+        hash_range: (0, 0x10000),
         generation: 1,
         key_range: (vec![0u8; 8], vec![255u8; 8]),
         replicas: vec![ReplicaInfo {
@@ -68,11 +69,13 @@ async fn test_phase1_preparation() {
     // Verify new shard IDs are generated
     assert_ne!(shard_a, shard_b, "New shards should have different IDs");
     assert_ne!(
-        shard_a, shard.shard_id,
+        shard_a,
+        shard.shard_id.to_string(),
         "New shard A should be different from original"
     );
     assert_ne!(
-        shard_b, shard.shard_id,
+        shard_b,
+        shard.shard_id.to_string(),
         "New shard B should be different from original"
     );
 }
@@ -86,12 +89,12 @@ async fn test_phase2_dualwrite_state() {
 
     let shard = create_test_shard();
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = vec![128u8; 8]; // Mid-point
+    let split_point = 0x8000u32.to_be_bytes().to_vec(); // Hash midpoint for range (0, 0x10000)
 
     // Start split (Phase 1-2)
     metadata
         .start_split(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             vec![shard_a.clone(), shard_b.clone()],
             split_point.clone(),
         )
@@ -99,19 +102,19 @@ async fn test_phase2_dualwrite_state() {
         .unwrap();
 
     metadata
-        .update_split_progress(&shard.shard_id, 0.0, SplitPhase::DualWrite)
+        .update_split_progress(&shard.shard_id.to_string(), 0.0, SplitPhase::DualWrite)
         .await
         .unwrap();
 
     // Verify split state
     let split_state = metadata
-        .get_split_state(&shard.shard_id)
+        .get_split_state(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Split state should exist");
 
     assert_eq!(split_state.phase, SplitPhase::DualWrite);
-    assert_eq!(split_state.old_shard, shard.shard_id);
+    assert_eq!(split_state.old_shard, shard.shard_id.to_string());
     assert_eq!(split_state.new_shards.len(), 2);
     assert_eq!(split_state.split_point, split_point);
 }
@@ -157,6 +160,7 @@ async fn test_phase3_backfill() {
         max_timestamp: 5000,
         row_count: 5,
         size_bytes: 1024,
+        shard_id: 0,
     };
     metadata
         .register_chunk(&chunk_path, &chunk_meta)
@@ -165,11 +169,11 @@ async fn test_phase3_backfill() {
 
     // Start split
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 3000i64.to_be_bytes().to_vec(); // Split at timestamp 3000
+    let split_point = 0x8000u32.to_be_bytes().to_vec(); // Hash midpoint
 
     metadata
         .start_split(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             vec![shard_a.clone(), shard_b.clone()],
             split_point.clone(),
         )
@@ -179,7 +183,7 @@ async fn test_phase3_backfill() {
     // Run backfill
     splitter
         .run_backfill(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             &[shard_a.clone(), shard_b.clone()],
             &split_point,
         )
@@ -188,7 +192,7 @@ async fn test_phase3_backfill() {
 
     // Verify split progress is complete
     let split_state = metadata
-        .get_split_state(&shard.shard_id)
+        .get_split_state(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Split state should exist");
@@ -219,16 +223,16 @@ async fn test_phase4_cutover() {
 
     let shard = create_test_shard();
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 5000i64.to_be_bytes().to_vec();
+    let split_point = 0x8000u32.to_be_bytes().to_vec();
 
     // Set up split state with 100% backfill
     metadata
         .start_split(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             vec![shard_a.clone(), shard_b.clone()],
             split_point,
         )
@@ -236,15 +240,18 @@ async fn test_phase4_cutover() {
         .unwrap();
 
     metadata
-        .update_split_progress(&shard.shard_id, 1.0, SplitPhase::Backfill)
+        .update_split_progress(&shard.shard_id.to_string(), 1.0, SplitPhase::Backfill)
         .await
         .unwrap();
 
     // Execute cutover
-    splitter.cutover(&shard.shard_id).await.unwrap();
+    splitter.cutover(&shard.shard_id.to_string()).await.unwrap();
 
     // Verify split is complete
-    let split_state = metadata.get_split_state(&shard.shard_id).await.unwrap();
+    let split_state = metadata
+        .get_split_state(&shard.shard_id.to_string())
+        .await
+        .unwrap();
     assert!(
         split_state.is_none(),
         "Split state should be removed after cutover"
@@ -252,7 +259,7 @@ async fn test_phase4_cutover() {
 
     // Verify old shard is fenced from new writes and new shards are active
     let old = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("old shard metadata should exist");
@@ -287,20 +294,23 @@ async fn test_phase4_cutover_requires_old_shard_metadata() {
 
     metadata
         .start_split(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             vec![shard_a, shard_b],
-            5000i64.to_be_bytes().to_vec(),
+            0x8000u32.to_be_bytes().to_vec(),
         )
         .await
         .unwrap();
     metadata
-        .update_split_progress(&shard.shard_id, 1.0, SplitPhase::Backfill)
+        .update_split_progress(&shard.shard_id.to_string(), 1.0, SplitPhase::Backfill)
         .await
         .unwrap();
 
-    let err = splitter.cutover(&shard.shard_id).await.unwrap_err();
+    let err = splitter
+        .cutover(&shard.shard_id.to_string())
+        .await
+        .unwrap_err();
     assert!(
-        matches!(err, cardinalsin::Error::ShardNotFound(ref id) if id == &shard.shard_id),
+        matches!(err, cardinalsin::Error::ShardNotFound(ref id) if id == &shard.shard_id.to_string()),
         "expected ShardNotFound when old shard metadata is missing, got: {}",
         err
     );
@@ -314,24 +324,27 @@ async fn test_phase4_cutover_rejects_invalid_split_state_shape() {
 
     let shard = create_test_shard();
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     metadata
         .start_split(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             vec!["only-one-new-shard".to_string()],
-            5000i64.to_be_bytes().to_vec(),
+            0x8000u32.to_be_bytes().to_vec(),
         )
         .await
         .unwrap();
     metadata
-        .update_split_progress(&shard.shard_id, 1.0, SplitPhase::Backfill)
+        .update_split_progress(&shard.shard_id.to_string(), 1.0, SplitPhase::Backfill)
         .await
         .unwrap();
 
-    let err = splitter.cutover(&shard.shard_id).await.unwrap_err();
+    let err = splitter
+        .cutover(&shard.shard_id.to_string())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, cardinalsin::Error::Internal(ref msg) if msg.contains("expected 2 new shards")),
         "expected split-state shape validation error, got: {}",
@@ -361,6 +374,7 @@ async fn test_phase5_cleanup() {
         max_timestamp: 1000,
         row_count: 100,
         size_bytes: 1024,
+        shard_id: 0,
     };
     metadata
         .register_chunk(&chunk_path, &chunk_meta)
@@ -369,7 +383,10 @@ async fn test_phase5_cleanup() {
 
     // Execute cleanup with short grace period
     splitter
-        .cleanup(&shard.shard_id, std::time::Duration::from_millis(10))
+        .cleanup(
+            &shard.shard_id.to_string(),
+            std::time::Duration::from_millis(10),
+        )
         .await
         .unwrap();
 
@@ -396,7 +413,7 @@ async fn test_full_split_execution() {
 
     // Store shard metadata for CAS operations
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
@@ -430,6 +447,7 @@ async fn test_full_split_execution() {
         max_timestamp: 4000,
         row_count: 4,
         size_bytes: 1024,
+        shard_id: 0,
     };
     metadata
         .register_chunk(&chunk_path, &chunk_meta)
@@ -444,7 +462,10 @@ async fn test_full_split_execution() {
     match result {
         Ok(_) => {
             // Split succeeded - verify split state is cleaned up
-            let split_state = metadata.get_split_state(&shard.shard_id).await.unwrap();
+            let split_state = metadata
+                .get_split_state(&shard.shard_id.to_string())
+                .await
+                .unwrap();
             assert!(split_state.is_none(), "Split state should be cleaned up");
         }
         Err(e) => {
@@ -467,7 +488,8 @@ async fn test_split_point_calculation() {
     let splitter = ShardSplitter::new(metadata.clone(), object_store);
 
     let shard = ShardMetadata {
-        shard_id: "test-shard".to_string(),
+        shard_id: 99,
+        hash_range: (0, 0x10000),
         generation: 1,
         key_range: (vec![0u8; 8], vec![255u8; 8]),
         replicas: vec![],
@@ -530,6 +552,7 @@ async fn test_backfill_progress_tracking() {
             max_timestamp: i * 1000 + 1000,
             row_count: 2,
             size_bytes: 1024,
+            shard_id: 0,
         };
         metadata
             .register_chunk(&chunk_path, &chunk_meta)
@@ -538,11 +561,11 @@ async fn test_backfill_progress_tracking() {
     }
 
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 3000i64.to_be_bytes().to_vec();
+    let split_point = 0x8000u32.to_be_bytes().to_vec();
 
     metadata
         .start_split(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             vec![shard_a.clone(), shard_b.clone()],
             split_point.clone(),
         )
@@ -551,13 +574,17 @@ async fn test_backfill_progress_tracking() {
 
     // Run backfill
     splitter
-        .run_backfill(&shard.shard_id, &[shard_a, shard_b], &split_point)
+        .run_backfill(
+            &shard.shard_id.to_string(),
+            &[shard_a, shard_b],
+            &split_point,
+        )
         .await
         .unwrap();
 
     // Verify final progress is 100%
     let split_state = metadata
-        .get_split_state(&shard.shard_id)
+        .get_split_state(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Split state should exist");
@@ -608,16 +635,17 @@ async fn test_backfill_rerun_is_idempotent() {
                 max_timestamp: 5000,
                 row_count: 5,
                 size_bytes: 1024,
+                shard_id: 0,
             },
         )
         .await
         .unwrap();
 
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 3000i64.to_be_bytes().to_vec();
+    let split_point = 0x8000u32.to_be_bytes().to_vec();
     metadata
         .start_split(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             vec![shard_a.clone(), shard_b.clone()],
             split_point.clone(),
         )
@@ -626,7 +654,7 @@ async fn test_backfill_rerun_is_idempotent() {
 
     splitter
         .run_backfill(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             &[shard_a.clone(), shard_b.clone()],
             &split_point,
         )
@@ -638,7 +666,7 @@ async fn test_backfill_rerun_is_idempotent() {
 
     splitter
         .run_backfill(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             &[shard_a.clone(), shard_b.clone()],
             &split_point,
         )
@@ -675,7 +703,7 @@ async fn test_backfill_rerun_is_idempotent() {
     );
 
     let split_state = metadata
-        .get_split_state(&shard.shard_id)
+        .get_split_state(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Split state should exist");
@@ -727,6 +755,7 @@ async fn test_backfill_resume_after_partial_failure() {
                 max_timestamp: 2000,
                 row_count: 3,
                 size_bytes: 1024,
+                shard_id: 0,
             },
         )
         .await
@@ -742,17 +771,18 @@ async fn test_backfill_resume_after_partial_failure() {
                 max_timestamp: 5000,
                 row_count: 3,
                 size_bytes: 1024,
+                shard_id: 0,
             },
         )
         .await
         .unwrap();
 
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 3000i64.to_be_bytes().to_vec();
+    let split_point = 0x8000u32.to_be_bytes().to_vec();
 
     metadata
         .start_split(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             vec![shard_a.clone(), shard_b.clone()],
             split_point.clone(),
         )
@@ -761,7 +791,7 @@ async fn test_backfill_resume_after_partial_failure() {
 
     let first_attempt = splitter
         .run_backfill(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             &[shard_a.clone(), shard_b.clone()],
             &split_point,
         )
@@ -772,7 +802,7 @@ async fn test_backfill_resume_after_partial_failure() {
     );
 
     let partial_progress = splitter
-        .load_progress(&shard.shard_id)
+        .load_progress(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("progress should be persisted after partial failure");
@@ -789,7 +819,7 @@ async fn test_backfill_resume_after_partial_failure() {
 
     splitter
         .run_backfill(
-            &shard.shard_id,
+            &shard.shard_id.to_string(),
             &[shard_a.clone(), shard_b.clone()],
             &split_point,
         )
@@ -797,7 +827,7 @@ async fn test_backfill_resume_after_partial_failure() {
         .unwrap();
 
     let complete_progress = splitter
-        .load_progress(&shard.shard_id)
+        .load_progress(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("progress should still exist before cleanup phase");

@@ -31,7 +31,7 @@ impl RebalanceStrategy {
                 if target_replica.replica_id != current_leader.replica_id {
                     // Try lease transfer first (cheap, ~100ms, no data copy)
                     return Ok(RebalanceAction::TransferLease {
-                        shard_id: shard.shard_id.clone(),
+                        shard_id: shard.shard_id,
                         from_replica: current_leader.replica_id.clone(),
                         to_replica: target_replica.replica_id.clone(),
                     });
@@ -43,7 +43,7 @@ impl RebalanceStrategy {
         if let Some((target_node, _)) = self.find_underloaded_node(node_loads) {
             if let Some(leader) = shard.leader_replica() {
                 return Ok(RebalanceAction::MoveReplica {
-                    shard_id: shard.shard_id.clone(),
+                    shard_id: shard.shard_id,
                     from_node: leader.node_id.clone(),
                     to_node: target_node,
                 });
@@ -116,7 +116,8 @@ mod tests {
         let strategy = RebalanceStrategy::default();
 
         let shard = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1,
+            hash_range: (0, 0x10000),
             generation: 1,
             key_range: (vec![], vec![]),
             replicas: vec![

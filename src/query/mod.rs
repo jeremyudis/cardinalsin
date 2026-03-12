@@ -9,6 +9,7 @@ mod cache;
 mod cached_store;
 mod dedup;
 mod engine;
+pub mod planner;
 mod router;
 mod streaming;
 mod telemetry;
@@ -183,11 +184,20 @@ impl QueryNode {
                 (Err(e), _) | (_, Err(e)) => return Err(e),
             };
 
+            // Shard pruning: if predicates constrain metric_name, narrow to matching shards
+            let shards = self.metadata.list_shards().await.unwrap_or_default();
+            let candidate_shards = planner::candidate_shard_ids(&predicates, &shards);
+
             // Get relevant chunks from metadata with predicate pushdown
-            let chunks = self
-                .metadata
-                .get_chunks_with_predicates(time_range, &predicates)
-                .await?;
+            let chunks = if let Some(ref shard_ids) = candidate_shards {
+                self.metadata
+                    .get_chunks_for_shards(time_range, &predicates, shard_ids)
+                    .await?
+            } else {
+                self.metadata
+                    .get_chunks_with_predicates(time_range, &predicates)
+                    .await?
+            };
             let bytes_scanned = chunks.iter().map(|chunk| chunk.size_bytes).sum::<u64>();
 
             // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)

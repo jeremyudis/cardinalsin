@@ -167,7 +167,7 @@ impl ShardMonitor {
     pub fn record_write(&self, shard_id: &ShardId, bytes: usize, latency: Duration) {
         let mut entry = self
             .metrics
-            .entry(shard_id.clone())
+            .entry(*shard_id)
             .or_insert_with(|| ShardMetrics::new(self.config.detection_window));
         entry.record_write(bytes, latency);
     }
@@ -176,7 +176,7 @@ impl ShardMonitor {
     pub fn record_cpu(&self, shard_id: &ShardId, utilization: f64) {
         let mut entry = self
             .metrics
-            .entry(shard_id.clone())
+            .entry(*shard_id)
             .or_insert_with(|| ShardMetrics::new(self.config.detection_window));
         entry.record_cpu(utilization);
     }
@@ -188,7 +188,7 @@ impl ShardMonitor {
         let mut max_p99_latency = 0.0f64;
 
         for mut entry in self.metrics.iter_mut() {
-            let shard_id = entry.key().clone();
+            let shard_id = *entry.key();
             let metrics = entry.value_mut();
             let write_rate = metrics.write_qps.rate_per_second();
             let p99_latency = metrics.p99_latency.avg();
@@ -276,7 +276,7 @@ mod tests {
         };
 
         let monitor = ShardMonitor::new(config);
-        let shard_id = "shard-1".to_string();
+        let shard_id: ShardId = 1;
 
         // Record many writes quickly to generate high QPS
         for _ in 0..100 {

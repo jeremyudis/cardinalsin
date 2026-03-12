@@ -37,6 +37,7 @@ async fn register_chunk_with_stats(
         max_timestamp: max_ts,
         row_count: 1000,
         size_bytes: 100_000,
+        shard_id: 0,
     };
 
     client.register_chunk(path, &chunk).await.unwrap();

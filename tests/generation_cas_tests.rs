@@ -10,9 +10,17 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 /// Helper to create a test shard
+///
+/// The `id` string is hashed to a stable u32 for shard_id. The metadata
+/// client uses `shard_id.to_string()` as the DashMap key.
 fn create_test_shard(id: &str, generation: u64) -> ShardMetadata {
+    // Use a simple hash of the id string to get a unique numeric shard_id
+    let shard_id = id
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     ShardMetadata {
-        shard_id: id.to_string(),
+        shard_id,
+        hash_range: (0, 0x10000),
         generation,
         key_range: (vec![0u8; 8], vec![255u8; 8]),
         replicas: vec![ReplicaInfo {
@@ -35,13 +43,13 @@ async fn test_generation_increments() {
 
     // Initial update (generation 0 -> 1)
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     // Verify generation incremented
     let updated = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -50,12 +58,12 @@ async fn test_generation_increments() {
 
     // Update again (generation 1 -> 2)
     metadata
-        .update_shard_metadata(&shard.shard_id, &updated, 1)
+        .update_shard_metadata(&shard.shard_id.to_string(), &updated, 1)
         .await
         .unwrap();
 
     let updated2 = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -72,13 +80,13 @@ async fn test_stale_generation_rejected() {
 
     // Initial update
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     // Try to update with stale generation (0 when current is 1)
     let result = metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await;
 
     assert!(result.is_err(), "Should reject stale generation");
@@ -101,7 +109,7 @@ async fn test_concurrent_cas_updates() {
 
     // Initial setup
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
@@ -110,13 +118,13 @@ async fn test_concurrent_cas_updates() {
 
     for i in 0..10 {
         let client = metadata.clone();
-        let shard_id = shard.shard_id.clone();
+        let shard_id_str = shard.shard_id.to_string();
 
         tasks.spawn(async move {
             // Each task tries multiple times with the latest generation
             for attempt in 0..5 {
                 // Get current metadata
-                let current = match client.get_shard_metadata(&shard_id).await.unwrap() {
+                let current = match client.get_shard_metadata(&shard_id_str).await.unwrap() {
                     Some(s) => s,
                     None => return Err(format!("Task {} attempt {}: Shard not found", i, attempt)),
                 };
@@ -126,7 +134,7 @@ async fn test_concurrent_cas_updates() {
                 updated.min_time = i * 1000; // Just change something
 
                 match client
-                    .update_shard_metadata(&shard_id, &updated, current.generation)
+                    .update_shard_metadata(&shard_id_str, &updated, current.generation)
                     .await
                 {
                     Ok(_) => return Ok(i),
@@ -166,7 +174,7 @@ async fn test_concurrent_cas_updates() {
 
     // Verify final generation
     let final_shard = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -186,19 +194,19 @@ async fn test_cas_prevents_lost_updates() {
 
     // Initial setup
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     // Simulate two processes with stale reads
     let shard1 = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
 
     let shard2 = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -212,7 +220,7 @@ async fn test_cas_prevents_lost_updates() {
     updated1.min_time = 1000;
 
     metadata
-        .update_shard_metadata(&shard.shard_id, &updated1, 1)
+        .update_shard_metadata(&shard.shard_id.to_string(), &updated1, 1)
         .await
         .unwrap();
 
@@ -221,7 +229,7 @@ async fn test_cas_prevents_lost_updates() {
     updated2.min_time = 2000;
 
     let result = metadata
-        .update_shard_metadata(&shard.shard_id, &updated2, 1)
+        .update_shard_metadata(&shard.shard_id.to_string(), &updated2, 1)
         .await;
 
     assert!(
@@ -231,7 +239,7 @@ async fn test_cas_prevents_lost_updates() {
 
     // Verify first update was preserved
     let final_shard = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -253,30 +261,30 @@ async fn test_cas_with_state_transitions() {
 
     // Initial setup
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     // Transition to Splitting
     let current = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
 
     let mut splitting = current.clone();
     splitting.state = ShardState::Splitting {
-        new_shards: vec!["shard-2".to_string(), "shard-3".to_string()],
+        new_shards: vec![2, 3],
     };
 
     metadata
-        .update_shard_metadata(&shard.shard_id, &splitting, current.generation)
+        .update_shard_metadata(&shard.shard_id.to_string(), &splitting, current.generation)
         .await
         .unwrap();
 
     // Verify state changed
     let updated = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -295,13 +303,13 @@ async fn test_cas_with_state_transitions() {
     };
 
     metadata
-        .update_shard_metadata(&shard.shard_id, &pending, updated.generation)
+        .update_shard_metadata(&shard.shard_id.to_string(), &pending, updated.generation)
         .await
         .unwrap();
 
     // Verify final state
     let final_shard = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -325,13 +333,13 @@ async fn test_new_shard_creation() {
 
     // Create new shard (expected_generation = 0 for new shards)
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
     // Verify it was created with generation 1
     let created = metadata
-        .get_shard_metadata(&shard.shard_id)
+        .get_shard_metadata(&shard.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -349,19 +357,19 @@ async fn test_independent_shard_updates() {
     let shard2 = create_test_shard("shard-2", 0);
 
     metadata
-        .update_shard_metadata(&shard1.shard_id, &shard1, 0)
+        .update_shard_metadata(&shard1.shard_id.to_string(), &shard1, 0)
         .await
         .unwrap();
 
     metadata
-        .update_shard_metadata(&shard2.shard_id, &shard2, 0)
+        .update_shard_metadata(&shard2.shard_id.to_string(), &shard2, 0)
         .await
         .unwrap();
 
     // Update shard1 multiple times
     for i in 1..=3 {
         let current = metadata
-            .get_shard_metadata(&shard1.shard_id)
+            .get_shard_metadata(&shard1.shard_id.to_string())
             .await
             .unwrap()
             .expect("Shard should exist");
@@ -370,14 +378,14 @@ async fn test_independent_shard_updates() {
         updated.min_time = i * 1000;
 
         metadata
-            .update_shard_metadata(&shard1.shard_id, &updated, current.generation)
+            .update_shard_metadata(&shard1.shard_id.to_string(), &updated, current.generation)
             .await
             .unwrap();
     }
 
     // Verify shard1 has generation 4
     let final1 = metadata
-        .get_shard_metadata(&shard1.shard_id)
+        .get_shard_metadata(&shard1.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -385,7 +393,7 @@ async fn test_independent_shard_updates() {
 
     // Verify shard2 still has generation 1
     let final2 = metadata
-        .get_shard_metadata(&shard2.shard_id)
+        .get_shard_metadata(&shard2.shard_id.to_string())
         .await
         .unwrap()
         .expect("Shard should exist");
@@ -400,7 +408,7 @@ async fn test_retry_with_backoff() {
     let shard = create_test_shard("shard-1", 0);
 
     metadata
-        .update_shard_metadata(&shard.shard_id, &shard, 0)
+        .update_shard_metadata(&shard.shard_id.to_string(), &shard, 0)
         .await
         .unwrap();
 
@@ -417,7 +425,7 @@ async fn test_retry_with_backoff() {
 
         // Get current generation
         let current = metadata
-            .get_shard_metadata(&shard.shard_id)
+            .get_shard_metadata(&shard.shard_id.to_string())
             .await
             .unwrap()
             .expect("Shard should exist");
@@ -427,7 +435,7 @@ async fn test_retry_with_backoff() {
         updated.min_time = 5000;
 
         match metadata
-            .update_shard_metadata(&shard.shard_id, &updated, current.generation)
+            .update_shard_metadata(&shard.shard_id.to_string(), &updated, current.generation)
             .await
         {
             Ok(_) => break,

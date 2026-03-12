@@ -340,12 +340,22 @@ impl MetadataClient for LocalMetadataClient {
     }
 
     async fn get_chunks_for_shard(&self, shard_id: &str) -> Result<Vec<TimeIndexEntry>> {
-        // In a real implementation, we'd have shard-to-chunk mappings
-        // For now, filter chunks by path pattern
+        // For numeric shard IDs: match by shard_id field, with path prefix fallback
+        // For non-numeric (UUID) shard IDs: match by path pattern only
+        let numeric_id = shard_id.parse::<crate::sharding::ShardId>().ok();
         let results: Vec<TimeIndexEntry> = self
             .chunks
             .iter()
-            .filter(|entry| entry.key().contains(shard_id))
+            .filter(|entry| {
+                if let Some(nid) = numeric_id {
+                    // Numeric: match field or path prefix (e.g. "1/chunk.parquet")
+                    entry.value().shard_id == nid
+                        || entry.key().starts_with(&format!("{}/", shard_id))
+                } else {
+                    // UUID-style: match by path containment
+                    entry.key().contains(shard_id)
+                }
+            })
             .map(|entry| TimeIndexEntry::from(entry.value()))
             .collect();
 
@@ -499,6 +509,32 @@ impl MetadataClient for LocalMetadataClient {
         }
         Ok(false)
     }
+
+    async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
+        Ok(self
+            .shard_metadata
+            .iter()
+            .map(|e| e.value().clone())
+            .collect())
+    }
+
+    async fn get_chunks_for_shards(
+        &self,
+        range: TimeRange,
+        _predicates: &[super::predicates::ColumnPredicate],
+        shard_ids: &[crate::sharding::ShardId],
+    ) -> Result<Vec<TimeIndexEntry>> {
+        let all = self.get_chunks(range).await?;
+        if shard_ids.is_empty() {
+            return Ok(all);
+        }
+        let wanted: std::collections::HashSet<crate::sharding::ShardId> =
+            shard_ids.iter().copied().collect();
+        Ok(all
+            .into_iter()
+            .filter(|e| wanted.contains(&e.shard_id))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -512,6 +548,7 @@ mod tests {
             max_timestamp: max_ts,
             row_count: 1000,
             size_bytes: 1024 * 1024,
+            shard_id: 0,
         }
     }
 

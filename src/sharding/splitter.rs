@@ -3,12 +3,12 @@
 //! Each phase transition is persisted to object storage so that a crash at any
 //! point can be recovered by calling `resume_split()`.
 
-use super::{ShardId, ShardMetadata, ShardState, TimeBucket};
+use super::{ShardId, ShardMetadata, ShardState};
 use crate::ingester::ChunkMetadata;
 use crate::metadata::MetadataClient;
 use crate::Result;
 use arrow::array::RecordBatch;
-use arrow::datatypes::DataType;
+
 use bytes::Bytes;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -16,9 +16,11 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use std::collections::BTreeSet;
+use std::hash::Hasher as _;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
+use twox_hash::XxHash64;
 
 /// Split phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -164,8 +166,8 @@ impl ShardSplitter {
     /// If the process crashes at any point, call `resume_split()` with
     /// the same `old_shard` to continue from where it left off.
     pub async fn execute_split_with_monitoring(&self, shard: &ShardMetadata) -> Result<()> {
-        let shard_id = &shard.shard_id;
-        info!("Starting 5-phase split for shard: {}", shard_id);
+        let shard_id_str = shard.shard_id.to_string();
+        info!("Starting 5-phase split for shard: {}", shard_id_str);
 
         // Phase 1: Preparation
         let (new_shard_a, new_shard_b) = self.split_shard(shard).await?;
@@ -173,7 +175,7 @@ impl ShardSplitter {
 
         // Persist initial progress before any metadata changes
         let mut progress = SplitProgress::new(
-            shard_id,
+            &shard_id_str,
             vec![new_shard_a.clone(), new_shard_b.clone()],
             split_point.clone(),
         );
@@ -182,7 +184,7 @@ impl ShardSplitter {
         // Store split state in metadata
         self.metadata
             .start_split(
-                shard_id,
+                &shard_id_str,
                 vec![new_shard_a.clone(), new_shard_b.clone()],
                 split_point.clone(),
             )
@@ -330,25 +332,25 @@ impl ShardSplitter {
             .ok_or_else(|| crate::Error::ShardNotFound(old_shard.to_string()))?;
 
         let current_generation = old_metadata.generation;
-        let split_ts =
-            i64::from_be_bytes(split_state.split_point[..8].try_into().unwrap_or([0u8; 8]));
+
+        // The split point is the hash range midpoint (4-byte u32)
+        let hash_mid =
+            u32::from_be_bytes(split_state.split_point[..4].try_into().unwrap_or([0u8; 4]));
 
         // Step 1: Create shard A (idempotent — skipped if already done)
         if !progress.shard_a_created {
             let new_shard_a = ShardMetadata {
-                shard_id: split_state.new_shards[0].clone(),
+                shard_id: Self::shard_id_from_str(&split_state.new_shards[0]),
+                hash_range: (old_metadata.hash_range.0, hash_mid),
                 generation: 0,
-                key_range: (
-                    old_metadata.key_range.0.clone(),
-                    split_state.split_point.clone(),
-                ),
+                key_range: (old_metadata.key_range.0.clone(), vec![]),
                 replicas: old_metadata.replicas.clone(),
                 state: ShardState::Active,
                 min_time: old_metadata.min_time,
-                max_time: split_ts,
+                max_time: old_metadata.max_time,
             };
             self.metadata
-                .update_shard_metadata(&new_shard_a.shard_id, &new_shard_a, 0)
+                .update_shard_metadata(&split_state.new_shards[0], &new_shard_a, 0)
                 .await?;
             progress.shard_a_created = true;
             self.persist_progress(progress).await?;
@@ -357,19 +359,17 @@ impl ShardSplitter {
         // Step 2: Create shard B
         if !progress.shard_b_created {
             let new_shard_b = ShardMetadata {
-                shard_id: split_state.new_shards[1].clone(),
+                shard_id: Self::shard_id_from_str(&split_state.new_shards[1]),
+                hash_range: (hash_mid, old_metadata.hash_range.1),
                 generation: 0,
-                key_range: (
-                    split_state.split_point.clone(),
-                    old_metadata.key_range.1.clone(),
-                ),
+                key_range: (vec![], old_metadata.key_range.1.clone()),
                 replicas: old_metadata.replicas.clone(),
                 state: ShardState::Active,
-                min_time: split_ts,
+                min_time: old_metadata.min_time,
                 max_time: old_metadata.max_time,
             };
             self.metadata
-                .update_shard_metadata(&new_shard_b.shard_id, &new_shard_b, 0)
+                .update_shard_metadata(&split_state.new_shards[1], &new_shard_b, 0)
                 .await?;
             progress.shard_b_created = true;
             self.persist_progress(progress).await?;
@@ -401,20 +401,33 @@ impl ShardSplitter {
 
     // ── Individual phase implementations ─────────────────────────────
 
+    /// Derive a stable `ShardId` (u32) from a string shard key (e.g. a UUID).
+    ///
+    /// The metadata client uses string keys; the in-memory `ShardMetadata.shard_id`
+    /// is a u32 used for routing. We hash the string so child shards get distinct,
+    /// deterministic numeric IDs rather than the placeholder `0`.
+    fn shard_id_from_str(s: &str) -> ShardId {
+        let mut h = XxHash64::with_seed(0);
+        h.write(s.as_bytes());
+        (h.finish() & 0xFFFF_FFFF) as u32
+    }
+
     /// Split a hot shard into two (Phase 1: Preparation)
-    pub async fn split_shard(&self, shard: &ShardMetadata) -> Result<(ShardId, ShardId)> {
+    ///
+    /// Returns String IDs because the metadata client's split API is string-based.
+    pub async fn split_shard(&self, shard: &ShardMetadata) -> Result<(String, String)> {
         let split_point = self.calculate_split_point(shard);
 
-        let new_shard_a = ShardId::from(uuid::Uuid::new_v4().to_string());
-        let new_shard_b = ShardId::from(uuid::Uuid::new_v4().to_string());
+        let new_shard_a = uuid::Uuid::new_v4().to_string();
+        let new_shard_b = uuid::Uuid::new_v4().to_string();
 
         let _pending_shards = [
             PendingShard {
-                id: new_shard_a.clone(),
+                id: 0, // placeholder — real ID assigned at cutover
                 range: (shard.key_range.0.clone(), split_point.clone()),
             },
             PendingShard {
-                id: new_shard_b.clone(),
+                id: 0, // placeholder — real ID assigned at cutover
                 range: (split_point, shard.key_range.1.clone()),
             },
         ];
@@ -620,38 +633,32 @@ impl ShardSplitter {
     // ── Helpers ──────────────────────────────────────────────────────
 
     /// Split a RecordBatch into two based on timestamp split point
+    /// Split a batch by metric hash against the split point.
+    ///
+    /// Rows whose `hash_metric_name(metric_name)` falls below the split point
+    /// go to batch_a (left child), the rest to batch_b (right child).
     fn split_batch(
         &self,
         batch: &RecordBatch,
         split_point: &[u8],
     ) -> Result<(RecordBatch, RecordBatch)> {
-        let ts_column = batch
-            .column_by_name("timestamp")
-            .ok_or_else(|| crate::Error::Internal("Missing timestamp column".to_string()))?;
+        use arrow_array::cast::AsArray;
 
-        let ts_array = if let DataType::Int64 = ts_column.data_type() {
-            ts_column
-                .as_any()
-                .downcast_ref::<arrow::array::Int64Array>()
-                .ok_or_else(|| crate::Error::Internal("Timestamp not Int64".to_string()))?
-        } else {
-            return Err(crate::Error::Internal(
-                "Timestamp column is not Int64".to_string(),
-            ));
-        };
+        let split_hash = u32::from_be_bytes(split_point.try_into().map_err(|_| {
+            crate::Error::Internal("Invalid split point (expected 4 bytes)".to_string())
+        })?);
+
+        let metric_col = batch
+            .column_by_name("metric_name")
+            .and_then(|c| c.as_string_opt::<i32>());
 
         let mut indices_a = Vec::new();
         let mut indices_b = Vec::new();
 
-        let split_ts = i64::from_be_bytes(
-            split_point
-                .try_into()
-                .map_err(|_| crate::Error::Internal("Invalid split point".to_string()))?,
-        );
-
         for i in 0..batch.num_rows() {
-            let ts = ts_array.value(i);
-            if ts < split_ts {
+            let metric_name = metric_col.map(|c| c.value(i)).unwrap_or("unknown");
+            let hash = super::hash_metric_name(metric_name) as u32;
+            if hash < split_hash {
                 indices_a.push(i as u32);
             } else {
                 indices_b.push(i as u32);
@@ -709,6 +716,7 @@ impl ShardSplitter {
             max_timestamp,
             row_count: batch.num_rows() as u64,
             size_bytes: bytes_len as u64,
+            shard_id: 0, // backfill data — shard assignment handled by metadata layer
         };
         self.metadata.register_chunk(path, &metadata).await?;
 
@@ -738,13 +746,13 @@ impl ShardSplitter {
         out
     }
 
-    /// Calculate the split point based on time
+    /// Calculate the split point as the midpoint of the shard's hash range.
+    ///
+    /// Returns the midpoint as a 4-byte big-endian u32 (the metric hash space
+    /// boundary between the two child shards).
     fn calculate_split_point(&self, shard: &ShardMetadata) -> Vec<u8> {
-        let time_range = shard.max_time - shard.min_time;
-        let mid_time = shard.min_time + time_range / 2;
-
-        let rounded = TimeBucket::round_to_5min(mid_time);
-        rounded.to_be_bytes().to_vec()
+        let midpoint = (shard.hash_range.0 + shard.hash_range.1) / 2;
+        midpoint.to_be_bytes().to_vec()
     }
 }
 
@@ -762,7 +770,8 @@ mod tests {
         let splitter = ShardSplitter::new(metadata, object_store);
 
         let shard = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1,
+            hash_range: (0, 0x10000),
             generation: 1,
             key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
             replicas: vec![ReplicaInfo {
@@ -789,7 +798,8 @@ mod tests {
         let splitter = ShardSplitter::new(metadata, object_store);
 
         let shard = ShardMetadata {
-            shard_id: "shard-1".to_string(),
+            shard_id: 1,
+            hash_range: (0, 0x10000),
             generation: 1,
             key_range: (vec![0, 0, 0, 0], vec![255, 255, 255, 255]),
             replicas: vec![],
@@ -801,7 +811,11 @@ mod tests {
         let split_point = splitter.calculate_split_point(&shard);
 
         assert!(!split_point.is_empty());
-        assert_eq!(split_point.len(), 8); // i64 bytes
+        assert_eq!(split_point.len(), 4); // u32 bytes (hash midpoint)
+
+        // Midpoint of (0, 0x10000) should be 0x8000
+        let midpoint = u32::from_be_bytes(split_point.try_into().unwrap());
+        assert_eq!(midpoint, 0x8000);
     }
 
     #[tokio::test]
@@ -813,7 +827,7 @@ mod tests {
         let mut progress = SplitProgress::new(
             "shard-old",
             vec!["shard-a".to_string(), "shard-b".to_string()],
-            vec![0, 0, 0, 0, 0, 0, 0, 42],
+            vec![0, 0, 0, 42],
         );
         progress.completed_phase = Some(SplitPhase::DualWrite);
         progress.shard_a_created = true;

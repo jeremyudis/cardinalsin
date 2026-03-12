@@ -25,11 +25,14 @@ pub use wal::{load_flushed_seq, persist_flushed_seq, WalConfig, WalSyncMode, Wri
 use crate::clock::BoundedClock;
 use crate::metadata::MetadataClient;
 use crate::schema::MetricSchema;
-use crate::sharding::{HotShardConfig, ShardKey, ShardMonitor};
+use crate::sharding::{
+    find_shard_for_hash, hash_metric_name, HotShardConfig, ShardId, ShardMetadata, ShardMonitor,
+};
 use crate::{Error, Result, StorageConfig};
 
 use arrow_array::RecordBatch;
 use object_store::ObjectStore;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,6 +73,8 @@ pub struct IngesterConfig {
     pub max_buffer_size_bytes: usize,
     /// WAL configuration
     pub wal: WalConfig,
+    /// Number of initial shards to provision (default 16)
+    pub initial_shard_count: u16,
 }
 
 impl Default for IngesterConfig {
@@ -83,6 +88,7 @@ impl Default for IngesterConfig {
             flush_parallelism: 4,
             max_buffer_size_bytes: 512 * 1024 * 1024, // 512MB
             wal: WalConfig::default(),
+            initial_shard_count: crate::sharding::DEFAULT_INITIAL_SHARD_COUNT,
         }
     }
 }
@@ -91,8 +97,10 @@ impl Default for IngesterConfig {
 pub struct Ingester {
     /// Configuration
     config: IngesterConfig,
-    /// Write buffer
-    buffer: Arc<RwLock<WriteBuffer>>,
+    /// Per-shard write buffers (shard_id → buffer)
+    buffers: Arc<RwLock<HashMap<ShardId, WriteBuffer>>>,
+    /// Cached shard ranges for routing (loaded from metadata)
+    shard_ranges: Arc<RwLock<Vec<ShardMetadata>>>,
     /// Object storage client
     object_store: Arc<dyn ObjectStore>,
     /// Metadata client
@@ -146,7 +154,8 @@ impl Ingester {
 
         Self {
             config,
-            buffer: Arc::new(RwLock::new(WriteBuffer::new())),
+            buffers: Arc::new(RwLock::new(HashMap::new())),
+            shard_ranges: Arc::new(RwLock::new(Vec::new())),
             object_store,
             metadata,
             parquet_writer: ParquetWriter::new(),
@@ -183,7 +192,8 @@ impl Ingester {
 
         Self {
             config,
-            buffer: Arc::new(RwLock::new(WriteBuffer::new())),
+            buffers: Arc::new(RwLock::new(HashMap::new())),
+            shard_ranges: Arc::new(RwLock::new(Vec::new())),
             object_store,
             metadata,
             parquet_writer: ParquetWriter::new(),
@@ -227,13 +237,17 @@ impl Ingester {
             if !entries.is_empty() {
                 let mut replayed = 0u64;
                 let mut max_seq = flushed_seq;
+                // During WAL recovery, all entries go to shard 0 (default).
+                // Shard ranges may not be loaded yet; proper routing happens on new writes.
+                let recovery_shard: ShardId = 0;
                 for entry in &entries {
                     match entry.batches() {
                         Ok(batches) => {
                             for batch in batches {
                                 let mut pending_batch = Some(batch);
                                 loop {
-                                    let mut buffer = self.buffer.write().await;
+                                    let mut buffers = self.buffers.write().await;
+                                    let buffer = buffers.entry(recovery_shard).or_default();
                                     let incoming = pending_batch.as_ref().ok_or_else(|| {
                                         Error::Internal("Missing pending batch".to_string())
                                     })?;
@@ -241,13 +255,9 @@ impl Ingester {
                                     // Keep recovery buffer schema-homogeneous so future flushes do not fail.
                                     if !buffer.schema_compatible(incoming) {
                                         let existing = buffer.take();
-                                        drop(buffer);
-                                        // Advance WAL seq before flush so flush_batches persists
-                                        // the correct sequence. Without this, a crash after the
-                                        // flush but before line `self.last_wal_seq.store(max_seq)`
-                                        // would replay already-flushed entries on next recovery.
+                                        drop(buffers);
                                         self.last_wal_seq.store(max_seq, Ordering::Release);
-                                        self.flush_batches(existing).await?;
+                                        self.flush_shard_batches(recovery_shard, existing).await?;
                                         continue;
                                     }
 
@@ -269,7 +279,10 @@ impl Ingester {
                     }
                 }
                 self.last_wal_seq.store(max_seq, Ordering::Release);
-                let buffer_rows = self.buffer.read().await.row_count();
+                let buffer_rows = {
+                    let buffers = self.buffers.read().await;
+                    buffers.values().map(|b| b.row_count()).sum::<usize>()
+                };
                 info!(
                     replayed_entries = replayed,
                     buffer_rows,
@@ -298,25 +311,10 @@ impl Ingester {
     /// behavior — fsync runs asynchronously on the configured interval.
     pub async fn write(&self, batch: RecordBatch) -> Result<()> {
         let start_time = std::time::Instant::now();
-        let batch_size = batch.get_array_memory_size();
         let row_count = batch.num_rows() as u64;
 
-        // Compute shard key for this batch (for monitoring)
-        let shard_id = self.compute_shard_id(&batch);
         let result = async {
-            // Check if shard is being split - if so, use dual-write
-            if let Some(split_state) = self.metadata.get_split_state(&shard_id).await? {
-                use crate::sharding::SplitPhase;
-                if matches!(
-                    split_state.phase,
-                    SplitPhase::DualWrite | SplitPhase::Backfill
-                ) {
-                    info!("Shard {} is splitting, enabling dual-write mode", shard_id);
-                    return self.write_with_split_awareness(batch, &shard_id).await;
-                }
-            }
-
-            // Normal single-write path
+            // WAL append (whole batch, before partitioning)
             if let Some(wal) = self.wal.as_ref() {
                 let seq = match wal.lock().await.append(&batch).await {
                     Ok(seq) => {
@@ -338,12 +336,38 @@ impl Ingester {
                 }
             }
 
-            self.append_to_buffer_and_maybe_flush(batch, batch_size).await?;
+            // Partition batch by shard and append to per-shard buffers
+            let ranges = self.shard_ranges.read().await;
+            let partitioned = self.partition_batch_by_shard(&batch, &ranges)?;
+            drop(ranges);
 
-            // Record write metrics for hot shard detection
-            let write_latency = start_time.elapsed();
-            self.shard_monitor
-                .record_write(&shard_id, batch_size, write_latency);
+            for (shard_id, shard_batch) in partitioned {
+                let batch_size = shard_batch.get_array_memory_size();
+
+                // Check for active split on this shard
+                if let Some(split_state) =
+                    self.metadata.get_split_state(&shard_id.to_string()).await?
+                {
+                    use crate::sharding::SplitPhase;
+                    if matches!(
+                        split_state.phase,
+                        SplitPhase::DualWrite | SplitPhase::Backfill
+                    ) {
+                        info!("Shard {} is splitting, enabling dual-write mode", shard_id);
+                        self.write_with_split_awareness(shard_batch, shard_id)
+                            .await?;
+                        continue;
+                    }
+                }
+
+                self.append_to_shard_buffer(shard_id, shard_batch, batch_size)
+                    .await?;
+
+                // Record write metrics for hot shard detection
+                let write_latency = start_time.elapsed();
+                self.shard_monitor
+                    .record_write(&shard_id, batch_size, write_latency);
+            }
 
             Ok(())
         }
@@ -354,37 +378,22 @@ impl Ingester {
         result
     }
 
-    /// Write with split awareness (dual-write to old and new shards)
-    async fn write_with_split_awareness(&self, batch: RecordBatch, shard_id: &str) -> Result<()> {
+    /// Write with split awareness (dual-write to old and new shards).
+    /// WAL has already been appended by the caller.
+    async fn write_with_split_awareness(
+        &self,
+        batch: RecordBatch,
+        shard_id: ShardId,
+    ) -> Result<()> {
         let split_state = self
             .metadata
-            .get_split_state(shard_id)
+            .get_split_state(&shard_id.to_string())
             .await?
             .ok_or_else(|| Error::Internal("Split state disappeared".to_string()))?;
 
-        if let Some(wal) = self.wal.as_ref() {
-            let seq = match wal.lock().await.append(&batch).await {
-                Ok(seq) => {
-                    telemetry::record_wal_operation("append", "ok");
-                    seq
-                }
-                Err(e) => {
-                    telemetry::record_wal_operation("append", "error");
-                    return Err(e);
-                }
-            };
-            self.last_wal_seq.store(seq, Ordering::Release);
-        } else if self.config.wal.enabled {
-            telemetry::record_wal_operation("append", "error");
-            if !self.wal_warned.swap(true, Ordering::Relaxed) {
-                warn!(
-                    "WAL is enabled but not initialized - call ensure_wal() for crash durability"
-                );
-            }
-        }
-
         // Write to old shard first (for consistency during transition)
-        self.append_to_buffer_and_maybe_flush(batch.clone(), batch.get_array_memory_size())
+        let batch_size = batch.get_array_memory_size();
+        self.append_to_shard_buffer(shard_id, batch.clone(), batch_size)
             .await?;
 
         // Split batch by key range and write to new shards
@@ -445,51 +454,46 @@ impl Ingester {
             max_timestamp: self.extract_max_timestamp(batch)?,
             row_count: batch.num_rows() as u64,
             size_bytes: parquet_size,
+            shard_id: 0,
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
         Ok(())
     }
 
-    /// Split a batch by key range (based on timestamp split point)
+    /// Split a batch by metric hash against the split point (u32 hash midpoint).
+    ///
+    /// Rows whose `hash_metric_name(metric_name)` falls below the split point
+    /// go to batch_a (left child), the rest to batch_b (right child).
     fn split_batch_by_key(
         &self,
         batch: &RecordBatch,
         split_point: &[u8],
     ) -> Result<(RecordBatch, RecordBatch)> {
         use arrow_array::cast::AsArray;
-        use arrow_array::types::Int64Type;
 
-        // Extract timestamp column (our shard key is based on time)
-        let ts_column = batch
-            .column_by_name("timestamp")
-            .ok_or_else(|| Error::InvalidSchema("Missing timestamp column".into()))?;
+        let split_hash =
+            u32::from_be_bytes(split_point.try_into().map_err(|_| {
+                Error::Internal("Invalid split point (expected 4 bytes)".to_string())
+            })?);
 
-        let ts_array = ts_column
-            .as_primitive_opt::<Int64Type>()
-            .ok_or_else(|| Error::InvalidSchema("Timestamp not Int64".into()))?;
+        let metric_col = batch
+            .column_by_name("metric_name")
+            .and_then(|c| c.as_string_opt::<i32>());
 
-        // Build selection indices
         let mut indices_a = Vec::new();
         let mut indices_b = Vec::new();
 
-        // Convert split point to timestamp
-        let split_ts = i64::from_be_bytes(
-            split_point
-                .try_into()
-                .map_err(|_| Error::Internal("Invalid split point".to_string()))?,
-        );
-
         for i in 0..batch.num_rows() {
-            let ts = ts_array.value(i);
-            if ts < split_ts {
+            let metric_name = metric_col.map(|c| c.value(i)).unwrap_or("unknown");
+            let hash = hash_metric_name(metric_name) as u32;
+            if hash < split_hash {
                 indices_a.push(i as u32);
             } else {
                 indices_b.push(i as u32);
             }
         }
 
-        // Use Arrow take kernel to extract rows
         let indices_a_array = arrow::array::UInt32Array::from(indices_a);
         let indices_b_array = arrow::array::UInt32Array::from(indices_b);
 
@@ -499,41 +503,59 @@ impl Ingester {
         Ok((batch_a, batch_b))
     }
 
-    /// Compute shard ID for a batch based on tenant and metric
-    fn compute_shard_id(&self, batch: &RecordBatch) -> String {
-        // Extract metric name if available for shard key computation
-        let metric_name = if let Some(col) = batch.column_by_name("metric_name") {
-            use arrow_array::cast::AsArray;
-            if let Some(arr) = col.as_string_opt::<i32>() {
-                arr.value(0).to_string()
-            } else {
-                "unknown".to_string()
-            }
-        } else {
-            "unknown".to_string()
-        };
+    /// Partition a batch into per-shard sub-batches using metric hash routing.
+    /// Sync, CPU-only — no metadata I/O.
+    fn partition_batch_by_shard(
+        &self,
+        batch: &RecordBatch,
+        ranges: &[ShardMetadata],
+    ) -> Result<HashMap<ShardId, RecordBatch>> {
+        // If no shard ranges loaded, everything goes to shard 0
+        if ranges.is_empty() {
+            let mut result = HashMap::new();
+            result.insert(0, batch.clone());
+            return Ok(result);
+        }
 
-        // Extract timestamp for time-based sharding
-        let timestamp = if let Some(col) = batch.column_by_name("timestamp") {
-            use arrow_array::cast::AsArray;
-            if let Some(arr) = col.as_primitive_opt::<arrow_array::types::TimestampNanosecondType>()
-            {
-                arr.value(0)
-            } else if let Some(arr) = col.as_primitive_opt::<arrow_array::types::Int64Type>() {
-                arr.value(0)
-            } else {
-                self.clock.now_nanos()
-            }
-        } else {
-            self.clock.now_nanos()
-        };
+        use arrow_array::cast::AsArray;
+        let metric_col = batch
+            .column_by_name("metric_name")
+            .and_then(|c| c.as_string_opt::<i32>());
 
-        // Create shard key and convert to shard ID
-        let shard_key = ShardKey::new(self.default_tenant_id, &metric_name, timestamp);
-        format!(
-            "shard-{:x}",
-            u64::from_be_bytes(shard_key.to_bytes()[0..8].try_into().unwrap_or([0u8; 8]))
-        )
+        let mut indices_by_shard: HashMap<ShardId, Vec<u32>> = HashMap::new();
+        for i in 0..batch.num_rows() {
+            let metric_name = metric_col.map(|c| c.value(i)).unwrap_or("unknown");
+            let hash = hash_metric_name(metric_name);
+            let shard_id = find_shard_for_hash(hash, ranges).unwrap_or(0);
+            indices_by_shard.entry(shard_id).or_default().push(i as u32);
+        }
+
+        let mut result = HashMap::with_capacity(indices_by_shard.len());
+        for (shard_id, indices) in indices_by_shard {
+            let indices_array = arrow::array::UInt32Array::from(indices);
+            result.insert(
+                shard_id,
+                arrow::compute::take_record_batch(batch, &indices_array)?,
+            );
+        }
+        Ok(result)
+    }
+
+    /// Refresh shard ranges from metadata. Call after split events.
+    pub async fn refresh_shard_ranges(&self) -> Result<()> {
+        let shards = self.metadata.list_shards().await?;
+        let mut ranges = self.shard_ranges.write().await;
+        *ranges = shards;
+        info!(shard_count = ranges.len(), "Refreshed shard ranges");
+        Ok(())
+    }
+
+    /// Write a pre-partitioned batch directly to a specific shard's buffer.
+    /// Used by future IngestDispatcher for distributed routing.
+    pub async fn write_pre_partitioned(&self, shard_id: ShardId, batch: RecordBatch) -> Result<()> {
+        let batch_size = batch.get_array_memory_size();
+        self.append_to_shard_buffer(shard_id, batch, batch_size)
+            .await
     }
 
     /// Extract all unique metric names from a batch for topic routing
@@ -576,38 +598,48 @@ impl Ingester {
         self.topic_broadcast.subscribe(filter).await
     }
 
-    /// Check if flush is needed based on thresholds
+    /// Check if flush is needed based on thresholds for a single shard buffer
     fn should_flush(&self, buffer: &WriteBuffer) -> bool {
         buffer.row_count() >= self.config.flush_row_count
             || buffer.size_bytes() >= self.config.flush_size_bytes
     }
 
-    /// Append a batch, flushing existing buffered data first when schemas differ.
-    ///
-    /// This prevents heterogeneous RecordBatch concatenation failures during flush.
-    async fn append_to_buffer_and_maybe_flush(
+    /// Compute aggregate buffer size across all shards
+    fn aggregate_buffer_size(buffers: &HashMap<ShardId, WriteBuffer>) -> usize {
+        buffers.values().map(|b| b.size_bytes()).sum()
+    }
+
+    /// Append a batch to a specific shard's buffer, flushing if needed.
+    async fn append_to_shard_buffer(
         &self,
+        shard_id: ShardId,
         batch: RecordBatch,
         batch_size: usize,
     ) -> Result<()> {
         let mut pending_batch = Some(batch);
 
         loop {
-            let mut buffer = self.buffer.write().await;
+            let mut buffers = self.buffers.write().await;
 
             let incoming = pending_batch
                 .as_ref()
                 .ok_or_else(|| Error::Internal("Missing pending batch".to_string()))?;
 
-            // If schemas differ, flush current buffer before appending.
-            if !buffer.schema_compatible(incoming) {
-                let existing = buffer.take();
-                drop(buffer);
-                self.flush_batches(existing).await?;
+            // Ensure shard buffer exists
+            buffers.entry(shard_id).or_insert_with(WriteBuffer::new);
+
+            // Check schema compatibility
+            let schema_ok = buffers.get(&shard_id).unwrap().schema_compatible(incoming);
+            if !schema_ok {
+                let existing = buffers.get_mut(&shard_id).unwrap().take();
+                drop(buffers);
+                self.flush_shard_batches(shard_id, existing).await?;
                 continue;
             }
 
-            if buffer.size_bytes() + batch_size > self.config.max_buffer_size_bytes {
+            // Aggregate buffer fullness check across all shards
+            let total_size = Self::aggregate_buffer_size(&buffers);
+            if total_size + batch_size > self.config.max_buffer_size_bytes {
                 telemetry::record_buffer_fullness_ratio(1.0);
                 return Err(Error::BufferFull);
             }
@@ -615,30 +647,41 @@ impl Ingester {
             let incoming = pending_batch
                 .take()
                 .ok_or_else(|| Error::Internal("Missing pending batch".to_string()))?;
-            buffer.append(incoming)?;
-            let max_buffer_size = self.config.max_buffer_size_bytes.max(1) as f64;
-            telemetry::record_buffer_fullness_ratio(buffer.size_bytes() as f64 / max_buffer_size);
+            {
+                let buffer = buffers.get_mut(&shard_id).unwrap();
+                buffer.append(incoming)?;
+            }
 
-            if self.should_flush(&buffer) {
-                let batches = buffer.take();
-                drop(buffer);
-                self.flush_batches(batches).await?;
+            let max_buffer_size = self.config.max_buffer_size_bytes.max(1) as f64;
+            let new_total = Self::aggregate_buffer_size(&buffers);
+            telemetry::record_buffer_fullness_ratio(new_total as f64 / max_buffer_size);
+
+            let needs_flush = self.should_flush(buffers.get(&shard_id).unwrap());
+            if needs_flush {
+                let batches = buffers.get_mut(&shard_id).unwrap().take();
+                drop(buffers);
+                self.flush_shard_batches(shard_id, batches).await?;
             }
 
             return Ok(());
         }
     }
 
-    /// Flush batches to object storage
-    async fn flush_batches(&self, batches: Vec<RecordBatch>) -> Result<()> {
+    /// Flush batches for a specific shard to object storage
+    async fn flush_shard_batches(
+        &self,
+        shard_id: ShardId,
+        batches: Vec<RecordBatch>,
+    ) -> Result<()> {
         if batches.is_empty() {
             return Ok(());
         }
 
         info!(
+            shard_id,
             batch_count = batches.len(),
             total_rows = batches.iter().map(|b| b.num_rows()).sum::<usize>(),
-            "Flushing batches to object storage"
+            "Flushing shard batches to object storage"
         );
 
         // Concatenate batches
@@ -648,8 +691,8 @@ impl Ingester {
         let parquet_bytes = self.parquet_writer.write_batch(&combined)?;
         let parquet_size = parquet_bytes.len() as u64;
 
-        // Generate path
-        let path = self.generate_path();
+        // Generate shard-qualified path
+        let path = self.generate_path(shard_id);
         debug!(path = %path, size_bytes = parquet_size, "Writing Parquet file");
 
         // Upload to object storage
@@ -664,6 +707,7 @@ impl Ingester {
             max_timestamp: self.extract_max_timestamp(&combined)?,
             row_count: combined.num_rows() as u64,
             size_bytes: parquet_size,
+            shard_id,
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
@@ -673,12 +717,11 @@ impl Ingester {
         }
 
         // Broadcast to topic-aware streaming query subscribers
-        let shard_id = self.compute_shard_id(&combined);
         let metrics = self.extract_metrics(&combined);
         let topic_batch = TopicBatch {
             batch: combined,
             metadata: BatchMetadata {
-                shard_id,
+                shard_id: shard_id.to_string(),
                 tenant_id: self.default_tenant_id,
                 metrics,
             },
@@ -687,9 +730,13 @@ impl Ingester {
             debug!("No topic broadcast subscribers: {}", e);
         }
 
-        // Truncate WAL after successful flush
+        // WAL truncation: only truncate when ALL shard buffers are empty
+        let all_empty = {
+            let buffers = self.buffers.read().await;
+            buffers.values().all(|b| b.is_empty())
+        };
         let flushed_up_to = self.last_wal_seq.load(Ordering::Acquire);
-        if flushed_up_to > 0 {
+        if all_empty && flushed_up_to > 0 {
             if let Some(wal) = self.wal.as_ref() {
                 if let Err(e) = wal.lock().await.truncate_before(flushed_up_to).await {
                     telemetry::record_wal_operation("truncate", "error");
@@ -722,47 +769,53 @@ impl Ingester {
             tokio::select! {
                 _ = interval.tick() => {
                     let should_flush = {
-                        let buffer = self.buffer.read().await;
+                        let buffers = self.buffers.read().await;
                         let last_flush = self.last_flush.read().await;
-                        !buffer.is_empty() && last_flush.elapsed() >= self.config.flush_interval
+                        let any_non_empty = buffers.values().any(|b| !b.is_empty());
+                        any_non_empty && last_flush.elapsed() >= self.config.flush_interval
                     };
 
                     if should_flush {
-                        let batches = {
-                            let mut buffer = self.buffer.write().await;
-                            buffer.take()
-                        };
-
-                        if let Err(e) = self.flush_batches(batches).await {
-                            error!("Flush timer failed: {}", e);
-                        }
+                        self.flush_all_shard_buffers().await;
                     }
                 }
                 _ = self.shutdown.cancelled() => {
                     info!("Flush timer shutting down, flushing remaining data");
-                    let batches = {
-                        let mut buffer = self.buffer.write().await;
-                        buffer.take()
-                    };
-                    if !batches.is_empty() {
-                        if let Err(e) = self.flush_batches(batches).await {
-                            error!("Final flush failed during shutdown: {}", e);
-                        }
-                    }
+                    self.flush_all_shard_buffers().await;
                     break;
                 }
             }
         }
     }
 
-    /// Generate a unique path for the Parquet file
-    fn generate_path(&self) -> String {
+    /// Flush all non-empty shard buffers sequentially.
+    async fn flush_all_shard_buffers(&self) {
+        // Collect shard IDs and their batches under a single lock
+        let to_flush: Vec<(ShardId, Vec<RecordBatch>)> = {
+            let mut buffers = self.buffers.write().await;
+            buffers
+                .iter_mut()
+                .filter(|(_, buf)| !buf.is_empty())
+                .map(|(&shard_id, buf)| (shard_id, buf.take()))
+                .collect()
+        };
+
+        for (shard_id, batches) in to_flush {
+            if let Err(e) = self.flush_shard_batches(shard_id, batches).await {
+                error!(shard_id, "Flush timer failed for shard: {}", e);
+            }
+        }
+    }
+
+    /// Generate a unique shard-qualified path for the Parquet file
+    fn generate_path(&self, shard_id: ShardId) -> String {
         let now = self.clock.now();
         let uuid = uuid::Uuid::new_v4();
 
         format!(
-            "{}/data/year={}/month={:02}/day={:02}/hour={:02}/chunk_{}.parquet",
+            "{}/data/shard={}/year={}/month={:02}/day={:02}/hour={:02}/chunk_{}.parquet",
             self.storage_config.tenant_id,
+            shard_id,
             now.format("%Y"),
             now.format("%m"),
             now.format("%d"),
@@ -820,13 +873,13 @@ impl Ingester {
         self.broadcast.subscribe()
     }
 
-    /// Get current buffer stats
+    /// Get current buffer stats (aggregated across all shard buffers)
     pub async fn buffer_stats(&self) -> BufferStats {
-        let buffer = self.buffer.read().await;
+        let buffers = self.buffers.read().await;
         BufferStats {
-            row_count: buffer.row_count(),
-            size_bytes: buffer.size_bytes(),
-            batch_count: buffer.batch_count(),
+            row_count: buffers.values().map(|b| b.row_count()).sum(),
+            size_bytes: buffers.values().map(|b| b.size_bytes()).sum(),
+            batch_count: buffers.values().map(|b| b.batch_count()).sum(),
         }
     }
 }
@@ -839,6 +892,8 @@ pub struct ChunkMetadata {
     pub max_timestamp: i64,
     pub row_count: u64,
     pub size_bytes: u64,
+    #[serde(default)]
+    pub shard_id: crate::sharding::ShardId,
 }
 
 /// Buffer statistics
