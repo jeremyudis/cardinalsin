@@ -2,6 +2,7 @@
 //!
 //! Stateless query node that executes queries via DataFusion.
 
+use cardinalsin::adaptive_index::{AdaptiveIndexConfig, AdaptiveIndexController};
 use cardinalsin::api;
 use cardinalsin::config::ComponentFactory;
 use cardinalsin::ingester::{Ingester, IngesterConfig};
@@ -61,6 +62,34 @@ struct Args {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Enable adaptive indexing controller
+    #[arg(long, env = "ADAPTIVE_INDEXING_ENABLED", default_value = "false")]
+    adaptive_indexing_enabled: bool,
+
+    /// Adaptive indexing controller interval in seconds
+    #[arg(
+        long,
+        env = "ADAPTIVE_INDEX_CHECK_INTERVAL_SECS",
+        default_value = "300"
+    )]
+    adaptive_index_check_interval_secs: u64,
+
+    /// Minimum filter uses before recommending an index
+    #[arg(
+        long,
+        env = "ADAPTIVE_INDEX_MIN_FILTER_THRESHOLD",
+        default_value = "100"
+    )]
+    adaptive_index_min_filter_threshold: u64,
+
+    /// Recommendation score threshold for creating indexes
+    #[arg(long, env = "ADAPTIVE_INDEX_SCORE_THRESHOLD", default_value = "1.0")]
+    adaptive_index_score_threshold: f64,
+
+    /// Maximum index recommendations per controller cycle
+    #[arg(long, env = "ADAPTIVE_INDEX_MAX_RECOMMENDATIONS", default_value = "5")]
+    adaptive_index_max_recommendations: usize,
 }
 
 #[tokio::main]
@@ -92,16 +121,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    let mut adaptive_controller: Option<Arc<AdaptiveIndexController>> = None;
+
     // Create query node
-    let query_node = Arc::new(
-        QueryNode::new(
-            query_config,
-            object_store.clone(),
-            metadata.clone(),
-            storage_config.clone(),
-        )
-        .await?,
-    );
+    let mut query_node = QueryNode::new(
+        query_config,
+        object_store.clone(),
+        metadata.clone(),
+        storage_config.clone(),
+    )
+    .await?;
+
+    if args.adaptive_indexing_enabled {
+        let adaptive_config = AdaptiveIndexConfig {
+            min_filter_threshold: args.adaptive_index_min_filter_threshold,
+            score_threshold: args.adaptive_index_score_threshold,
+            max_recommendations_per_cycle: args.adaptive_index_max_recommendations,
+            check_interval: std::time::Duration::from_secs(args.adaptive_index_check_interval_secs),
+            ..AdaptiveIndexConfig::default()
+        };
+
+        let controller = Arc::new(AdaptiveIndexController::new(adaptive_config.clone()));
+        query_node = query_node.with_adaptive_indexing(controller.clone());
+        adaptive_controller = Some(controller);
+
+        info!(
+            check_interval_secs = args.adaptive_index_check_interval_secs,
+            min_filter_threshold = adaptive_config.min_filter_threshold,
+            score_threshold = adaptive_config.score_threshold,
+            max_recommendations_per_cycle = adaptive_config.max_recommendations_per_cycle,
+            "Adaptive indexing enabled"
+        );
+    } else {
+        info!("Adaptive indexing disabled");
+    }
+
+    let query_node = Arc::new(query_node);
 
     // Create a dummy ingester for the API (in production, query nodes don't ingest)
     let ingester = Arc::new(Ingester::new(
@@ -122,9 +177,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let http_shutdown = shutdown_rx.clone();
     let grpc_shutdown = shutdown_rx.clone();
+    let adaptive_shutdown = shutdown_rx.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
         let _ = shutdown_tx.send(true);
+    });
+
+    let adaptive_task = adaptive_controller.map(|controller| {
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = controller.run() => {},
+                _ = wait_for_shutdown(adaptive_shutdown) => {},
+            }
+        })
     });
 
     info!(
@@ -143,6 +208,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let grpc_server = api::grpc::run_query_grpc_server(grpc_addr, query_node, grpc_shutdown);
     tokio::try_join!(http_server, grpc_server)?;
+
+    if let Some(adaptive_task) = adaptive_task {
+        adaptive_task.abort();
+        let _ = adaptive_task.await;
+    }
 
     info!("Query node shutting down");
 
