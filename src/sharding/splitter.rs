@@ -10,17 +10,17 @@ use crate::Result;
 use arrow::array::RecordBatch;
 
 use bytes::Bytes;
-use std::hash::Hasher as _;
-use twox_hash::XxHash64;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use std::collections::BTreeSet;
+use std::hash::Hasher as _;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
+use twox_hash::XxHash64;
 
 /// Split phase
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
