@@ -100,10 +100,14 @@ pub fn hash_in_range(hash: u16, range: (u32, u32)) -> bool {
 }
 
 /// Find which shard owns a given metric hash.
+///
+/// Excludes `PendingDeletion` shards: their data has been migrated to child
+/// shards, so routing writes there would target a shard scheduled for cleanup.
 pub fn find_shard_for_hash(hash: u16, shards: &[ShardMetadata]) -> Option<ShardId> {
     let h = hash as u32;
     shards
         .iter()
+        .filter(|s| !matches!(s.state, ShardState::PendingDeletion { .. }))
         .find(|s| h >= s.hash_range.0 && h < s.hash_range.1)
         .map(|s| s.shard_id)
 }

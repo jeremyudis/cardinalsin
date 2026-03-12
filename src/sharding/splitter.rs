@@ -10,6 +10,8 @@ use crate::Result;
 use arrow::array::RecordBatch;
 
 use bytes::Bytes;
+use std::hash::Hasher as _;
+use twox_hash::XxHash64;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
@@ -338,7 +340,7 @@ impl ShardSplitter {
         // Step 1: Create shard A (idempotent — skipped if already done)
         if !progress.shard_a_created {
             let new_shard_a = ShardMetadata {
-                shard_id: 0, // placeholder — string ID used in metadata client
+                shard_id: Self::shard_id_from_str(&split_state.new_shards[0]),
                 hash_range: (old_metadata.hash_range.0, hash_mid),
                 generation: 0,
                 key_range: (old_metadata.key_range.0.clone(), vec![]),
@@ -357,7 +359,7 @@ impl ShardSplitter {
         // Step 2: Create shard B
         if !progress.shard_b_created {
             let new_shard_b = ShardMetadata {
-                shard_id: 0, // placeholder — string ID used in metadata client
+                shard_id: Self::shard_id_from_str(&split_state.new_shards[1]),
                 hash_range: (hash_mid, old_metadata.hash_range.1),
                 generation: 0,
                 key_range: (vec![], old_metadata.key_range.1.clone()),
@@ -398,6 +400,17 @@ impl ShardSplitter {
     }
 
     // ── Individual phase implementations ─────────────────────────────
+
+    /// Derive a stable `ShardId` (u32) from a string shard key (e.g. a UUID).
+    ///
+    /// The metadata client uses string keys; the in-memory `ShardMetadata.shard_id`
+    /// is a u32 used for routing. We hash the string so child shards get distinct,
+    /// deterministic numeric IDs rather than the placeholder `0`.
+    fn shard_id_from_str(s: &str) -> ShardId {
+        let mut h = XxHash64::with_seed(0);
+        h.write(s.as_bytes());
+        (h.finish() & 0xFFFF_FFFF) as u32
+    }
 
     /// Split a hot shard into two (Phase 1: Preparation)
     ///

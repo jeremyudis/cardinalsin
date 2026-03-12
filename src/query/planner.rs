@@ -68,10 +68,18 @@ fn collect_metrics_from_predicate(pred: &ColumnPredicate, metrics: &mut Vec<Stri
             collect_metrics_from_predicate(right, metrics);
         }
         ColumnPredicate::Or(left, right) => {
-            // For OR, both sides must contribute metric names for pruning to be safe.
-            // However, we collect from both — the union is correct for shard selection.
-            collect_metrics_from_predicate(left, metrics);
-            collect_metrics_from_predicate(right, metrics);
+            // Only prune when BOTH sides constrain metric_name. If one side is
+            // metric-unconstrained (e.g. `host = 'a'`), every shard may match,
+            // so collecting metric names from only one arm would incorrectly
+            // exclude valid shards from the scan.
+            let mut left_metrics = Vec::new();
+            let mut right_metrics = Vec::new();
+            collect_metrics_from_predicate(left, &mut left_metrics);
+            collect_metrics_from_predicate(right, &mut right_metrics);
+            if !left_metrics.is_empty() && !right_metrics.is_empty() {
+                metrics.extend(left_metrics);
+                metrics.extend(right_metrics);
+            }
         }
         _ => {}
     }

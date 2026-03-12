@@ -626,9 +626,7 @@ impl Ingester {
                 .ok_or_else(|| Error::Internal("Missing pending batch".to_string()))?;
 
             // Ensure shard buffer exists
-            if !buffers.contains_key(&shard_id) {
-                buffers.insert(shard_id, WriteBuffer::new());
-            }
+            buffers.entry(shard_id).or_insert_with(WriteBuffer::new);
 
             // Check schema compatibility
             let schema_ok = buffers.get(&shard_id).unwrap().schema_compatible(incoming);
