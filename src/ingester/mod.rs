@@ -457,45 +457,40 @@ impl Ingester {
         Ok(())
     }
 
-    /// Split a batch by key range (based on timestamp split point)
+    /// Split a batch by metric hash against the split point (u32 hash midpoint).
+    ///
+    /// Rows whose `hash_metric_name(metric_name)` falls below the split point
+    /// go to batch_a (left child), the rest to batch_b (right child).
     fn split_batch_by_key(
         &self,
         batch: &RecordBatch,
         split_point: &[u8],
     ) -> Result<(RecordBatch, RecordBatch)> {
         use arrow_array::cast::AsArray;
-        use arrow_array::types::Int64Type;
 
-        // Extract timestamp column (our shard key is based on time)
-        let ts_column = batch
-            .column_by_name("timestamp")
-            .ok_or_else(|| Error::InvalidSchema("Missing timestamp column".into()))?;
+        let split_hash = u32::from_be_bytes(
+            split_point
+                .try_into()
+                .map_err(|_| Error::Internal("Invalid split point (expected 4 bytes)".to_string()))?,
+        );
 
-        let ts_array = ts_column
-            .as_primitive_opt::<Int64Type>()
-            .ok_or_else(|| Error::InvalidSchema("Timestamp not Int64".into()))?;
+        let metric_col = batch
+            .column_by_name("metric_name")
+            .and_then(|c| c.as_string_opt::<i32>());
 
-        // Build selection indices
         let mut indices_a = Vec::new();
         let mut indices_b = Vec::new();
 
-        // Convert split point to timestamp
-        let split_ts = i64::from_be_bytes(
-            split_point
-                .try_into()
-                .map_err(|_| Error::Internal("Invalid split point".to_string()))?,
-        );
-
         for i in 0..batch.num_rows() {
-            let ts = ts_array.value(i);
-            if ts < split_ts {
+            let metric_name = metric_col.map(|c| c.value(i)).unwrap_or("unknown");
+            let hash = hash_metric_name(metric_name) as u32;
+            if hash < split_hash {
                 indices_a.push(i as u32);
             } else {
                 indices_b.push(i as u32);
             }
         }
 
-        // Use Arrow take kernel to extract rows
         let indices_a_array = arrow::array::UInt32Array::from(indices_a);
         let indices_b_array = arrow::array::UInt32Array::from(indices_b);
 

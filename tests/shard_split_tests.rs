@@ -87,7 +87,7 @@ async fn test_phase2_dualwrite_state() {
 
     let shard = create_test_shard();
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = vec![128u8; 8]; // Mid-point
+    let split_point = 0x8000u32.to_be_bytes().to_vec(); // Hash midpoint for range (0, 0x10000)
 
     // Start split (Phase 1-2)
     metadata
@@ -167,7 +167,7 @@ async fn test_phase3_backfill() {
 
     // Start split
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 3000i64.to_be_bytes().to_vec(); // Split at timestamp 3000
+    let split_point = 0x8000u32.to_be_bytes().to_vec(); // Hash midpoint
 
     metadata
         .start_split(
@@ -225,7 +225,7 @@ async fn test_phase4_cutover() {
         .await
         .unwrap();
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 5000i64.to_be_bytes().to_vec();
+    let split_point = 0x8000u32.to_be_bytes().to_vec();
 
     // Set up split state with 100% backfill
     metadata
@@ -291,7 +291,7 @@ async fn test_phase4_cutover_requires_old_shard_metadata() {
         .start_split(
             &shard.shard_id.to_string(),
             vec![shard_a, shard_b],
-            5000i64.to_be_bytes().to_vec(),
+            0x8000u32.to_be_bytes().to_vec(),
         )
         .await
         .unwrap();
@@ -324,7 +324,7 @@ async fn test_phase4_cutover_rejects_invalid_split_state_shape() {
         .start_split(
             &shard.shard_id.to_string(),
             vec!["only-one-new-shard".to_string()],
-            5000i64.to_be_bytes().to_vec(),
+            0x8000u32.to_be_bytes().to_vec(),
         )
         .await
         .unwrap();
@@ -544,7 +544,7 @@ async fn test_backfill_progress_tracking() {
     }
 
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 3000i64.to_be_bytes().to_vec();
+    let split_point = 0x8000u32.to_be_bytes().to_vec();
 
     metadata
         .start_split(
@@ -621,7 +621,7 @@ async fn test_backfill_rerun_is_idempotent() {
         .unwrap();
 
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 3000i64.to_be_bytes().to_vec();
+    let split_point = 0x8000u32.to_be_bytes().to_vec();
     metadata
         .start_split(
             &shard.shard_id.to_string(),
@@ -757,7 +757,7 @@ async fn test_backfill_resume_after_partial_failure() {
         .unwrap();
 
     let (shard_a, shard_b) = splitter.split_shard(&shard).await.unwrap();
-    let split_point = 3000i64.to_be_bytes().to_vec();
+    let split_point = 0x8000u32.to_be_bytes().to_vec();
 
     metadata
         .start_split(
