@@ -15,7 +15,9 @@ use tokio::task::JoinSet;
 /// client uses `shard_id.to_string()` as the DashMap key.
 fn create_test_shard(id: &str, generation: u64) -> ShardMetadata {
     // Use a simple hash of the id string to get a unique numeric shard_id
-    let shard_id = id.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let shard_id = id
+        .bytes()
+        .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
     ShardMetadata {
         shard_id,
         hash_range: (0, 0x10000),

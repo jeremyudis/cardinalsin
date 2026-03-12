@@ -188,7 +188,10 @@ mod tests {
 
     #[test]
     fn test_hash_distribution() {
-        assert_ne!(hash_metric_name("cpu_usage"), hash_metric_name("memory_usage"));
+        assert_ne!(
+            hash_metric_name("cpu_usage"),
+            hash_metric_name("memory_usage")
+        );
     }
 
     #[test]

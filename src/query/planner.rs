@@ -158,7 +158,10 @@ mod tests {
         )];
 
         let result = candidate_shard_ids(&predicates, &[shard]).unwrap();
-        assert!(result.is_empty(), "PendingDeletion shard should be excluded");
+        assert!(
+            result.is_empty(),
+            "PendingDeletion shard should be excluded"
+        );
     }
 
     #[test]

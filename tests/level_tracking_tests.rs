@@ -75,7 +75,7 @@ async fn test_l0_to_l1_progression() {
             max_timestamp: (i as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }
@@ -147,7 +147,7 @@ async fn test_l1_to_l2_progression() {
             max_timestamp: (i as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }
@@ -179,7 +179,7 @@ async fn test_l1_to_l2_progression() {
             max_timestamp: ((i + 2) as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }
@@ -282,7 +282,7 @@ async fn test_full_level_progression() {
             max_timestamp: max_ts,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         client.register_chunk(target, &chunk).await.unwrap();
 
@@ -303,7 +303,7 @@ async fn test_full_level_progression() {
             max_timestamp: (i + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         metadata_client.register_chunk(&path, &chunk).await.unwrap();
     }
@@ -360,7 +360,7 @@ async fn test_full_level_progression() {
             max_timestamp: (i + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         metadata_client.register_chunk(&path, &chunk).await.unwrap();
     }
@@ -447,7 +447,7 @@ async fn test_level_filtering() {
             max_timestamp: ((i + 1) as i64 + 1) * 1000,
             row_count: 1000,
             size_bytes: 1024 * 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         metadata_client.register_chunk(path, &chunk).await.unwrap();
     }

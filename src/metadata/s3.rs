@@ -2091,9 +2091,10 @@ impl MetadataClient for ObjectStoreMetadataClient {
 
         let prefix = Path::from_iter([&self.config.metadata_prefix, "shards/"]);
         let list_result = self.object_store.list(Some(&prefix));
-        let objects: Vec<_> = list_result.try_collect().await.map_err(|e| {
-            Error::Internal(format!("Failed to list shard metadata: {}", e))
-        })?;
+        let objects: Vec<_> = list_result
+            .try_collect()
+            .await
+            .map_err(|e| Error::Internal(format!("Failed to list shard metadata: {}", e)))?;
 
         let mut shards = Vec::new();
         for obj in objects {

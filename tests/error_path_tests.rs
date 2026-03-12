@@ -1087,7 +1087,7 @@ async fn test_concurrent_registration_data_integrity() {
                 max_timestamp: (i + 1) * 1000,
                 row_count: (i + 1) as u64 * 100, // Unique row count per chunk
                 size_bytes: (i + 1) as u64 * 1024,
-        shard_id: 0,
+                shard_id: 0,
             };
             client.register_chunk(&chunk.path, &chunk).await.unwrap();
             (i, chunk.row_count)

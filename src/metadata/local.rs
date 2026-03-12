@@ -511,7 +511,11 @@ impl MetadataClient for LocalMetadataClient {
     }
 
     async fn list_shards(&self) -> Result<Vec<crate::sharding::ShardMetadata>> {
-        Ok(self.shard_metadata.iter().map(|e| e.value().clone()).collect())
+        Ok(self
+            .shard_metadata
+            .iter()
+            .map(|e| e.value().clone())
+            .collect())
     }
 
     async fn get_chunks_for_shards(
@@ -524,8 +528,12 @@ impl MetadataClient for LocalMetadataClient {
         if shard_ids.is_empty() {
             return Ok(all);
         }
-        let wanted: std::collections::HashSet<crate::sharding::ShardId> = shard_ids.iter().copied().collect();
-        Ok(all.into_iter().filter(|e| wanted.contains(&e.shard_id)).collect())
+        let wanted: std::collections::HashSet<crate::sharding::ShardId> =
+            shard_ids.iter().copied().collect();
+        Ok(all
+            .into_iter()
+            .filter(|e| wanted.contains(&e.shard_id))
+            .collect())
     }
 }
 

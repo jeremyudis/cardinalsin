@@ -318,39 +318,41 @@ impl Compactor {
 
                     // Spawn the split process in the background so it doesn't block the main loop
                     tokio::spawn(async move {
-                        let shard_metadata =
-                            match metadata_client.get_shard_metadata(&shard_id.to_string()).await {
-                                Ok(Some(meta)) => meta,
-                                Ok(None) => {
-                                    error!("Cannot split shard {}: metadata not found.", shard_id);
-                                    counter!(
-                                        "cardinalsin_split_actions_total",
-                                        "service" => crate::telemetry::service(),
-                                        "run_id" => crate::telemetry::run_id(),
-                                        "tenant" => crate::telemetry::tenant(),
-                                        "action" => "split",
-                                        "result" => "error"
-                                    )
-                                    .increment(1);
-                                    return;
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Cannot split shard {}: failed to get metadata: {}",
-                                        shard_id, e
-                                    );
-                                    counter!(
-                                        "cardinalsin_split_actions_total",
-                                        "service" => crate::telemetry::service(),
-                                        "run_id" => crate::telemetry::run_id(),
-                                        "tenant" => crate::telemetry::tenant(),
-                                        "action" => "split",
-                                        "result" => "error"
-                                    )
-                                    .increment(1);
-                                    return;
-                                }
-                            };
+                        let shard_metadata = match metadata_client
+                            .get_shard_metadata(&shard_id.to_string())
+                            .await
+                        {
+                            Ok(Some(meta)) => meta,
+                            Ok(None) => {
+                                error!("Cannot split shard {}: metadata not found.", shard_id);
+                                counter!(
+                                    "cardinalsin_split_actions_total",
+                                    "service" => crate::telemetry::service(),
+                                    "run_id" => crate::telemetry::run_id(),
+                                    "tenant" => crate::telemetry::tenant(),
+                                    "action" => "split",
+                                    "result" => "error"
+                                )
+                                .increment(1);
+                                return;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Cannot split shard {}: failed to get metadata: {}",
+                                    shard_id, e
+                                );
+                                counter!(
+                                    "cardinalsin_split_actions_total",
+                                    "service" => crate::telemetry::service(),
+                                    "run_id" => crate::telemetry::run_id(),
+                                    "tenant" => crate::telemetry::tenant(),
+                                    "action" => "split",
+                                    "result" => "error"
+                                )
+                                .increment(1);
+                                return;
+                            }
+                        };
 
                         // Ensure we don't try to split a shard that's already splitting
                         if !shard_metadata.is_active() {

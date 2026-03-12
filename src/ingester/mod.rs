@@ -380,7 +380,11 @@ impl Ingester {
 
     /// Write with split awareness (dual-write to old and new shards).
     /// WAL has already been appended by the caller.
-    async fn write_with_split_awareness(&self, batch: RecordBatch, shard_id: ShardId) -> Result<()> {
+    async fn write_with_split_awareness(
+        &self,
+        batch: RecordBatch,
+        shard_id: ShardId,
+    ) -> Result<()> {
         let split_state = self
             .metadata
             .get_split_state(&shard_id.to_string())
@@ -468,11 +472,10 @@ impl Ingester {
     ) -> Result<(RecordBatch, RecordBatch)> {
         use arrow_array::cast::AsArray;
 
-        let split_hash = u32::from_be_bytes(
-            split_point
-                .try_into()
-                .map_err(|_| Error::Internal("Invalid split point (expected 4 bytes)".to_string()))?,
-        );
+        let split_hash =
+            u32::from_be_bytes(split_point.try_into().map_err(|_| {
+                Error::Internal("Invalid split point (expected 4 bytes)".to_string())
+            })?);
 
         let metric_col = batch
             .column_by_name("metric_name")

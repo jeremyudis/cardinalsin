@@ -842,7 +842,7 @@ async fn test_time_index_rebuild() {
             max_timestamp: (i + 1) * nanos_per_hour - 1,
             row_count: 100,
             size_bytes: 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }
@@ -884,7 +884,7 @@ async fn test_compaction_level_tracking_through_metadata() {
             max_timestamp: (i + 1) * 1000 - 1,
             row_count: 10,
             size_bytes: 100,
-        shard_id: 0,
+            shard_id: 0,
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }
@@ -1061,7 +1061,10 @@ async fn test_s3_shard_metadata_lifecycle() {
         .unwrap();
 
     // Verify it exists
-    let retrieved = client.get_shard_metadata(&shard.shard_id.to_string()).await.unwrap();
+    let retrieved = client
+        .get_shard_metadata(&shard.shard_id.to_string())
+        .await
+        .unwrap();
     assert!(retrieved.is_some());
     let retrieved = retrieved.unwrap();
     assert_eq!(retrieved.generation, 1);
@@ -1232,7 +1235,7 @@ async fn test_concurrent_split_and_chunk_registration() {
                 max_timestamp: (i + 1) * 1000,
                 row_count: 10,
                 size_bytes: 100,
-        shard_id: 0,
+                shard_id: 0,
             };
             client.register_chunk(&chunk.path, &chunk).await.unwrap();
         });
@@ -1264,7 +1267,7 @@ async fn test_concurrent_split_and_chunk_registration() {
             max_timestamp: (i + 1) * 1000,
             row_count: 10,
             size_bytes: 100,
-        shard_id: 0,
+            shard_id: 0,
         };
         client.register_chunk(&chunk.path, &chunk).await.unwrap();
     }

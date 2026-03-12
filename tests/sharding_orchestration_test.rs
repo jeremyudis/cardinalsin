@@ -2,7 +2,9 @@
 
 use cardinalsin::compactor::{Compactor, CompactorConfig};
 use cardinalsin::metadata::{LocalMetadataClient, MetadataClient};
-use cardinalsin::sharding::{HotShardConfig, ReplicaInfo, ShardId, ShardMetadata, ShardMonitor, ShardState};
+use cardinalsin::sharding::{
+    HotShardConfig, ReplicaInfo, ShardId, ShardMetadata, ShardMonitor, ShardState,
+};
 use cardinalsin::StorageConfig;
 use object_store::memory::InMemory;
 use object_store::ObjectStore;
@@ -74,7 +76,8 @@ async fn setup_test_env() -> (
 
 #[tokio::test]
 async fn test_compactor_triggers_shard_split() {
-    let (compactor, metadata, shard_monitor, hot_shard_id, hot_shard_numeric) = setup_test_env().await;
+    let (compactor, metadata, shard_monitor, hot_shard_id, hot_shard_numeric) =
+        setup_test_env().await;
 
     // Simulate high write traffic to the hot shard.
     // The monitor requires one evaluation to mark hot, then another after the

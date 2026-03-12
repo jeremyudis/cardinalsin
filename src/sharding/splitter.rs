@@ -332,11 +332,8 @@ impl ShardSplitter {
         let current_generation = old_metadata.generation;
 
         // The split point is the hash range midpoint (4-byte u32)
-        let hash_mid = u32::from_be_bytes(
-            split_state.split_point[..4]
-                .try_into()
-                .unwrap_or([0u8; 4]),
-        );
+        let hash_mid =
+            u32::from_be_bytes(split_state.split_point[..4].try_into().unwrap_or([0u8; 4]));
 
         // Step 1: Create shard A (idempotent — skipped if already done)
         if !progress.shard_a_created {
@@ -634,11 +631,9 @@ impl ShardSplitter {
     ) -> Result<(RecordBatch, RecordBatch)> {
         use arrow_array::cast::AsArray;
 
-        let split_hash = u32::from_be_bytes(
-            split_point
-                .try_into()
-                .map_err(|_| crate::Error::Internal("Invalid split point (expected 4 bytes)".to_string()))?,
-        );
+        let split_hash = u32::from_be_bytes(split_point.try_into().map_err(|_| {
+            crate::Error::Internal("Invalid split point (expected 4 bytes)".to_string())
+        })?);
 
         let metric_col = batch
             .column_by_name("metric_name")

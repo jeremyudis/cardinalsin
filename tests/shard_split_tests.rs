@@ -69,11 +69,13 @@ async fn test_phase1_preparation() {
     // Verify new shard IDs are generated
     assert_ne!(shard_a, shard_b, "New shards should have different IDs");
     assert_ne!(
-        shard_a, shard.shard_id.to_string(),
+        shard_a,
+        shard.shard_id.to_string(),
         "New shard A should be different from original"
     );
     assert_ne!(
-        shard_b, shard.shard_id.to_string(),
+        shard_b,
+        shard.shard_id.to_string(),
         "New shard B should be different from original"
     );
 }
@@ -246,7 +248,10 @@ async fn test_phase4_cutover() {
     splitter.cutover(&shard.shard_id.to_string()).await.unwrap();
 
     // Verify split is complete
-    let split_state = metadata.get_split_state(&shard.shard_id.to_string()).await.unwrap();
+    let split_state = metadata
+        .get_split_state(&shard.shard_id.to_string())
+        .await
+        .unwrap();
     assert!(
         split_state.is_none(),
         "Split state should be removed after cutover"
@@ -300,7 +305,10 @@ async fn test_phase4_cutover_requires_old_shard_metadata() {
         .await
         .unwrap();
 
-    let err = splitter.cutover(&shard.shard_id.to_string()).await.unwrap_err();
+    let err = splitter
+        .cutover(&shard.shard_id.to_string())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, cardinalsin::Error::ShardNotFound(ref id) if id == &shard.shard_id.to_string()),
         "expected ShardNotFound when old shard metadata is missing, got: {}",
@@ -333,7 +341,10 @@ async fn test_phase4_cutover_rejects_invalid_split_state_shape() {
         .await
         .unwrap();
 
-    let err = splitter.cutover(&shard.shard_id.to_string()).await.unwrap_err();
+    let err = splitter
+        .cutover(&shard.shard_id.to_string())
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, cardinalsin::Error::Internal(ref msg) if msg.contains("expected 2 new shards")),
         "expected split-state shape validation error, got: {}",
@@ -372,7 +383,10 @@ async fn test_phase5_cleanup() {
 
     // Execute cleanup with short grace period
     splitter
-        .cleanup(&shard.shard_id.to_string(), std::time::Duration::from_millis(10))
+        .cleanup(
+            &shard.shard_id.to_string(),
+            std::time::Duration::from_millis(10),
+        )
         .await
         .unwrap();
 
@@ -448,7 +462,10 @@ async fn test_full_split_execution() {
     match result {
         Ok(_) => {
             // Split succeeded - verify split state is cleaned up
-            let split_state = metadata.get_split_state(&shard.shard_id.to_string()).await.unwrap();
+            let split_state = metadata
+                .get_split_state(&shard.shard_id.to_string())
+                .await
+                .unwrap();
             assert!(split_state.is_none(), "Split state should be cleaned up");
         }
         Err(e) => {
@@ -535,7 +552,7 @@ async fn test_backfill_progress_tracking() {
             max_timestamp: i * 1000 + 1000,
             row_count: 2,
             size_bytes: 1024,
-        shard_id: 0,
+            shard_id: 0,
         };
         metadata
             .register_chunk(&chunk_path, &chunk_meta)
@@ -557,7 +574,11 @@ async fn test_backfill_progress_tracking() {
 
     // Run backfill
     splitter
-        .run_backfill(&shard.shard_id.to_string(), &[shard_a, shard_b], &split_point)
+        .run_backfill(
+            &shard.shard_id.to_string(),
+            &[shard_a, shard_b],
+            &split_point,
+        )
         .await
         .unwrap();
 
@@ -614,7 +635,7 @@ async fn test_backfill_rerun_is_idempotent() {
                 max_timestamp: 5000,
                 row_count: 5,
                 size_bytes: 1024,
-        shard_id: 0,
+                shard_id: 0,
             },
         )
         .await
@@ -734,7 +755,7 @@ async fn test_backfill_resume_after_partial_failure() {
                 max_timestamp: 2000,
                 row_count: 3,
                 size_bytes: 1024,
-        shard_id: 0,
+                shard_id: 0,
             },
         )
         .await
@@ -750,7 +771,7 @@ async fn test_backfill_resume_after_partial_failure() {
                 max_timestamp: 5000,
                 row_count: 3,
                 size_bytes: 1024,
-        shard_id: 0,
+                shard_id: 0,
             },
         )
         .await
