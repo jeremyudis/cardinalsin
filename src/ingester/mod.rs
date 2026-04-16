@@ -126,6 +126,8 @@ pub struct Ingester {
     shutdown: CancellationToken,
     /// Bounded clock for skew-safe timestamp operations
     clock: Arc<BoundedClock>,
+    /// Optional index builder for per-chunk CSI segments
+    index_builder: Option<Arc<crate::index::IndexBuilder>>,
 }
 
 impl Ingester {
@@ -163,6 +165,7 @@ impl Ingester {
             last_flushed_seq: AtomicU64::new(0),
             shutdown: CancellationToken::new(),
             clock: Arc::new(BoundedClock::default()),
+            index_builder: None,
         }
     }
 
@@ -200,7 +203,14 @@ impl Ingester {
             last_flushed_seq: AtomicU64::new(0),
             shutdown: CancellationToken::new(),
             clock: Arc::new(BoundedClock::default()),
+            index_builder: None,
         }
+    }
+
+    /// Attach an index builder for building per-chunk CSI segments at flush time.
+    pub fn with_index_builder(mut self, builder: Arc<crate::index::IndexBuilder>) -> Self {
+        self.index_builder = Some(builder);
+        self
     }
 
     /// Get a cancellation token that can be used to trigger graceful shutdown.
@@ -666,6 +676,19 @@ impl Ingester {
             size_bytes: parquet_size,
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
+
+        // Build per-chunk index segment (non-fatal)
+        if let Some(ref index_builder) = self.index_builder {
+            let shard_id = self.compute_shard_id(&combined);
+            let min_ts = chunk_metadata.min_timestamp;
+            let max_ts = chunk_metadata.max_timestamp;
+            if let Err(e) = index_builder
+                .build_and_publish_segment(&combined, &path, &shard_id, 0, (min_ts, max_ts))
+                .await
+            {
+                warn!(error = %e, "Index segment build failed (non-fatal)");
+            }
+        }
 
         // Broadcast to streaming query subscribers (legacy)
         if let Err(e) = self.broadcast.send(combined.clone()) {

@@ -1135,6 +1135,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                                 max_timestamp: extended.base.max_timestamp,
                                 row_count: extended.base.row_count,
                                 size_bytes: extended.base.size_bytes,
+                                shard_id: extended.shard_id.clone(),
                             });
                         } else {
                             pruned_count += 1;
@@ -1200,6 +1201,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.shard_id.clone(),
             })
             .collect();
 
@@ -1556,6 +1558,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.shard_id.clone(),
             })
             .collect();
 

@@ -4,6 +4,7 @@
 
 use cardinalsin::compactor::{Compactor, CompactorConfig};
 use cardinalsin::config::ComponentFactory;
+use cardinalsin::index::{IndexBuilder, IndexConfig};
 use cardinalsin::sharding::{HotShardConfig, ShardMonitor};
 use cardinalsin::telemetry::Telemetry;
 
@@ -81,6 +82,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create shard monitor for hot shard detection
     let shard_monitor = Arc::new(ShardMonitor::new(HotShardConfig::default()));
 
+    // Build index builder for merging CSI segments during compaction
+    let index_builder = IndexBuilder::new(
+        object_store.clone(),
+        &args.tenant_id,
+        IndexConfig::default(),
+    );
+
     // Create compactor
     let compactor = Compactor::new(
         compactor_config,
@@ -88,7 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         metadata,
         storage_config,
         shard_monitor,
-    );
+    )
+    .with_index_builder(index_builder);
 
     info!(
         l0_threshold = args.l0_threshold,

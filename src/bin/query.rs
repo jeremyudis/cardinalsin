@@ -4,6 +4,7 @@
 
 use cardinalsin::api;
 use cardinalsin::config::ComponentFactory;
+use cardinalsin::index::IndexPrefilter;
 use cardinalsin::ingester::{Ingester, IngesterConfig};
 use cardinalsin::query::{QueryConfig, QueryNode};
 use cardinalsin::schema::MetricSchema;
@@ -92,6 +93,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // Build index prefilter for chunk pruning
+    let index_prefilter = Arc::new(IndexPrefilter::new(
+        object_store.clone(),
+        &args.tenant_id,
+    ));
+
     // Create query node
     let query_node = Arc::new(
         QueryNode::new(
@@ -100,7 +107,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             metadata.clone(),
             storage_config.clone(),
         )
-        .await?,
+        .await?
+        .with_index_prefilter(index_prefilter),
     );
 
     // Create a dummy ingester for the API (in production, query nodes don't ingest)
