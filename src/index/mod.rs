@@ -40,11 +40,7 @@ pub struct IndexBuilder {
 }
 
 impl IndexBuilder {
-    pub fn new(
-        object_store: Arc<dyn ObjectStore>,
-        tenant_id: &str,
-        config: IndexConfig,
-    ) -> Self {
+    pub fn new(object_store: Arc<dyn ObjectStore>, tenant_id: &str, config: IndexConfig) -> Self {
         let manifest_client = ManifestClient::new(object_store.clone(), tenant_id);
         Self {
             object_store,
@@ -97,10 +93,7 @@ impl IndexBuilder {
             uuid::Uuid::new_v4()
         );
         self.object_store
-            .put(
-                &segment_path.clone().into(),
-                segment_bytes.into(),
-            )
+            .put(&segment_path.clone().into(), segment_bytes.into())
             .await?;
 
         // Update manifest with CAS retry
@@ -193,10 +186,8 @@ impl IndexBuilder {
         }
 
         // Merge segments
-        let merged_bytes = SegmentMerger::merge_segments(
-            &source_segments,
-            &[output_chunk_path.to_string()],
-        )?;
+        let merged_bytes =
+            SegmentMerger::merge_segments(&source_segments, &[output_chunk_path.to_string()])?;
         let merged_size = merged_bytes.len() as u64;
 
         // Upload merged segment
@@ -207,10 +198,7 @@ impl IndexBuilder {
             uuid::Uuid::new_v4()
         );
         self.object_store
-            .put(
-                &merged_path.clone().into(),
-                merged_bytes.into(),
-            )
+            .put(&merged_path.clone().into(), merged_bytes.into())
             .await?;
 
         // Update manifest: remove source entries, add merged entry
@@ -266,11 +254,7 @@ impl IndexBuilder {
     }
 
     /// Add a segment entry to the manifest with CAS retry.
-    async fn add_segment_to_manifest(
-        &self,
-        shard_id: &str,
-        entry: SegmentEntry,
-    ) -> Result<()> {
+    async fn add_segment_to_manifest(&self, shard_id: &str, entry: SegmentEntry) -> Result<()> {
         for attempt in 0..5u32 {
             let (mut manifest, etag) = match self.manifest_client.load_manifest(shard_id).await? {
                 Some(m) => m,
@@ -543,8 +527,7 @@ impl IndexPrefilter {
         let result: Vec<TimeIndexEntry> = chunks
             .iter()
             .filter(|c| {
-                matching_paths.contains(&c.chunk_path)
-                    || !indexed_paths.contains(&c.chunk_path)
+                matching_paths.contains(&c.chunk_path) || !indexed_paths.contains(&c.chunk_path)
             })
             .cloned()
             .collect();
@@ -566,7 +549,6 @@ impl IndexPrefilter {
 fn is_indexable_predicate(pred: &ColumnPredicate) -> bool {
     matches!(
         pred,
-        ColumnPredicate::Eq(_, PredicateValue::String(_))
-            | ColumnPredicate::In(_, _)
+        ColumnPredicate::Eq(_, PredicateValue::String(_)) | ColumnPredicate::In(_, _)
     )
 }

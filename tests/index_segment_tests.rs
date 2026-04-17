@@ -43,11 +43,7 @@ fn make_batch(hosts: &[&str], metrics: &[&str]) -> RecordBatch {
     .unwrap()
 }
 
-fn make_fst_and_segment(
-    hosts: &[&str],
-    metrics: &[&str],
-    chunk_path: &str,
-) -> Vec<u8> {
+fn make_fst_and_segment(hosts: &[&str], metrics: &[&str], chunk_path: &str) -> Vec<u8> {
     let batch = make_batch(hosts, metrics);
     let ordinals = vec![0u32; batch.num_rows()];
     let config = IndexConfig::default();
@@ -67,7 +63,9 @@ fn test_segment_roundtrip_single_column() {
     let data = make_fst_and_segment(&["web-01"], &["cpu"], "chunk_a.parquet");
     let reader = SegmentReader::open(data).unwrap();
     assert!(reader.indexed_columns().contains(&"host".to_string()));
-    assert!(reader.indexed_columns().contains(&"metric_name".to_string()));
+    assert!(reader
+        .indexed_columns()
+        .contains(&"metric_name".to_string()));
 }
 
 #[test]
@@ -96,7 +94,7 @@ fn test_segment_header_footer_validation() {
     // but the header magic check catches the corruption.
     let mut bad = data.clone();
     bad[0] = b'Z'; // 'C' -> 'Z'
-    // Recompute file CRC (stored at len-8..len-4) so CRC check passes
+                   // Recompute file CRC (stored at len-8..len-4) so CRC check passes
     let file_crc = crc32fast::hash(&bad[..bad.len() - 8]);
     let len = bad.len();
     bad[len - 8..len - 4].copy_from_slice(&file_crc.to_le_bytes());
@@ -155,10 +153,7 @@ fn test_segment_large_ordinal_table() {
     let data = SegmentWriter::write_segment(&ordinal_table, &columns).unwrap();
     let reader = SegmentReader::open(data).unwrap();
     assert_eq!(reader.ordinal_table().entries.len(), 100);
-    assert_eq!(
-        reader.ordinal_table().resolve(50),
-        Some("chunk_50.parquet")
-    );
+    assert_eq!(reader.ordinal_table().resolve(50), Some("chunk_50.parquet"));
 }
 
 #[test]
@@ -219,9 +214,7 @@ fn test_fst_sorted_keys() {
 
 #[test]
 fn test_fst_null_values_skipped() {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("host", DataType::Utf8, true),
-    ]));
+    let schema = Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)]));
     let host_arr = StringArray::from(vec![Some("web-01"), None, Some("web-02")]);
     let batch = RecordBatch::try_new(schema, vec![Arc::new(host_arr)]).unwrap();
     let ordinals = vec![0u32; 3];
@@ -235,9 +228,7 @@ fn test_fst_null_values_skipped() {
 
 #[test]
 fn test_fst_empty_column() {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("host", DataType::Utf8, true),
-    ]));
+    let schema = Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)]));
     let host_arr = StringArray::from(vec![None::<&str>, None, None]);
     let batch = RecordBatch::try_new(schema, vec![Arc::new(host_arr)]).unwrap();
     let ordinals = vec![0u32; 3];
@@ -248,17 +239,31 @@ fn test_fst_empty_column() {
 #[test]
 fn test_fst_cardinality_limit() {
     // Build batch with 10 distinct values
-    let hosts: Vec<&str> = (0..10).map(|i| match i {
-        0 => "a", 1 => "b", 2 => "c", 3 => "d", 4 => "e",
-        5 => "f", 6 => "g", 7 => "h", 8 => "i", _ => "j",
-    }).collect();
+    let hosts: Vec<&str> = (0..10)
+        .map(|i| match i {
+            0 => "a",
+            1 => "b",
+            2 => "c",
+            3 => "d",
+            4 => "e",
+            5 => "f",
+            6 => "g",
+            7 => "h",
+            8 => "i",
+            _ => "j",
+        })
+        .collect();
     let batch = make_batch(&hosts, &vec!["cpu"; 10]);
     let ordinals = vec![0u32; 10];
 
     // With max_cardinality=5, the host column should be skipped
-    let columns =
-        FstTermBuilder::build_all_columns(&batch, &ordinals, &["timestamp".into(), "value_f64".into()], 5)
-            .unwrap();
+    let columns = FstTermBuilder::build_all_columns(
+        &batch,
+        &ordinals,
+        &["timestamp".into(), "value_f64".into()],
+        5,
+    )
+    .unwrap();
     // host has 10 distinct values > 5, so it should be excluded
     let host_col = columns.iter().find(|c| c.column_name == "host");
     assert!(host_col.is_none());
@@ -368,11 +373,8 @@ fn test_merge_two_single_chunk_segments() {
     let reader_a = SegmentReader::open(seg_a).unwrap();
     let reader_b = SegmentReader::open(seg_b).unwrap();
 
-    let merged = SegmentMerger::merge_segments(
-        &[reader_a, reader_b],
-        &["merged.parquet".into()],
-    )
-    .unwrap();
+    let merged =
+        SegmentMerger::merge_segments(&[reader_a, reader_b], &["merged.parquet".into()]).unwrap();
 
     let merged_reader = SegmentReader::open(merged).unwrap();
 
@@ -426,11 +428,8 @@ fn test_merge_ordinal_remapping() {
     let reader_b = SegmentReader::open(seg_b).unwrap();
 
     // Merge into single output
-    let merged = SegmentMerger::merge_segments(
-        &[reader_a, reader_b],
-        &["merged.parquet".into()],
-    )
-    .unwrap();
+    let merged =
+        SegmentMerger::merge_segments(&[reader_a, reader_b], &["merged.parquet".into()]).unwrap();
 
     let reader = SegmentReader::open(merged).unwrap();
 
@@ -485,11 +484,8 @@ fn test_merge_disjoint_columns() {
     let reader_a = SegmentReader::open(seg_a_bytes).unwrap();
     let reader_b = SegmentReader::open(seg_b_bytes).unwrap();
 
-    let merged = SegmentMerger::merge_segments(
-        &[reader_a, reader_b],
-        &["merged.parquet".into()],
-    )
-    .unwrap();
+    let merged =
+        SegmentMerger::merge_segments(&[reader_a, reader_b], &["merged.parquet".into()]).unwrap();
 
     let reader = SegmentReader::open(merged).unwrap();
     let cols = reader.indexed_columns();
@@ -506,11 +502,8 @@ fn test_merge_overlapping_terms() {
     let reader_a = SegmentReader::open(seg_a).unwrap();
     let reader_b = SegmentReader::open(seg_b).unwrap();
 
-    let merged = SegmentMerger::merge_segments(
-        &[reader_a, reader_b],
-        &["merged.parquet".into()],
-    )
-    .unwrap();
+    let merged =
+        SegmentMerger::merge_segments(&[reader_a, reader_b], &["merged.parquet".into()]).unwrap();
 
     let reader = SegmentReader::open(merged).unwrap();
 
@@ -529,8 +522,7 @@ fn test_merge_empty_segment_handling() {
     let reader = SegmentReader::open(seg).unwrap();
 
     // Merge single segment (degenerate case)
-    let merged =
-        SegmentMerger::merge_segments(&[reader], &["merged.parquet".into()]).unwrap();
+    let merged = SegmentMerger::merge_segments(&[reader], &["merged.parquet".into()]).unwrap();
 
     let merged_reader = SegmentReader::open(merged).unwrap();
     let result = merged_reader.lookup("host", "web-01").unwrap().unwrap();
@@ -648,7 +640,11 @@ async fn test_manifest_add_remove_entries() {
 
     let (final_manifest, _) = client.load_manifest("shard-0").await.unwrap().unwrap();
     assert_eq!(final_manifest.segments.len(), 2);
-    let paths: Vec<&str> = final_manifest.segments.iter().map(|s| s.path.as_str()).collect();
+    let paths: Vec<&str> = final_manifest
+        .segments
+        .iter()
+        .map(|s| s.path.as_str())
+        .collect();
     assert!(paths.contains(&"seg_1.csi"));
     assert!(paths.contains(&"seg_2.csi"));
 }
@@ -734,17 +730,26 @@ async fn test_in_predicate_pruning() {
     let chunks = vec![
         TimeIndexEntry {
             chunk_path: "chunk_a.parquet".into(),
-            min_timestamp: 1000, max_timestamp: 2000, row_count: 1, size_bytes: 50,
+            min_timestamp: 1000,
+            max_timestamp: 2000,
+            row_count: 1,
+            size_bytes: 50,
             shard_id: Some("shard-0".into()),
         },
         TimeIndexEntry {
             chunk_path: "chunk_b.parquet".into(),
-            min_timestamp: 1000, max_timestamp: 2000, row_count: 1, size_bytes: 50,
+            min_timestamp: 1000,
+            max_timestamp: 2000,
+            row_count: 1,
+            size_bytes: 50,
             shard_id: Some("shard-0".into()),
         },
         TimeIndexEntry {
             chunk_path: "chunk_c.parquet".into(),
-            min_timestamp: 1000, max_timestamp: 2000, row_count: 1, size_bytes: 50,
+            min_timestamp: 1000,
+            max_timestamp: 2000,
+            row_count: 1,
+            size_bytes: 50,
             shard_id: Some("shard-0".into()),
         },
     ];
@@ -771,7 +776,10 @@ async fn test_missing_manifest_passthrough() {
 
     let chunks = vec![TimeIndexEntry {
         chunk_path: "chunk.parquet".into(),
-        min_timestamp: 1000, max_timestamp: 2000, row_count: 1, size_bytes: 50,
+        min_timestamp: 1000,
+        max_timestamp: 2000,
+        row_count: 1,
+        size_bytes: 50,
         shard_id: Some("shard-0".into()),
     }];
 
@@ -797,7 +805,10 @@ async fn test_frozen_manifest_passthrough() {
     let prefilter = IndexPrefilter::new(store.clone(), "tenant-1");
     let chunks = vec![TimeIndexEntry {
         chunk_path: "chunk.parquet".into(),
-        min_timestamp: 1000, max_timestamp: 2000, row_count: 1, size_bytes: 50,
+        min_timestamp: 1000,
+        max_timestamp: 2000,
+        row_count: 1,
+        size_bytes: 50,
         shard_id: Some("shard-0".into()),
     }];
 
@@ -818,7 +829,10 @@ async fn test_non_indexable_predicates_passthrough() {
 
     let chunks = vec![TimeIndexEntry {
         chunk_path: "chunk.parquet".into(),
-        min_timestamp: 1000, max_timestamp: 2000, row_count: 1, size_bytes: 50,
+        min_timestamp: 1000,
+        max_timestamp: 2000,
+        row_count: 1,
+        size_bytes: 50,
         shard_id: Some("shard-0".into()),
     }];
 
@@ -852,7 +866,10 @@ async fn test_unindexed_column_predicate_no_false_negatives() {
     let prefilter = IndexPrefilter::new(store, "t1");
     let chunks = vec![TimeIndexEntry {
         chunk_path: "chunk_a.parquet".into(),
-        min_timestamp: 100, max_timestamp: 200, row_count: 2, size_bytes: 64,
+        min_timestamp: 100,
+        max_timestamp: 200,
+        row_count: 2,
+        size_bytes: 64,
         shard_id: Some("shard-0".into()),
     }];
 
@@ -907,7 +924,10 @@ async fn test_build_at_ingest_then_query() {
     let prefilter = IndexPrefilter::new(store, "t1");
     let chunks = vec![TimeIndexEntry {
         chunk_path: "chunk_1.parquet".into(),
-        min_timestamp: 100, max_timestamp: 300, row_count: 3, size_bytes: 128,
+        min_timestamp: 100,
+        max_timestamp: 300,
+        row_count: 3,
+        size_bytes: 128,
         shard_id: Some("shard-0".into()),
     }];
 
@@ -915,7 +935,10 @@ async fn test_build_at_ingest_then_query() {
     let hit = prefilter
         .prune(
             &chunks,
-            &[ColumnPredicate::Eq("host".into(), PredicateValue::String("web-02".into()))],
+            &[ColumnPredicate::Eq(
+                "host".into(),
+                PredicateValue::String("web-02".into()),
+            )],
         )
         .await;
     assert_eq!(hit.len(), 1);
@@ -924,7 +947,10 @@ async fn test_build_at_ingest_then_query() {
     let miss = prefilter
         .prune(
             &chunks,
-            &[ColumnPredicate::Eq("host".into(), PredicateValue::String("web-99".into()))],
+            &[ColumnPredicate::Eq(
+                "host".into(),
+                PredicateValue::String("web-99".into()),
+            )],
         )
         .await;
     // web-99 doesn't exist, lookup returns empty bitmap → chunk NOT matched
@@ -958,12 +984,18 @@ async fn test_multi_shard_pruning() {
     let chunks = vec![
         TimeIndexEntry {
             chunk_path: "s0_chunk.parquet".into(),
-            min_timestamp: 100, max_timestamp: 200, row_count: 1, size_bytes: 50,
+            min_timestamp: 100,
+            max_timestamp: 200,
+            row_count: 1,
+            size_bytes: 50,
             shard_id: Some("shard-0".into()),
         },
         TimeIndexEntry {
             chunk_path: "s1_chunk.parquet".into(),
-            min_timestamp: 100, max_timestamp: 200, row_count: 1, size_bytes: 50,
+            min_timestamp: 100,
+            max_timestamp: 200,
+            row_count: 1,
+            size_bytes: 50,
             shard_id: Some("shard-1".into()),
         },
     ];
@@ -971,7 +1003,10 @@ async fn test_multi_shard_pruning() {
     let result = prefilter
         .prune(
             &chunks,
-            &[ColumnPredicate::Eq("host".into(), PredicateValue::String("web-01".into()))],
+            &[ColumnPredicate::Eq(
+                "host".into(),
+                PredicateValue::String("web-01".into()),
+            )],
         )
         .await;
     assert_eq!(result.len(), 1);
@@ -1012,14 +1047,20 @@ async fn test_merge_then_query() {
     let prefilter = IndexPrefilter::new(store, "t1");
     let chunks = vec![TimeIndexEntry {
         chunk_path: "merged.parquet".into(),
-        min_timestamp: 100, max_timestamp: 200, row_count: 2, size_bytes: 100,
+        min_timestamp: 100,
+        max_timestamp: 200,
+        row_count: 2,
+        size_bytes: 100,
         shard_id: Some("shard-0".into()),
     }];
 
     let result = prefilter
         .prune(
             &chunks,
-            &[ColumnPredicate::Eq("host".into(), PredicateValue::String("web-01".into()))],
+            &[ColumnPredicate::Eq(
+                "host".into(),
+                PredicateValue::String("web-01".into()),
+            )],
         )
         .await;
     assert_eq!(result.len(), 1);
@@ -1073,7 +1114,9 @@ async fn test_no_false_negatives() {
             )
             .await;
         assert!(
-            result.iter().any(|c| c.chunk_path == format!("chunk_{i}.parquet")),
+            result
+                .iter()
+                .any(|c| c.chunk_path == format!("chunk_{i}.parquet")),
             "Expected chunk_{i}.parquet to be in results for host={host}",
         );
     }
@@ -1093,10 +1136,17 @@ async fn test_corrupt_segment_passthrough() {
 
     // Corrupt the segment file in object store
     let manifest_client = ManifestClient::new(store.clone(), "t1");
-    let (manifest, _) = manifest_client.load_manifest("shard-0").await.unwrap().unwrap();
+    let (manifest, _) = manifest_client
+        .load_manifest("shard-0")
+        .await
+        .unwrap()
+        .unwrap();
     let seg_path = &manifest.segments[0].path;
     store
-        .put(&seg_path.clone().into(), bytes::Bytes::from(vec![0u8; 100]).into())
+        .put(
+            &seg_path.clone().into(),
+            bytes::Bytes::from(vec![0u8; 100]).into(),
+        )
         .await
         .unwrap();
 
@@ -1104,14 +1154,20 @@ async fn test_corrupt_segment_passthrough() {
     let prefilter = IndexPrefilter::new(store, "t1");
     let chunks = vec![TimeIndexEntry {
         chunk_path: "chunk.parquet".into(),
-        min_timestamp: 100, max_timestamp: 200, row_count: 1, size_bytes: 50,
+        min_timestamp: 100,
+        max_timestamp: 200,
+        row_count: 1,
+        size_bytes: 50,
         shard_id: Some("shard-0".into()),
     }];
 
     let result = prefilter
         .prune(
             &chunks,
-            &[ColumnPredicate::Eq("host".into(), PredicateValue::String("web-01".into()))],
+            &[ColumnPredicate::Eq(
+                "host".into(),
+                PredicateValue::String("web-01".into()),
+            )],
         )
         .await;
     // Corrupt segment → pass all through

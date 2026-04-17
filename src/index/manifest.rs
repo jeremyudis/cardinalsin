@@ -81,18 +81,11 @@ impl ManifestClient {
     }
 
     /// Load manifest for a shard. Returns None if no manifest exists.
-    pub async fn load_manifest(
-        &self,
-        shard_id: &str,
-    ) -> Result<Option<(IndexManifest, String)>> {
+    pub async fn load_manifest(&self, shard_id: &str) -> Result<Option<(IndexManifest, String)>> {
         let path = self.manifest_path(shard_id);
         match self.object_store.get(&path).await {
             Ok(result) => {
-                let etag = result
-                    .meta
-                    .e_tag
-                    .clone()
-                    .unwrap_or_default();
+                let etag = result.meta.e_tag.clone().unwrap_or_default();
                 let bytes = result.bytes().await?;
                 let manifest: IndexManifest = serde_json::from_slice(&bytes)?;
                 Ok(Some((manifest, etag)))
@@ -103,11 +96,7 @@ impl ManifestClient {
     }
 
     /// Save manifest with CAS via ETag. Returns Err(Conflict) on mismatch.
-    pub async fn save_manifest(
-        &self,
-        manifest: &IndexManifest,
-        expected_etag: &str,
-    ) -> Result<()> {
+    pub async fn save_manifest(&self, manifest: &IndexManifest, expected_etag: &str) -> Result<()> {
         let path = self.manifest_path(&manifest.shard_id);
         let json = serde_json::to_vec_pretty(manifest)?;
         let payload = PutPayload::from(json);
@@ -136,9 +125,7 @@ impl ManifestClient {
                 Ok(())
             }
             Err(object_store::Error::Precondition { .. })
-            | Err(object_store::Error::AlreadyExists { .. }) => {
-                Err(Error::Conflict)
-            }
+            | Err(object_store::Error::AlreadyExists { .. }) => Err(Error::Conflict),
             Err(e) => Err(e.into()),
         }
     }
@@ -147,9 +134,7 @@ impl ManifestClient {
     pub async fn create_manifest(&self, manifest: &IndexManifest) -> Result<()> {
         let path = self.manifest_path(&manifest.shard_id);
         let json = serde_json::to_vec_pretty(manifest)?;
-        self.object_store
-            .put(&path, json.into())
-            .await?;
+        self.object_store.put(&path, json.into()).await?;
         Ok(())
     }
 

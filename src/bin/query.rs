@@ -94,10 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Build index prefilter for chunk pruning
-    let index_prefilter = Arc::new(IndexPrefilter::new(
-        object_store.clone(),
-        &args.tenant_id,
-    ));
+    let index_prefilter = Arc::new(IndexPrefilter::new(object_store.clone(), &args.tenant_id));
 
     // Create query node
     let query_node = Arc::new(

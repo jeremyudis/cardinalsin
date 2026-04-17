@@ -125,10 +125,7 @@ impl SegmentMerger {
         col_name: &str,
     ) -> Result<Option<Vec<(String, PostingsList)>>> {
         // Access the segment's raw section data for this column
-        let section = seg
-            .indexed_columns()
-            .iter()
-            .position(|c| c == col_name);
+        let section = seg.indexed_columns().iter().position(|c| c == col_name);
 
         let _section_idx = match section {
             Some(idx) => idx,
@@ -164,7 +161,9 @@ impl SegmentMerger {
         for _ in 0..postings_count {
             let posting_len = read_u32(&section_data, &mut pos)? as usize;
             if pos + posting_len > section_data.len() {
-                return Err(Error::IndexCorrupt("Postings data overflow in merge".into()));
+                return Err(Error::IndexCorrupt(
+                    "Postings data overflow in merge".into(),
+                ));
             }
             let posting = PostingsList::deserialize(&section_data[pos..pos + posting_len])?;
             pos += posting_len;

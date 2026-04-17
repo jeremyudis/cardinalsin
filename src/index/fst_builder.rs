@@ -68,9 +68,9 @@ impl FstTermBuilder {
             }
         }
         // Try Dictionary encoded string columns
-        else if let Some(dict_arr) =
-            col.as_any()
-                .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt16Type>>()
+        else if let Some(dict_arr) = col
+            .as_any()
+            .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt16Type>>()
         {
             if let Some(values) = dict_arr.values().as_string_opt::<i32>() {
                 for (row_idx, chunk_ord) in chunk_ordinals.iter().enumerate() {
@@ -86,9 +86,9 @@ impl FstTermBuilder {
                     }
                 }
             }
-        } else if let Some(dict_arr) =
-            col.as_any()
-                .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt32Type>>()
+        } else if let Some(dict_arr) = col
+            .as_any()
+            .downcast_ref::<arrow_array::DictionaryArray<arrow_array::types::UInt32Type>>()
         {
             if let Some(values) = dict_arr.values().as_string_opt::<i32>() {
                 for (row_idx, chunk_ord) in chunk_ordinals.iter().enumerate() {
@@ -195,9 +195,7 @@ fn is_string_type(dt: &arrow_schema::DataType) -> bool {
     use arrow_schema::DataType;
     matches!(
         dt,
-        DataType::Utf8
-            | DataType::LargeUtf8
-            | DataType::Dictionary(_, _)
+        DataType::Utf8 | DataType::LargeUtf8 | DataType::Dictionary(_, _)
     )
 }
 

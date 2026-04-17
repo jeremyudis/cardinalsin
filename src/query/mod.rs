@@ -144,10 +144,7 @@ impl QueryNode {
     }
 
     /// Attach an inverted index prefilter for chunk pruning.
-    pub fn with_index_prefilter(
-        mut self,
-        prefilter: Arc<crate::index::IndexPrefilter>,
-    ) -> Self {
+    pub fn with_index_prefilter(mut self, prefilter: Arc<crate::index::IndexPrefilter>) -> Self {
         self.index_prefilter = Some(prefilter);
         self
     }

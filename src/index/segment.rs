@@ -197,10 +197,8 @@ impl SegmentReader {
             if pos + path_len > data.len() {
                 return Err(Error::IndexCorrupt("Ordinal table path overflow".into()));
             }
-            let path =
-                String::from_utf8(data[pos..pos + path_len].to_vec()).map_err(|e| {
-                    Error::IndexCorrupt(format!("Invalid UTF-8 in ordinal table: {e}"))
-                })?;
+            let path = String::from_utf8(data[pos..pos + path_len].to_vec())
+                .map_err(|e| Error::IndexCorrupt(format!("Invalid UTF-8 in ordinal table: {e}")))?;
             pos += path_len;
             entries.push((ordinal, path));
         }
@@ -301,7 +299,10 @@ impl SegmentReader {
 
     /// Return the names of all indexed columns.
     pub fn indexed_columns(&self) -> Vec<String> {
-        self.sections.iter().map(|s| s.column_name.clone()).collect()
+        self.sections
+            .iter()
+            .map(|s| s.column_name.clone())
+            .collect()
     }
 
     /// Return a reference to the ordinal table.
