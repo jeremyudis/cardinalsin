@@ -249,7 +249,7 @@ impl SegmentReader {
         };
 
         let section_data = self.read_section(section)?;
-        let (fst_map, postings) = Self::parse_section_data(&section_data)?;
+        let (fst_map, postings) = Self::parse_section_data(section_data)?;
 
         match fst_map.get(val.as_bytes()) {
             Some(idx) => {
@@ -274,7 +274,7 @@ impl SegmentReader {
         };
 
         let section_data = self.read_section(section)?;
-        let (fst_map, postings) = Self::parse_section_data(&section_data)?;
+        let (fst_map, postings) = Self::parse_section_data(section_data)?;
 
         let mut result = PostingsList::new();
         for val in vals {

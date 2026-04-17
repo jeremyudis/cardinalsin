@@ -253,7 +253,7 @@ fn test_fst_cardinality_limit() {
             _ => "j",
         })
         .collect();
-    let batch = make_batch(&hosts, &vec!["cpu"; 10]);
+    let batch = make_batch(&hosts, &["cpu"; 10]);
     let ordinals = vec![0u32; 10];
 
     // With max_cardinality=5, the host column should be skipped
@@ -281,7 +281,7 @@ fn test_fst_missing_column_error() {
 fn test_fst_prefix_sharing() {
     // FST should efficiently share prefixes for similar keys
     let hosts: Vec<&str> = vec!["web-server-001", "web-server-002", "web-server-003"];
-    let batch = make_batch(&hosts, &vec!["cpu"; 3]);
+    let batch = make_batch(&hosts, &["cpu"; 3]);
     let ordinals = vec![0u32; 3];
     let fst_data = FstTermBuilder::build_column_fst("host", &batch, &ordinals).unwrap();
 
@@ -1073,8 +1073,8 @@ async fn test_no_false_negatives() {
     let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
     let builder = IndexBuilder::new(store.clone(), "t1", IndexConfig::default());
 
-    let hosts = vec!["web-01", "web-02", "web-03", "web-04", "web-05"];
-    let metrics = vec!["cpu", "mem", "disk", "net", "io"];
+    let hosts = ["web-01", "web-02", "web-03", "web-04", "web-05"];
+    let metrics = ["cpu", "mem", "disk", "net", "io"];
 
     for (i, (host, metric)) in hosts.iter().zip(metrics.iter()).enumerate() {
         let batch = make_batch(&[host], &[metric]);
