@@ -484,6 +484,17 @@ impl IndexPrefilter {
                     indexed_paths.insert(path.to_string());
                 }
 
+                // Build a "full" bitmap containing all ordinals in this segment.
+                // Used when a predicate targets a column not indexed in this segment:
+                // the predicate cannot prune anything, so all chunks are potential matches.
+                let full_bitmap = {
+                    let mut bm = PostingsList::new();
+                    for (ordinal, _) in &reader.ordinal_table().entries {
+                        bm.add(*ordinal);
+                    }
+                    bm
+                };
+
                 // AND bitmaps across all indexable predicates
                 let mut combined: Option<PostingsList> = None;
 
@@ -508,12 +519,14 @@ impl IndexPrefilter {
                         _ => None,
                     };
 
-                    if let Some(bitmap) = bitmap {
-                        combined = Some(match combined {
-                            Some(existing) => existing.intersect(&bitmap),
-                            None => bitmap,
-                        });
-                    }
+                    // If lookup returned None (column not indexed in this segment),
+                    // use the full bitmap so this predicate doesn't falsely prune chunks.
+                    let bitmap = bitmap.unwrap_or_else(|| full_bitmap.clone());
+
+                    combined = Some(match combined {
+                        Some(existing) => existing.intersect(&bitmap),
+                        None => bitmap,
+                    });
                 }
 
                 // Resolve matching ordinals to paths

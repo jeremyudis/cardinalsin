@@ -820,7 +820,17 @@ impl Compactor {
 
         // Merge source index segments into one consolidated segment (non-fatal)
         if let Some(ref index_builder) = self.index_builder {
-            let shard_id = "default".to_string();
+            let shard_id = paths
+                .first()
+                .and_then(|p| {
+                    p.find("shard=").map(|start| {
+                        let after = &p[start + 6..];
+                        after
+                            .find('/')
+                            .map_or(after.to_string(), |end| after[..end].to_string())
+                    })
+                })
+                .unwrap_or_else(|| "default".to_string());
             let min_ts = self.extract_min_timestamp(&sorted);
             let max_ts = self.extract_max_timestamp(&sorted);
             if let Err(e) = index_builder

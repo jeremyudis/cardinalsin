@@ -833,6 +833,65 @@ async fn test_non_indexable_predicates_passthrough() {
 }
 
 #[tokio::test]
+async fn test_unindexed_column_predicate_no_false_negatives() {
+    // Regression test: when a predicate targets a column not indexed in a segment,
+    // the segment must NOT falsely prune chunks. Previously, an unindexed column
+    // caused the predicate to be silently skipped, which could lead to false
+    // negatives when ANDed with an indexed predicate that matched fewer chunks.
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+    let builder = IndexBuilder::new(store.clone(), "t1", IndexConfig::default());
+
+    // Build segment with only "host" and "metric_name" indexed (default skip_columns
+    // excludes timestamp/value_f64). No "region" column → it won't be indexed.
+    let batch = make_batch(&["web-01", "web-02"], &["cpu", "mem"]);
+    builder
+        .build_and_publish_segment(&batch, "chunk_a.parquet", "shard-0", 0, (100, 200))
+        .await
+        .unwrap();
+
+    let prefilter = IndexPrefilter::new(store, "t1");
+    let chunks = vec![TimeIndexEntry {
+        chunk_path: "chunk_a.parquet".into(),
+        min_timestamp: 100, max_timestamp: 200, row_count: 2, size_bytes: 64,
+        shard_id: Some("shard-0".into()),
+    }];
+
+    // Predicate on "host" (indexed) AND "region" (not indexed).
+    // "host=web-01" matches, and "region=us-east-1" is not in the index.
+    // The chunk MUST still be returned -- region predicate cannot prune.
+    let result = prefilter
+        .prune(
+            &chunks,
+            &[
+                ColumnPredicate::Eq("host".into(), PredicateValue::String("web-01".into())),
+                ColumnPredicate::Eq("region".into(), PredicateValue::String("us-east-1".into())),
+            ],
+        )
+        .await;
+    assert_eq!(
+        result.len(),
+        1,
+        "Chunk must not be pruned when a predicate targets a non-indexed column"
+    );
+
+    // Also test: ONLY a non-indexed column predicate. All chunks must pass through.
+    let result2 = prefilter
+        .prune(
+            &chunks,
+            &[ColumnPredicate::Eq(
+                "region".into(),
+                PredicateValue::String("us-east-1".into()),
+            )],
+        )
+        .await;
+    assert_eq!(
+        result2.len(),
+        1,
+        "Chunk must not be pruned when all predicates target non-indexed columns"
+    );
+}
+
+#[tokio::test]
 async fn test_build_at_ingest_then_query() {
     let store: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
     let builder = IndexBuilder::new(store.clone(), "t1", IndexConfig::default());
