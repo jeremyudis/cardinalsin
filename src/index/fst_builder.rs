@@ -205,6 +205,7 @@ fn is_string_type(dt: &arrow_schema::DataType) -> bool {
 /// non-null values. Short-circuits as soon as the limit is exceeded so peak
 /// memory is O(limit) regardless of row count.
 fn exceeds_cardinality(col: &dyn arrow_array::Array, limit: usize) -> bool {
+    use arrow_schema::DataType;
     use std::collections::HashSet;
 
     let probe_capacity = limit.saturating_add(1);
@@ -219,8 +220,9 @@ fn exceeds_cardinality(col: &dyn arrow_array::Array, limit: usize) -> bool {
                 }
             }
         }
-        false
-    } else if let Some(str_arr) = col.as_string_opt::<i64>() {
+        return false;
+    }
+    if let Some(str_arr) = col.as_string_opt::<i64>() {
         let mut distinct: HashSet<&str> = HashSet::with_capacity(probe_capacity.min(1024));
         for i in 0..str_arr.len() {
             if !str_arr.is_null(i) {
@@ -230,9 +232,49 @@ fn exceeds_cardinality(col: &dyn arrow_array::Array, limit: usize) -> bool {
                 }
             }
         }
-        false
-    } else {
-        // Dictionary-encoded strings: the dictionary size is an exact upper bound.
-        col.len() > limit
+        return false;
     }
+
+    // Dictionary-encoded strings: count distinct referenced keys. The
+    // dictionary size is an upper bound but may include unreferenced values
+    // after filter pushdown or slicing.
+    if matches!(col.data_type(), DataType::Dictionary(_, _)) {
+        use arrow_array::types::{
+            Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type, UInt64Type,
+            UInt8Type,
+        };
+        use arrow_array::DictionaryArray;
+
+        macro_rules! probe_dict_keys {
+            ($kt:ty) => {{
+                if let Some(dict) = col.as_any().downcast_ref::<DictionaryArray<$kt>>() {
+                    let keys = dict.keys();
+                    let mut distinct: HashSet<i64> =
+                        HashSet::with_capacity(probe_capacity.min(1024));
+                    for i in 0..keys.len() {
+                        if !keys.is_null(i) {
+                            distinct.insert(keys.value(i) as i64);
+                            if distinct.len() > limit {
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
+            }};
+        }
+
+        probe_dict_keys!(Int8Type);
+        probe_dict_keys!(Int16Type);
+        probe_dict_keys!(Int32Type);
+        probe_dict_keys!(Int64Type);
+        probe_dict_keys!(UInt8Type);
+        probe_dict_keys!(UInt16Type);
+        probe_dict_keys!(UInt32Type);
+        probe_dict_keys!(UInt64Type);
+    }
+
+    // Conservative fallback for any other type: treat as exceeding the limit
+    // so the column is skipped rather than scanned with an unknown shape.
+    col.len() > limit
 }

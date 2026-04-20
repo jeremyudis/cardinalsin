@@ -130,12 +130,24 @@ impl ManifestClient {
         }
     }
 
-    /// Create a new manifest (unconditional put, for initial creation only).
+    /// Create a new manifest using if-none-match semantics. Returns
+    /// `Err(Error::Conflict)` if another writer has already created one —
+    /// callers must retry via `load_manifest` + `save_manifest` in that case
+    /// so concurrent first writers cannot lose segment entries.
     pub async fn create_manifest(&self, manifest: &IndexManifest) -> Result<()> {
         let path = self.manifest_path(&manifest.shard_id);
         let json = serde_json::to_vec_pretty(manifest)?;
-        self.object_store.put(&path, json.into()).await?;
-        Ok(())
+        let payload = PutPayload::from(json);
+        let opts = PutOptions {
+            mode: PutMode::Create,
+            ..Default::default()
+        };
+        match self.object_store.put_opts(&path, payload, opts).await {
+            Ok(_) => Ok(()),
+            Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => Err(Error::Conflict),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Freeze the manifest (set frozen=true) atomically.

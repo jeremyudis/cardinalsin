@@ -6,7 +6,7 @@ use super::fst_builder::ColumnFstData;
 use super::postings::PostingsList;
 use super::segment::{ChunkOrdinalTable, SegmentReader, SegmentWriter};
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Merges multiple CSI segments into a single consolidated segment.
 pub struct SegmentMerger;
@@ -17,13 +17,20 @@ impl SegmentMerger {
     /// Algorithm (Lucene-style k-way merge):
     /// 1. Build new ordinal table from output chunk path(s)
     /// 2. For each column present in any source segment:
-    ///    a. Collect all terms across source segments
+    ///    a. Stream-iterate terms across source segments via FST union
     ///    b. For each term: union roaring bitmaps, remap ordinals
     ///    c. Build new FST with merged terms + remapped postings
     /// 3. Write merged .csi via SegmentWriter
+    ///
+    /// `path_remap` maps each source chunk path to its ordinal in
+    /// `output_chunk_paths`. Source ordinals whose paths are not present in
+    /// the map are dropped — this prevents terms from chunks not
+    /// participating in the current compaction (but still covered by a shared
+    /// batched source segment) from being mis-attributed to the output.
     pub fn merge_segments(
         source_segments: &[SegmentReader],
         output_chunk_paths: &[String],
+        path_remap: &HashMap<String, u32>,
     ) -> Result<Vec<u8>> {
         // 1. Build new ordinal table
         let mut new_entries: Vec<(u32, String)> = Vec::new();
@@ -32,24 +39,15 @@ impl SegmentMerger {
         }
         let new_ordinal_table = ChunkOrdinalTable::new(new_entries);
 
-        // Build remap: for each source segment, map old ordinals to new ordinals.
-        // Since compaction merges N source chunks into 1 output chunk,
-        // all ordinals from source segments map to ordinal 0 (if single output).
+        // Build per-segment remap: source ordinal → new ordinal, scoped by
+        // the caller-supplied path_remap so compaction boundaries are respected.
         let remaps: Vec<BTreeMap<u32, u32>> = source_segments
             .iter()
             .map(|seg| {
                 let mut remap = BTreeMap::new();
                 for (old_ord, old_path) in seg.ordinal_table().iter() {
-                    // Find which new ordinal this path maps to
-                    if let Some(new_ord) = output_chunk_paths
-                        .iter()
-                        .position(|p| p == old_path)
-                        .map(|i| i as u32)
-                    {
+                    if let Some(&new_ord) = path_remap.get(old_path) {
                         remap.insert(old_ord, new_ord);
-                    } else {
-                        // Source path not in output -- map to 0 (merged into single output)
-                        remap.insert(old_ord, 0);
                     }
                 }
                 remap
@@ -113,6 +111,13 @@ impl SegmentMerger {
                     merged = merged.union(&remapped);
                 }
 
+                // Skip terms whose remapped postings are entirely empty — this
+                // happens when every source ordinal for the term was dropped
+                // because the underlying chunks are not part of this output.
+                if merged.is_empty() {
+                    continue;
+                }
+
                 fst_builder
                     .insert(key, idx)
                     .map_err(|e| Error::Index(format!("FST merge insert failed: {e}")))?;
@@ -136,14 +141,13 @@ impl SegmentMerger {
     }
 
     /// Remap ordinals in a postings list using the provided remap table.
+    /// Ordinals without a mapping (source chunks that are not part of the
+    /// output set) are dropped to avoid mis-attributing terms.
     fn remap_postings(posting: &PostingsList, remap: &BTreeMap<u32, u32>) -> PostingsList {
         let mut remapped = PostingsList::new();
         for ord in posting.ordinals() {
             if let Some(&new_ord) = remap.get(&ord) {
                 remapped.add(new_ord);
-            } else {
-                // If not in remap, map to 0 (single output chunk)
-                remapped.add(0);
             }
         }
         remapped

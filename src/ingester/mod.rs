@@ -207,8 +207,12 @@ impl Ingester {
         }
     }
 
-    /// Attach an index builder for building per-chunk CSI segments at flush time.
+    /// Attach an index builder for building per-chunk CSI segments at flush
+    /// time. Also spawns a background ticker that flushes batches whose age
+    /// has exceeded `batch_max_age_secs`, so idle shards do not keep pending
+    /// chunks unindexed indefinitely.
     pub fn with_index_builder(mut self, builder: Arc<crate::index::IndexBuilder>) -> Self {
+        let _age_flusher = builder.clone().spawn_age_flusher(0);
         self.index_builder = Some(builder);
         self
     }

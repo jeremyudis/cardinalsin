@@ -148,6 +148,53 @@ impl IndexBuilder {
         Ok(())
     }
 
+    /// Flush pending batches that have exceeded `batch_max_age_secs`, even
+    /// when no new chunks are being enqueued for that shard. Scans all
+    /// pending shards, drains only the stale ones, and flushes them.
+    pub async fn flush_expired(&self, level: u32) -> Result<()> {
+        let max_age = Duration::from_secs(self.config.batch_max_age_secs);
+        let expired: Vec<(String, PendingBatch)> = {
+            let mut pending = self.pending.lock().await;
+            let stale_keys: Vec<String> = pending
+                .iter()
+                .filter(|(_, v)| !v.batches.is_empty() && v.enqueued_at.elapsed() >= max_age)
+                .map(|(k, _)| k.clone())
+                .collect();
+            stale_keys
+                .into_iter()
+                .filter_map(|k| pending.remove(&k).map(|v| (k, v)))
+                .collect()
+        };
+        for (shard_id, batch) in expired {
+            if let Err(e) = self.flush_pending(&shard_id, level, batch).await {
+                warn!(shard = %shard_id, error = %e, "flush_expired: shard batch failed");
+            }
+        }
+        Ok(())
+    }
+
+    /// Spawn a background task that periodically flushes batches older than
+    /// `batch_max_age_secs`. Required because `enqueue_chunk` only checks the
+    /// age threshold on new writes — an idle shard would otherwise never
+    /// flush until shutdown. Returns the task handle so callers can abort it.
+    pub fn spawn_age_flusher(self: Arc<Self>, level: u32) -> tokio::task::JoinHandle<()> {
+        let max_age = self.config.batch_max_age_secs.max(1);
+        // Tick at half the max-age so we never exceed it by more than ~50%.
+        let tick_secs = (max_age / 2).max(1);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(tick_secs));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // Skip the immediate first tick.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if let Err(e) = self.flush_expired(level).await {
+                    warn!(error = %e, "index age-flusher tick failed");
+                }
+            }
+        })
+    }
+
     fn should_flush(&self, entry: &PendingBatch) -> bool {
         entry.paths.len() >= self.config.batch_max_chunks
             || entry.row_count >= self.config.batch_max_rows
@@ -376,9 +423,19 @@ impl IndexBuilder {
             return Ok(());
         }
 
-        // Merge segments
-        let merged_bytes =
-            SegmentMerger::merge_segments(&source_segments, &[output_chunk_path.to_string()])?;
+        // Merge segments. Explicit remap: every chunk being compacted in this
+        // job maps to ordinal 0 of the merged segment (single output chunk).
+        // Any source ordinals for chunks outside this compaction are dropped
+        // by the merger rather than mis-attributed to the output.
+        let path_remap: HashMap<String, u32> = source_chunk_paths
+            .iter()
+            .map(|p| (p.clone(), 0u32))
+            .collect();
+        let merged_bytes = SegmentMerger::merge_segments(
+            &source_segments,
+            &[output_chunk_path.to_string()],
+            &path_remap,
+        )?;
         let merged_size = merged_bytes.len() as u64;
 
         // Upload merged segment.
@@ -457,14 +514,28 @@ impl IndexBuilder {
             let (mut manifest, etag) = match self.manifest_client.load_manifest(shard_id).await? {
                 Some(m) => m,
                 None => {
-                    // Create new manifest
+                    // Create new manifest with if-none-match semantics. If a
+                    // concurrent writer won the race, fall through to the
+                    // retry path (load → save with CAS) so we don't clobber
+                    // their segment entry.
                     let mut m = IndexManifest::new(shard_id);
                     m.segments.push(entry.clone());
                     if entry.max_time_ns > m.indexed_through_ns {
                         m.indexed_through_ns = entry.max_time_ns;
                     }
-                    self.manifest_client.create_manifest(&m).await?;
-                    return Ok(());
+                    match self.manifest_client.create_manifest(&m).await {
+                        Ok(()) => return Ok(()),
+                        Err(Error::Conflict) => {
+                            let backoff_ms = 100 * 2u64.pow(attempt);
+                            debug!(
+                                attempt,
+                                backoff_ms, "Manifest create race, retrying as update"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             };
 

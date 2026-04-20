@@ -14,7 +14,17 @@ use cardinalsin::metadata::TimeIndexEntry;
 use arrow_array::{RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use object_store::memory::InMemory;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Test helper: build a remap that collapses every source path into the
+/// single output ordinal 0. Mirrors the compactor's standard N→1 contract.
+fn remap_to_single_output(source_paths: &[&str]) -> HashMap<String, u32> {
+    source_paths
+        .iter()
+        .map(|p| ((*p).to_string(), 0u32))
+        .collect()
+}
 
 // ────────────────────────────────────────────────────────────────────
 // Helpers
@@ -373,8 +383,12 @@ fn test_merge_two_single_chunk_segments() {
     let reader_a = SegmentReader::open(seg_a).unwrap();
     let reader_b = SegmentReader::open(seg_b).unwrap();
 
-    let merged =
-        SegmentMerger::merge_segments(&[reader_a, reader_b], &["merged.parquet".into()]).unwrap();
+    let merged = SegmentMerger::merge_segments(
+        &[reader_a, reader_b],
+        &["merged.parquet".into()],
+        &remap_to_single_output(&["chunk_a.parquet", "chunk_b.parquet"]),
+    )
+    .unwrap();
 
     let merged_reader = SegmentReader::open(merged).unwrap();
 
@@ -407,7 +421,14 @@ fn test_merge_five_segments() {
         .map(|s| SegmentReader::open(s).unwrap())
         .collect();
 
-    let merged = SegmentMerger::merge_segments(&readers, &["merged.parquet".into()]).unwrap();
+    let src_paths: Vec<String> = (0..5).map(|i| format!("chunk_{i}.parquet")).collect();
+    let src_refs: Vec<&str> = src_paths.iter().map(|s| s.as_str()).collect();
+    let merged = SegmentMerger::merge_segments(
+        &readers,
+        &["merged.parquet".into()],
+        &remap_to_single_output(&src_refs),
+    )
+    .unwrap();
 
     let reader = SegmentReader::open(merged).unwrap();
     for i in 0..5 {
@@ -428,8 +449,12 @@ fn test_merge_ordinal_remapping() {
     let reader_b = SegmentReader::open(seg_b).unwrap();
 
     // Merge into single output
-    let merged =
-        SegmentMerger::merge_segments(&[reader_a, reader_b], &["merged.parquet".into()]).unwrap();
+    let merged = SegmentMerger::merge_segments(
+        &[reader_a, reader_b],
+        &["merged.parquet".into()],
+        &remap_to_single_output(&["chunk_a.parquet", "chunk_b.parquet"]),
+    )
+    .unwrap();
 
     let reader = SegmentReader::open(merged).unwrap();
 
@@ -484,8 +509,12 @@ fn test_merge_disjoint_columns() {
     let reader_a = SegmentReader::open(seg_a_bytes).unwrap();
     let reader_b = SegmentReader::open(seg_b_bytes).unwrap();
 
-    let merged =
-        SegmentMerger::merge_segments(&[reader_a, reader_b], &["merged.parquet".into()]).unwrap();
+    let merged = SegmentMerger::merge_segments(
+        &[reader_a, reader_b],
+        &["merged.parquet".into()],
+        &remap_to_single_output(&["chunk_a.parquet", "chunk_b.parquet"]),
+    )
+    .unwrap();
 
     let reader = SegmentReader::open(merged).unwrap();
     let cols = reader.indexed_columns();
@@ -502,8 +531,12 @@ fn test_merge_overlapping_terms() {
     let reader_a = SegmentReader::open(seg_a).unwrap();
     let reader_b = SegmentReader::open(seg_b).unwrap();
 
-    let merged =
-        SegmentMerger::merge_segments(&[reader_a, reader_b], &["merged.parquet".into()]).unwrap();
+    let merged = SegmentMerger::merge_segments(
+        &[reader_a, reader_b],
+        &["merged.parquet".into()],
+        &remap_to_single_output(&["chunk_a.parquet", "chunk_b.parquet"]),
+    )
+    .unwrap();
 
     let reader = SegmentReader::open(merged).unwrap();
 
@@ -522,7 +555,12 @@ fn test_merge_empty_segment_handling() {
     let reader = SegmentReader::open(seg).unwrap();
 
     // Merge single segment (degenerate case)
-    let merged = SegmentMerger::merge_segments(&[reader], &["merged.parquet".into()]).unwrap();
+    let merged = SegmentMerger::merge_segments(
+        &[reader],
+        &["merged.parquet".into()],
+        &remap_to_single_output(&["chunk.parquet"]),
+    )
+    .unwrap();
 
     let merged_reader = SegmentReader::open(merged).unwrap();
     let result = merged_reader.lookup("host", "web-01").unwrap().unwrap();

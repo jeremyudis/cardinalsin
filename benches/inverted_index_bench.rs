@@ -269,6 +269,12 @@ fn bench_merge(c: &mut Criterion) {
         let output_paths: Vec<String> = (0..n_segments)
             .map(|i| format!("chunk-{}.parquet", i))
             .collect();
+        // Identity remap: each source path keeps its position in the output.
+        let path_remap: std::collections::HashMap<String, u32> = output_paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i as u32))
+            .collect();
 
         g.throughput(Throughput::Bytes(total_src_bytes as u64));
         g.bench_with_input(
@@ -280,7 +286,9 @@ fn bench_merge(c: &mut Criterion) {
                         .iter()
                         .map(|bytes| SegmentReader::open(bytes.clone()).unwrap())
                         .collect();
-                    let merged = SegmentMerger::merge_segments(&readers, &output_paths).unwrap();
+                    let merged =
+                        SegmentMerger::merge_segments(&readers, &output_paths, &path_remap)
+                            .unwrap();
                     black_box(merged);
                 });
             },
