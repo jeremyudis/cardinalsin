@@ -6,13 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **If an implementation is incorrect, FIX IT! Do NOT modify tests to match broken code.**
 
-**Always create a PR after committing and pushing.** Beads issues cannot be closed until the full PR lifecycle is complete: opened → comments addressed → merged. After opening a PR, always check for merge conflicts (`gh pr view <number> --json mergeable`) and resolve them before moving on.
+**Always create a PR after committing and pushing.** After opening a PR, always check for merge conflicts (`gh pr view <number> --json mergeable`) and resolve them before moving on.
 
 **Never auto-merge PRs without explicit user approval.** Do NOT use `gh pr merge --auto` or merge PRs immediately after opening them. PRs must remain open for review. Only merge when the user explicitly says to merge a specific PR.
-
-**Never run Beads closure sync directly on `main`.** Do not manually push Beads sync commits to `main` (protected branch). Use the existing `Sync Beads Closures` GitHub Action, which should update an automation branch and open/update a PR for review.
-
-**Always create a corresponding GitHub issue for each Beads task.** When creating a Beads issue (`bd create`), also run `gh issue create` with a matching title, description, and appropriate labels. Link the GitHub issue number back to the Beads issue (`bd update <id> --description "... External: gh-<number>"`). This ensures traceability across both tracking systems.
 
 ## Epic Delivery Workflow
 
@@ -20,7 +16,7 @@ When executing an Epic from GitHub issues:
 
 1. Identify and pick up the first five sub-items unless the request specifies a different slice.
 2. Run work in parallel agents/worktrees where possible.
-3. Map each sub-item to its Beads issue and mark/update the associated Beads entries as work progresses.
+3. Track work progress in GitHub issues as sub-items are completed.
 4. Prefer one PR per sub-item when file changes do not conflict; if there are conflicts, condense into fewer PRs.
 5. Ensure every PR is attached to its issue with an explicit closing keyword in the PR body (for example, `Closes #123`) so merge auto-closes the issue.
 6. Include epic linkage in each PR (for example, `Refs: #<epic>`).
