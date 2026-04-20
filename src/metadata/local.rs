@@ -512,6 +512,7 @@ mod tests {
             max_timestamp: max_ts,
             row_count: 1000,
             size_bytes: 1024 * 1024,
+            shard_id: None,
         }
     }
 

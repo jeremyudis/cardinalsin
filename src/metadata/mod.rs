@@ -66,7 +66,7 @@ impl From<&ChunkMetadata> for TimeIndexEntry {
             max_timestamp: meta.max_timestamp,
             row_count: meta.row_count,
             size_bytes: meta.size_bytes,
-            shard_id: None,
+            shard_id: meta.shard_id.clone(),
         }
     }
 }

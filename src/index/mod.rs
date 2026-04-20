@@ -398,10 +398,11 @@ impl IndexPrefilter {
     ) -> Result<Vec<TimeIndexEntry>> {
         let start = std::time::Instant::now();
 
-        // Extract indexable predicates: Eq(col, String(val)) and In(col, [String(vals)])
+        // Extract indexable leaves, descending into And(...) trees so that
+        // compound `WHERE a='x' AND b='y'` predicates AND their bitmaps.
         let indexable: Vec<&ColumnPredicate> = predicates
             .iter()
-            .filter(|p| is_indexable_predicate(p))
+            .flat_map(extract_indexable_predicates)
             .collect();
 
         if indexable.is_empty() {
@@ -545,10 +546,27 @@ impl IndexPrefilter {
     }
 }
 
-/// Check if a predicate is indexable by the inverted index.
-fn is_indexable_predicate(pred: &ColumnPredicate) -> bool {
-    matches!(
-        pred,
-        ColumnPredicate::Eq(_, PredicateValue::String(_)) | ColumnPredicate::In(_, _)
-    )
+/// Flatten a predicate tree into indexable leaves.
+///
+/// Descends into `And(l, r)` and concatenates the indexable leaves from
+/// both sides — callers AND the resulting bitmaps, which is the correct
+/// semantics for AND. `Or`, `Not`, numeric, and unsupported predicates
+/// return nothing (conservative: no pruning from this branch).
+fn extract_indexable_predicates(pred: &ColumnPredicate) -> Vec<&ColumnPredicate> {
+    match pred {
+        ColumnPredicate::Eq(_, PredicateValue::String(_)) => vec![pred],
+        ColumnPredicate::In(_, values)
+            if values
+                .iter()
+                .all(|v| matches!(v, PredicateValue::String(_))) =>
+        {
+            vec![pred]
+        }
+        ColumnPredicate::And(l, r) => {
+            let mut out = extract_indexable_predicates(l);
+            out.extend(extract_indexable_predicates(r));
+            out
+        }
+        _ => Vec::new(),
+    }
 }

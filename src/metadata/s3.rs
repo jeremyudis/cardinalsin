@@ -817,7 +817,7 @@ impl ObjectStoreMetadataClient {
             column_stats: HashMap::new(),
             level: 0, // New chunks start at L0
             version: String::new(),
-            shard_id: None,
+            shard_id: metadata.shard_id.clone(),
         };
 
         let catalog = cas_retry!({

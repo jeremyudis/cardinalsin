@@ -818,19 +818,25 @@ impl Compactor {
             .put(&target_path.clone().into(), parquet_bytes.into())
             .await?;
 
-        // Merge source index segments into one consolidated segment (non-fatal)
+        // Merge source index segments into one consolidated segment (non-fatal).
+        //
+        // Resolve shard_id from the first chunk's metadata. Fall back to the legacy
+        // path-parse for pre-shard-plumbing chunks that have no `shard_id` field set
+        // but do embed `shard=` in the object path (dual-write writes did this).
         if let Some(ref index_builder) = self.index_builder {
-            let shard_id = paths
-                .first()
-                .and_then(|p| {
-                    p.find("shard=").map(|start| {
-                        let after = &p[start + 6..];
+            let first_path = paths.first().map(|s| s.as_str()).unwrap_or_default();
+            let shard_id = match self.metadata.get_chunk(first_path).await {
+                Ok(Some(m)) if m.shard_id.is_some() => m.shard_id.unwrap(),
+                _ => first_path
+                    .find("shard=")
+                    .map(|start| {
+                        let after = &first_path[start + 6..];
                         after
                             .find('/')
                             .map_or(after.to_string(), |end| after[..end].to_string())
                     })
-                })
-                .unwrap_or_else(|| "default".to_string());
+                    .unwrap_or_else(|| "default".to_string()),
+            };
             let min_ts = self.extract_min_timestamp(&sorted);
             let max_ts = self.extract_max_timestamp(&sorted);
             if let Err(e) = index_builder

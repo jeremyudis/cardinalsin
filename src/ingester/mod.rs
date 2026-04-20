@@ -448,13 +448,14 @@ impl Ingester {
             .put(&path.clone().into(), parquet_bytes.into())
             .await?;
 
-        // Register in metadata store
+        // Register in metadata store with explicit shard_id (dual-write path).
         let chunk_metadata = ChunkMetadata {
             path: path.clone(),
             min_timestamp: self.extract_min_timestamp(batch)?,
             max_timestamp: self.extract_max_timestamp(batch)?,
             row_count: batch.num_rows() as u64,
             size_bytes: parquet_size,
+            shard_id: Some(shard_id.to_string()),
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
@@ -667,19 +668,21 @@ impl Ingester {
             .put(&path.clone().into(), parquet_bytes.into())
             .await?;
 
-        // Register in metadata store
+        // Register in metadata store. shard_id is populated here so the inverted-index
+        // prefilter can later match chunks to the per-shard segment manifest.
+        let shard_id = self.compute_shard_id(&combined);
         let chunk_metadata = ChunkMetadata {
             path: path.clone(),
             min_timestamp: self.extract_min_timestamp(&combined)?,
             max_timestamp: self.extract_max_timestamp(&combined)?,
             row_count: combined.num_rows() as u64,
             size_bytes: parquet_size,
+            shard_id: Some(shard_id.clone()),
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
         // Build per-chunk index segment (non-fatal)
         if let Some(ref index_builder) = self.index_builder {
-            let shard_id = self.compute_shard_id(&combined);
             let min_ts = chunk_metadata.min_timestamp;
             let max_ts = chunk_metadata.max_timestamp;
             if let Err(e) = index_builder
@@ -695,8 +698,7 @@ impl Ingester {
             debug!("No streaming subscribers (legacy): {}", e);
         }
 
-        // Broadcast to topic-aware streaming query subscribers
-        let shard_id = self.compute_shard_id(&combined);
+        // Broadcast to topic-aware streaming query subscribers (reuses shard_id from above)
         let metrics = self.extract_metrics(&combined);
         let topic_batch = TopicBatch {
             batch: combined,
@@ -862,6 +864,11 @@ pub struct ChunkMetadata {
     pub max_timestamp: i64,
     pub row_count: u64,
     pub size_bytes: u64,
+    /// Shard this chunk was written to. None for legacy chunks from before shard
+    /// tracking existed; required for new writes so the inverted-index prefilter
+    /// can match chunks to per-shard segment manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_id: Option<String>,
 }
 
 /// Buffer statistics
