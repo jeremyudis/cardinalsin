@@ -126,6 +126,8 @@ pub struct Ingester {
     shutdown: CancellationToken,
     /// Bounded clock for skew-safe timestamp operations
     clock: Arc<BoundedClock>,
+    /// Optional index builder for per-chunk CSI segments
+    index_builder: Option<Arc<crate::index::IndexBuilder>>,
 }
 
 impl Ingester {
@@ -163,6 +165,7 @@ impl Ingester {
             last_flushed_seq: AtomicU64::new(0),
             shutdown: CancellationToken::new(),
             clock: Arc::new(BoundedClock::default()),
+            index_builder: None,
         }
     }
 
@@ -200,7 +203,18 @@ impl Ingester {
             last_flushed_seq: AtomicU64::new(0),
             shutdown: CancellationToken::new(),
             clock: Arc::new(BoundedClock::default()),
+            index_builder: None,
         }
+    }
+
+    /// Attach an index builder for building per-chunk CSI segments at flush
+    /// time. Also spawns a background ticker that flushes batches whose age
+    /// has exceeded `batch_max_age_secs`, so idle shards do not keep pending
+    /// chunks unindexed indefinitely.
+    pub fn with_index_builder(mut self, builder: Arc<crate::index::IndexBuilder>) -> Self {
+        let _age_flusher = builder.clone().spawn_age_flusher(0);
+        self.index_builder = Some(builder);
+        self
     }
 
     /// Get a cancellation token that can be used to trigger graceful shutdown.
@@ -438,13 +452,14 @@ impl Ingester {
             .put(&path.clone().into(), parquet_bytes.into())
             .await?;
 
-        // Register in metadata store
+        // Register in metadata store with explicit shard_id (dual-write path).
         let chunk_metadata = ChunkMetadata {
             path: path.clone(),
             min_timestamp: self.extract_min_timestamp(batch)?,
             max_timestamp: self.extract_max_timestamp(batch)?,
             row_count: batch.num_rows() as u64,
             size_bytes: parquet_size,
+            shard_id: Some(shard_id.to_string()),
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
@@ -657,23 +672,39 @@ impl Ingester {
             .put(&path.clone().into(), parquet_bytes.into())
             .await?;
 
-        // Register in metadata store
+        // Register in metadata store. shard_id is populated here so the inverted-index
+        // prefilter can later match chunks to the per-shard segment manifest.
+        let shard_id = self.compute_shard_id(&combined);
         let chunk_metadata = ChunkMetadata {
             path: path.clone(),
             min_timestamp: self.extract_min_timestamp(&combined)?,
             max_timestamp: self.extract_max_timestamp(&combined)?,
             row_count: combined.num_rows() as u64,
             size_bytes: parquet_size,
+            shard_id: Some(shard_id.clone()),
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
+
+        // Enqueue chunk into the per-shard index batcher. The batcher decides
+        // when to flush N accumulated chunks into a single .csi segment,
+        // amortising the per-segment overhead. Failures are non-fatal.
+        if let Some(ref index_builder) = self.index_builder {
+            let min_ts = chunk_metadata.min_timestamp;
+            let max_ts = chunk_metadata.max_timestamp;
+            if let Err(e) = index_builder
+                .enqueue_chunk(combined.clone(), &path, &shard_id, 0, (min_ts, max_ts))
+                .await
+            {
+                warn!(error = %e, "Index segment enqueue failed (non-fatal)");
+            }
+        }
 
         // Broadcast to streaming query subscribers (legacy)
         if let Err(e) = self.broadcast.send(combined.clone()) {
             debug!("No streaming subscribers (legacy): {}", e);
         }
 
-        // Broadcast to topic-aware streaming query subscribers
-        let shard_id = self.compute_shard_id(&combined);
+        // Broadcast to topic-aware streaming query subscribers (reuses shard_id from above)
         let metrics = self.extract_metrics(&combined);
         let topic_batch = TopicBatch {
             batch: combined,
@@ -747,6 +778,11 @@ impl Ingester {
                     if !batches.is_empty() {
                         if let Err(e) = self.flush_batches(batches).await {
                             error!("Final flush failed during shutdown: {}", e);
+                        }
+                    }
+                    if let Some(ref index_builder) = self.index_builder {
+                        if let Err(e) = index_builder.flush_all(0).await {
+                            warn!(error = %e, "Index batcher final flush failed");
                         }
                     }
                     break;
@@ -839,6 +875,11 @@ pub struct ChunkMetadata {
     pub max_timestamp: i64,
     pub row_count: u64,
     pub size_bytes: u64,
+    /// Shard this chunk was written to. None for legacy chunks from before shard
+    /// tracking existed; required for new writes so the inverted-index prefilter
+    /// can match chunks to per-shard segment manifests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shard_id: Option<String>,
 }
 
 /// Buffer statistics

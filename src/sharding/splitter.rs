@@ -520,7 +520,8 @@ impl ShardSplitter {
                         batch_idx,
                         "a",
                     );
-                    self.write_chunk_to_path(&path_a, batch_a).await?;
+                    self.write_chunk_to_path(&path_a, batch_a, &progress.new_shards[0])
+                        .await?;
                 }
                 if batch_b.num_rows() > 0 {
                     let path_b = Self::backfill_chunk_path(
@@ -529,7 +530,8 @@ impl ShardSplitter {
                         batch_idx,
                         "b",
                     );
-                    self.write_chunk_to_path(&path_b, batch_b).await?;
+                    self.write_chunk_to_path(&path_b, batch_b, &progress.new_shards[1])
+                        .await?;
                 }
             }
 
@@ -668,7 +670,12 @@ impl ShardSplitter {
     }
 
     /// Write a batch to an explicit chunk path.
-    async fn write_chunk_to_path(&self, path: &str, batch: RecordBatch) -> Result<()> {
+    async fn write_chunk_to_path(
+        &self,
+        path: &str,
+        batch: RecordBatch,
+        shard_id: &str,
+    ) -> Result<()> {
         let mut buffer = Vec::new();
         {
             let props = WriterProperties::builder()
@@ -709,6 +716,7 @@ impl ShardSplitter {
             max_timestamp,
             row_count: batch.num_rows() as u64,
             size_bytes: bytes_len as u64,
+            shard_id: Some(shard_id.to_string()),
         };
         self.metadata.register_chunk(path, &metadata).await?;
 

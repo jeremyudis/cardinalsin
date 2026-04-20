@@ -105,7 +105,7 @@ sqlparser = "0.51"
 
 # Utilities
 bytes = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 parking_lot = "0.12"
@@ -122,6 +122,8 @@ dotenvy = "0.15"
 humantime = "2"
 reqwest = { version = "0.12", features = ["json"] }
 crc32fast = "1.5.0"
+roaring = "0.10"
+fst = "0.4"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -140,6 +142,10 @@ harness = false
 
 [[bench]]
 name = "query_latency"
+harness = false
+
+[[bench]]
+name = "inverted_index_bench"
 harness = false
 
 [profile.release]

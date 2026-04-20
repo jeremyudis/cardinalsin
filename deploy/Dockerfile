@@ -29,7 +29,8 @@ RUN mkdir -p src/bin benches && \
     echo "fn main() {}" > src/bin/backfill_levels.rs && \
     echo "fn main() {}" > src/bin/test_data_generator.rs && \
     echo "fn main() {}" > benches/write_throughput.rs && \
-    echo "fn main() {}" > benches/query_latency.rs
+    echo "fn main() {}" > benches/query_latency.rs && \
+    echo "fn main() {}" > benches/inverted_index_bench.rs
 
 # Build dependencies only
 RUN cargo build --release && rm -rf src

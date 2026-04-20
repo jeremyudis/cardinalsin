@@ -4,6 +4,7 @@
 
 use cardinalsin::api;
 use cardinalsin::config::ComponentFactory;
+use cardinalsin::index::{IndexBuilder, IndexConfig};
 use cardinalsin::ingester::{Ingester, IngesterConfig, WalConfig, WalSyncMode};
 use cardinalsin::query::{QueryConfig, QueryNode};
 use cardinalsin::schema::MetricSchema;
@@ -120,13 +121,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let schema = MetricSchema::default_metrics();
 
+    // Build index builder for per-chunk CSI segments
+    let index_builder = Arc::new(IndexBuilder::new(
+        ComponentFactory::create_object_store_for(&storage_config).await?,
+        &args.tenant_id,
+        IndexConfig::default(),
+    ));
+
     let mut ingester = Ingester::new(
         ingester_config,
         object_store,
         metadata,
         storage_config.clone(),
         schema,
-    );
+    )
+    .with_index_builder(index_builder);
 
     // Initialize WAL and recover any unflushed entries
     ingester.ensure_wal().await?;

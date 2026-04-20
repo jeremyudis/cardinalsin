@@ -84,7 +84,9 @@ macro_rules! cas_retry {
 /// Chunk metadata with column statistics for predicate pushdown
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChunkMetadataExtended {
-    /// Basic chunk metadata
+    /// Basic chunk metadata. `shard_id` lives on `base` — the flattened
+    /// field is the single source of truth for the serialized `shard_id`
+    /// key so catalog.json never contains a duplicate.
     #[serde(flatten)]
     pub base: ChunkMetadata,
     /// Column statistics (min/max per column)
@@ -96,9 +98,13 @@ pub struct ChunkMetadataExtended {
     /// Version/ETag for atomic operations
     #[serde(default, skip_serializing)]
     pub version: String,
-    /// Shard ID this chunk belongs to (None for legacy data)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shard_id: Option<String>,
+}
+
+impl ChunkMetadataExtended {
+    /// Convenience accessor for `base.shard_id`.
+    pub fn shard_id(&self) -> Option<&str> {
+        self.base.shard_id.as_deref()
+    }
 }
 
 /// Unified metadata catalog -- single S3 object, single ETag
@@ -817,7 +823,6 @@ impl ObjectStoreMetadataClient {
             column_stats: HashMap::new(),
             level: 0, // New chunks start at L0
             version: String::new(),
-            shard_id: None,
         };
 
         let catalog = cas_retry!({
@@ -1135,6 +1140,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                                 max_timestamp: extended.base.max_timestamp,
                                 row_count: extended.base.row_count,
                                 size_bytes: extended.base.size_bytes,
+                                shard_id: extended.base.shard_id.clone(),
                             });
                         } else {
                             pruned_count += 1;
@@ -1200,6 +1206,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.base.shard_id.clone(),
             })
             .collect();
 
@@ -1543,7 +1550,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
             .chunks
             .iter()
             .filter(|(path, extended)| {
-                if let Some(ref chunk_shard) = extended.shard_id {
+                if let Some(ref chunk_shard) = extended.base.shard_id {
                     chunk_shard == shard_id
                 } else {
                     // Legacy fallback: match by path substring
@@ -1556,6 +1563,7 @@ impl MetadataClient for ObjectStoreMetadataClient {
                 max_timestamp: extended.base.max_timestamp,
                 row_count: extended.base.row_count,
                 size_bytes: extended.base.size_bytes,
+                shard_id: extended.base.shard_id.clone(),
             })
             .collect();
 

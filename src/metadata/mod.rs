@@ -54,6 +54,8 @@ pub struct TimeIndexEntry {
     pub max_timestamp: i64,
     pub row_count: u64,
     pub size_bytes: u64,
+    /// Shard ID this chunk belongs to (None for legacy data)
+    pub shard_id: Option<String>,
 }
 
 impl From<&ChunkMetadata> for TimeIndexEntry {
@@ -64,6 +66,7 @@ impl From<&ChunkMetadata> for TimeIndexEntry {
             max_timestamp: meta.max_timestamp,
             row_count: meta.row_count,
             size_bytes: meta.size_bytes,
+            shard_id: meta.shard_id.clone(),
         }
     }
 }
