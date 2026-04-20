@@ -170,11 +170,13 @@ impl FstTermBuilder {
                 continue;
             }
 
-            // Check cardinality before building
+            // Skip columns whose cardinality exceeds the threshold.
+            // The estimator short-circuits once it sees more than max_cardinality
+            // distinct values, so memory stays O(max_cardinality) even on columns
+            // with millions of rows.
             let col_idx = schema.index_of(name).unwrap();
             let col = batch.column(col_idx);
-            let distinct_count = estimate_distinct_count(col);
-            if distinct_count > max_cardinality {
+            if exceeds_cardinality(col, max_cardinality) {
                 continue;
             }
 
@@ -199,28 +201,38 @@ fn is_string_type(dt: &arrow_schema::DataType) -> bool {
     )
 }
 
-/// Estimate the distinct count of a column (for cardinality check).
-fn estimate_distinct_count(col: &dyn arrow_array::Array) -> usize {
+/// Return true if the column contains strictly more than `limit` distinct
+/// non-null values. Short-circuits as soon as the limit is exceeded so peak
+/// memory is O(limit) regardless of row count.
+fn exceeds_cardinality(col: &dyn arrow_array::Array, limit: usize) -> bool {
     use std::collections::HashSet;
 
+    let probe_capacity = limit.saturating_add(1);
+
     if let Some(str_arr) = col.as_string_opt::<i32>() {
-        let mut distinct = HashSet::new();
+        let mut distinct: HashSet<&str> = HashSet::with_capacity(probe_capacity.min(1024));
         for i in 0..str_arr.len() {
             if !str_arr.is_null(i) {
                 distinct.insert(str_arr.value(i));
+                if distinct.len() > limit {
+                    return true;
+                }
             }
         }
-        distinct.len()
+        false
     } else if let Some(str_arr) = col.as_string_opt::<i64>() {
-        let mut distinct = HashSet::new();
+        let mut distinct: HashSet<&str> = HashSet::with_capacity(probe_capacity.min(1024));
         for i in 0..str_arr.len() {
             if !str_arr.is_null(i) {
                 distinct.insert(str_arr.value(i));
+                if distinct.len() > limit {
+                    return true;
+                }
             }
         }
-        distinct.len()
+        false
     } else {
-        // For dictionary types, the dictionary size is the upper bound
-        col.len()
+        // Dictionary-encoded strings: the dictionary size is an exact upper bound.
+        col.len() > limit
     }
 }

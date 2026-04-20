@@ -190,13 +190,20 @@ impl IndexBuilder {
             SegmentMerger::merge_segments(&source_segments, &[output_chunk_path.to_string()])?;
         let merged_size = merged_bytes.len() as u64;
 
-        // Upload merged segment
-        let merged_path = format!(
-            "{}/indexes/shard={}/segments/{}.csi",
-            self.tenant_id,
-            shard_id,
-            uuid::Uuid::new_v4()
-        );
+        // Upload merged segment.
+        // Path is deterministic on the sorted set of source segment paths so a
+        // CAS-retry after a transient failure re-uploads the same bytes to the
+        // same key — no orphaned .csi blob on manifest conflict.
+        let merged_path = {
+            let mut sorted = source_segment_paths.clone();
+            sorted.sort();
+            let digest_input = sorted.join("\n");
+            let digest = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, digest_input.as_bytes());
+            format!(
+                "{}/indexes/shard={}/segments/merged-{}.csi",
+                self.tenant_id, shard_id, digest
+            )
+        };
         self.object_store
             .put(&merged_path.clone().into(), merged_bytes.into())
             .await?;

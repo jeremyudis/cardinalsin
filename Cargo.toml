@@ -105,7 +105,7 @@ sqlparser = "0.51"
 
 # Utilities
 bytes = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 parking_lot = "0.12"
