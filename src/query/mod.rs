@@ -82,6 +82,8 @@ pub struct QueryNode {
     adaptive_index_controller: Option<Arc<crate::adaptive_index::AdaptiveIndexController>>,
     /// Chunk pin registry shared with compactor to prevent GC during queries
     pin_registry: Option<ChunkPinRegistry>,
+    /// Optional inverted index prefilter for chunk pruning
+    index_prefilter: Option<Arc<crate::index::IndexPrefilter>>,
 }
 
 impl QueryNode {
@@ -114,6 +116,7 @@ impl QueryNode {
             filtered_rx: None,
             adaptive_index_controller: None,
             pin_registry: None,
+            index_prefilter: None,
         })
     }
 
@@ -137,6 +140,12 @@ impl QueryNode {
     /// the compactor's GC from deleting them mid-query.
     pub fn with_pin_registry(mut self, registry: ChunkPinRegistry) -> Self {
         self.pin_registry = Some(registry);
+        self
+    }
+
+    /// Attach an inverted index prefilter for chunk pruning.
+    pub fn with_index_prefilter(mut self, prefilter: Arc<crate::index::IndexPrefilter>) -> Self {
+        self.index_prefilter = Some(prefilter);
         self
     }
 
@@ -188,6 +197,14 @@ impl QueryNode {
                 .metadata
                 .get_chunks_with_predicates(time_range, &predicates)
                 .await?;
+
+            // Apply inverted index prefilter if available
+            let chunks = if let Some(ref prefilter) = self.index_prefilter {
+                prefilter.prune(&chunks, &predicates).await
+            } else {
+                chunks
+            };
+
             let bytes_scanned = chunks.iter().map(|chunk| chunk.size_bytes).sum::<u64>();
 
             // Pin chunks to prevent GC during query execution (RAII guard unpins on drop)

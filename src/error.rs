@@ -81,6 +81,14 @@ pub enum Error {
     /// Chunks are already leased by another compactor
     #[error("Chunks already leased: {0:?}")]
     ChunksAlreadyLeased(Vec<String>),
+
+    /// Index error
+    #[error("Index error: {0}")]
+    Index(String),
+
+    /// Index segment corrupt
+    #[error("Index segment corrupt: {0}")]
+    IndexCorrupt(String),
 }
 
 /// Shard-specific errors

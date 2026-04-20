@@ -139,6 +139,8 @@ pub struct Compactor {
     pin_registry: Option<ChunkPinRegistry>,
     /// Bounded clock for skew-safe timestamp operations
     clock: Arc<BoundedClock>,
+    /// Optional index builder for merging CSI segments during compaction
+    index_builder: Option<crate::index::IndexBuilder>,
 }
 
 impl Compactor {
@@ -181,6 +183,7 @@ impl Compactor {
             shutdown: CancellationToken::new(),
             pin_registry: None,
             clock: Arc::new(BoundedClock::default()),
+            index_builder: None,
         }
     }
 
@@ -196,6 +199,12 @@ impl Compactor {
     /// provides the safety margin instead.
     pub fn with_pin_registry(mut self, registry: ChunkPinRegistry) -> Self {
         self.pin_registry = Some(registry);
+        self
+    }
+
+    /// Attach an index builder for merging CSI segments during compaction.
+    pub fn with_index_builder(mut self, builder: crate::index::IndexBuilder) -> Self {
+        self.index_builder = Some(builder);
         self
     }
 
@@ -809,7 +818,60 @@ impl Compactor {
             .put(&target_path.clone().into(), parquet_bytes.into())
             .await?;
 
+        // Merge source index segments into one consolidated segment (non-fatal)
+        if let Some(ref index_builder) = self.index_builder {
+            let shard_id = paths
+                .first()
+                .and_then(|p| {
+                    p.find("shard=").map(|start| {
+                        let after = &p[start + 6..];
+                        after
+                            .find('/')
+                            .map_or(after.to_string(), |end| after[..end].to_string())
+                    })
+                })
+                .unwrap_or_else(|| "default".to_string());
+            let min_ts = self.extract_min_timestamp(&sorted);
+            let max_ts = self.extract_max_timestamp(&sorted);
+            if let Err(e) = index_builder
+                .merge_and_publish_segments(
+                    paths,
+                    &target_path,
+                    &shard_id,
+                    level.as_u32(),
+                    (min_ts, max_ts),
+                )
+                .await
+            {
+                warn!(error = %e, "Index segment merge failed (non-fatal)");
+            }
+        }
+
         Ok(target_path)
+    }
+
+    /// Extract minimum timestamp from a RecordBatch.
+    fn extract_min_timestamp(&self, batch: &arrow_array::RecordBatch) -> i64 {
+        use arrow_array::cast::AsArray;
+        use arrow_array::types::Int64Type;
+        if let Some(col) = batch.column_by_name("timestamp") {
+            if let Some(arr) = col.as_primitive_opt::<Int64Type>() {
+                return arrow::compute::min(arr).unwrap_or(0);
+            }
+        }
+        0
+    }
+
+    /// Extract maximum timestamp from a RecordBatch.
+    fn extract_max_timestamp(&self, batch: &arrow_array::RecordBatch) -> i64 {
+        use arrow_array::cast::AsArray;
+        use arrow_array::types::Int64Type;
+        if let Some(col) = batch.column_by_name("timestamp") {
+            if let Some(arr) = col.as_primitive_opt::<Int64Type>() {
+                return arrow::compute::max(arr).unwrap_or(0);
+            }
+        }
+        0
     }
 
     /// Garbage collect old chunks with grace period
