@@ -225,3 +225,67 @@ async fn pruning_pass_through_when_no_index() {
         "no index ⇒ must pass all chunks through (safety)"
     );
 }
+
+#[tokio::test]
+async fn batcher_coalesces_chunks_into_single_segment() {
+    // Enqueue N chunks below the chunk threshold, then force flush_all.
+    // Only one segment must land in the manifest, and pruning must still
+    // resolve ordinals back to individual chunk paths.
+    let object_store = Arc::new(InMemory::new());
+    let metadata = LocalMetadataClient::new();
+    let config = IndexConfig {
+        batch_max_chunks: 100,
+        batch_max_rows: 10_000_000,
+        batch_max_age_secs: 60,
+        ..IndexConfig::default()
+    };
+    let builder = IndexBuilder::new(object_store.clone(), TENANT, config);
+
+    let batches = [
+        ("c_a.parquet", "a", "us", (0, 100)),
+        ("c_b.parquet", "b", "us", (101, 200)),
+        ("c_c.parquet", "c", "eu", (201, 300)),
+    ];
+    for (path, host, region, (lo, hi)) in batches {
+        let chunk = ChunkMetadata {
+            path: path.to_string(),
+            min_timestamp: lo,
+            max_timestamp: hi,
+            row_count: 1,
+            size_bytes: 1_024,
+            shard_id: Some(SHARD.to_string()),
+        };
+        metadata.register_chunk(path, &chunk).await.unwrap();
+        builder
+            .enqueue_chunk(make_batch(&[host], &[region]), path, SHARD, 0, (lo, hi))
+            .await
+            .unwrap();
+    }
+
+    // Nothing flushed yet — all under thresholds.
+    let chunks = get_all_chunks(&metadata).await;
+    let prefilter = IndexPrefilter::new(object_store.clone(), TENANT);
+    let preds = [ColumnPredicate::Eq(
+        "host".into(),
+        PredicateValue::String("a".into()),
+    )];
+    let pruned_before = prefilter.prune(&chunks, &preds).await;
+    assert_eq!(
+        pruned_before.len(),
+        3,
+        "no segments published yet ⇒ passthrough"
+    );
+
+    builder.flush_all(0).await.unwrap();
+
+    // One segment now covers all three chunks — pruning must resolve to
+    // the single matching chunk path.
+    let prefilter = IndexPrefilter::new(object_store, TENANT);
+    let pruned = prefilter.prune(&chunks, &preds).await;
+    let paths: Vec<&str> = pruned.iter().map(|c| c.chunk_path.as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["c_a.parquet"],
+        "batched segment must still resolve ordinals back to individual chunks"
+    );
+}

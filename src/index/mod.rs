@@ -27,9 +27,33 @@ use crate::{Error, Result};
 use arrow_array::RecordBatch;
 use metrics::{counter, histogram};
 use object_store::ObjectStore;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
+
+struct PendingBatch {
+    batches: Vec<RecordBatch>,
+    paths: Vec<String>,
+    row_count: usize,
+    min_time_ns: i64,
+    max_time_ns: i64,
+    enqueued_at: Instant,
+}
+
+impl PendingBatch {
+    fn new() -> Self {
+        Self {
+            batches: Vec::new(),
+            paths: Vec::new(),
+            row_count: 0,
+            min_time_ns: i64::MAX,
+            max_time_ns: i64::MIN,
+            enqueued_at: Instant::now(),
+        }
+    }
+}
 
 /// Builds and publishes index segments. Used by the ingester and compactor.
 pub struct IndexBuilder {
@@ -37,6 +61,7 @@ pub struct IndexBuilder {
     manifest_client: ManifestClient,
     config: IndexConfig,
     tenant_id: String,
+    pending: Mutex<HashMap<String, PendingBatch>>,
 }
 
 impl IndexBuilder {
@@ -47,7 +72,173 @@ impl IndexBuilder {
             manifest_client,
             config,
             tenant_id: tenant_id.to_string(),
+            pending: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Enqueue a freshly flushed chunk into the per-shard batcher. When the
+    /// batch exceeds any of the configured thresholds (chunks/rows/age) the
+    /// accumulated chunks are concatenated, indexed, and published as a single
+    /// `.csi` segment covering all of them.
+    ///
+    /// Called by the ingester at flush time in place of per-chunk segment
+    /// building. On error: logs warn and returns Ok(()) — index build failures
+    /// never fail the flush.
+    pub async fn enqueue_chunk(
+        &self,
+        batch: RecordBatch,
+        chunk_path: &str,
+        shard_id: &str,
+        level: u32,
+        time_range: (i64, i64),
+    ) -> Result<()> {
+        let row_count = batch.num_rows();
+        let (min_ts, max_ts) = time_range;
+
+        let drained = {
+            let mut pending = self.pending.lock().await;
+            let entry = pending
+                .entry(shard_id.to_string())
+                .or_insert_with(PendingBatch::new);
+            if entry.batches.is_empty() {
+                entry.enqueued_at = Instant::now();
+            }
+            entry.batches.push(batch);
+            entry.paths.push(chunk_path.to_string());
+            entry.row_count += row_count;
+            entry.min_time_ns = entry.min_time_ns.min(min_ts);
+            entry.max_time_ns = entry.max_time_ns.max(max_ts);
+
+            if self.should_flush(entry) {
+                pending.remove(shard_id)
+            } else {
+                None
+            }
+        };
+
+        if let Some(pending) = drained {
+            self.flush_pending(shard_id, level, pending).await?;
+        }
+        Ok(())
+    }
+
+    /// Force-flush any pending batch for the given shard.
+    pub async fn flush_shard(&self, shard_id: &str, level: u32) -> Result<()> {
+        let drained = {
+            let mut pending = self.pending.lock().await;
+            pending.remove(shard_id)
+        };
+        if let Some(pending) = drained {
+            self.flush_pending(shard_id, level, pending).await?;
+        }
+        Ok(())
+    }
+
+    /// Force-flush every pending shard batch. Call from shutdown hooks.
+    pub async fn flush_all(&self, level: u32) -> Result<()> {
+        let drained: Vec<(String, PendingBatch)> = {
+            let mut pending = self.pending.lock().await;
+            pending.drain().collect()
+        };
+        for (shard_id, batch) in drained {
+            if let Err(e) = self.flush_pending(&shard_id, level, batch).await {
+                warn!(shard = %shard_id, error = %e, "flush_all: shard batch failed");
+            }
+        }
+        Ok(())
+    }
+
+    fn should_flush(&self, entry: &PendingBatch) -> bool {
+        entry.paths.len() >= self.config.batch_max_chunks
+            || entry.row_count >= self.config.batch_max_rows
+            || entry.enqueued_at.elapsed() >= Duration::from_secs(self.config.batch_max_age_secs)
+    }
+
+    async fn flush_pending(&self, shard_id: &str, level: u32, pending: PendingBatch) -> Result<()> {
+        if pending.batches.is_empty() {
+            return Ok(());
+        }
+        let start = Instant::now();
+        let chunk_count = pending.paths.len();
+
+        let schema = pending.batches[0].schema();
+        let combined = arrow::compute::concat_batches(&schema, pending.batches.iter())
+            .map_err(|e| Error::Index(format!("concat_batches failed: {e}")))?;
+
+        // Assign one ordinal per source chunk and build a row→ordinal map.
+        let mut chunk_ordinals: Vec<u32> = Vec::with_capacity(combined.num_rows());
+        for (ord, batch) in pending.batches.iter().enumerate() {
+            chunk_ordinals.extend(std::iter::repeat(ord as u32).take(batch.num_rows()));
+        }
+
+        let columns = fst_builder::FstTermBuilder::build_all_columns(
+            &combined,
+            &chunk_ordinals,
+            &self.config.skip_columns,
+            self.config.max_cardinality_for_inverted,
+        )?;
+
+        if columns.is_empty() {
+            debug!(shard = %shard_id, chunks = chunk_count, "No indexable columns in batch, skipping");
+            return Ok(());
+        }
+
+        let ordinal_entries: Vec<(u32, String)> = pending
+            .paths
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, p.clone()))
+            .collect();
+        let ordinal_table = ChunkOrdinalTable::new(ordinal_entries);
+
+        let segment_bytes = SegmentWriter::write_segment(&ordinal_table, &columns)?;
+        let segment_size = segment_bytes.len() as u64;
+
+        let segment_path = format!(
+            "{}/indexes/shard={}/segments/{}.csi",
+            self.tenant_id,
+            shard_id,
+            uuid::Uuid::new_v4()
+        );
+        self.object_store
+            .put(&segment_path.clone().into(), segment_bytes.into())
+            .await?;
+
+        self.add_segment_to_manifest(
+            shard_id,
+            SegmentEntry {
+                path: segment_path,
+                min_time_ns: pending.min_time_ns,
+                max_time_ns: pending.max_time_ns,
+                chunk_count: chunk_count as u32,
+                level,
+                size_bytes: segment_size,
+                created_at: chrono::Utc::now().to_rfc3339(),
+            },
+        )
+        .await?;
+
+        let elapsed = start.elapsed().as_secs_f64();
+        histogram!(
+            "cardinalsin_index_segment_build_duration_seconds",
+            "source" => "batcher"
+        )
+        .record(elapsed);
+        counter!(
+            "cardinalsin_index_segment_builds_total",
+            "result" => "ok",
+            "source" => "batcher"
+        )
+        .increment(1);
+
+        debug!(
+            shard = %shard_id,
+            chunks = chunk_count,
+            rows = combined.num_rows(),
+            elapsed_ms = (elapsed * 1000.0) as u64,
+            "Batched index segment built"
+        );
+        Ok(())
     }
 
     /// Build a per-chunk `.csi` segment from a flushed RecordBatch.

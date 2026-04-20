@@ -18,6 +18,12 @@ pub struct IndexConfig {
     pub segment_cache_capacity: u64,
     /// Idle TTL for the segment cache (seconds).
     pub segment_cache_idle_ttl_secs: u64,
+    /// Maximum chunks accumulated per shard before a batched segment is flushed.
+    pub batch_max_chunks: usize,
+    /// Maximum total rows accumulated per shard before a batched segment is flushed.
+    pub batch_max_rows: usize,
+    /// Maximum age of the oldest pending chunk in a shard batcher before it is flushed.
+    pub batch_max_age_secs: u64,
 }
 
 impl Default for IndexConfig {
@@ -35,6 +41,9 @@ impl Default for IndexConfig {
             max_cardinality_for_inverted: 100_000,
             segment_cache_capacity: 10_000,
             segment_cache_idle_ttl_secs: 600,
+            batch_max_chunks: 32,
+            batch_max_rows: 1_000_000,
+            batch_max_age_secs: 60,
         }
     }
 }

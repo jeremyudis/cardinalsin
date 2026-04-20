@@ -681,15 +681,17 @@ impl Ingester {
         };
         self.metadata.register_chunk(&path, &chunk_metadata).await?;
 
-        // Build per-chunk index segment (non-fatal)
+        // Enqueue chunk into the per-shard index batcher. The batcher decides
+        // when to flush N accumulated chunks into a single .csi segment,
+        // amortising the per-segment overhead. Failures are non-fatal.
         if let Some(ref index_builder) = self.index_builder {
             let min_ts = chunk_metadata.min_timestamp;
             let max_ts = chunk_metadata.max_timestamp;
             if let Err(e) = index_builder
-                .build_and_publish_segment(&combined, &path, &shard_id, 0, (min_ts, max_ts))
+                .enqueue_chunk(combined.clone(), &path, &shard_id, 0, (min_ts, max_ts))
                 .await
             {
-                warn!(error = %e, "Index segment build failed (non-fatal)");
+                warn!(error = %e, "Index segment enqueue failed (non-fatal)");
             }
         }
 
@@ -772,6 +774,11 @@ impl Ingester {
                     if !batches.is_empty() {
                         if let Err(e) = self.flush_batches(batches).await {
                             error!("Final flush failed during shutdown: {}", e);
+                        }
+                    }
+                    if let Some(ref index_builder) = self.index_builder {
+                        if let Err(e) = index_builder.flush_all(0).await {
+                            warn!(error = %e, "Index batcher final flush failed");
                         }
                     }
                     break;
