@@ -144,6 +144,10 @@ harness = false
 name = "query_latency"
 harness = false
 
+[[bench]]
+name = "inverted_index_bench"
+harness = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

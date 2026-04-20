@@ -152,7 +152,7 @@ fn test_segment_large_ordinal_table() {
     let columns = vec![]; // No columns -- trivial segment
     let data = SegmentWriter::write_segment(&ordinal_table, &columns).unwrap();
     let reader = SegmentReader::open(data).unwrap();
-    assert_eq!(reader.ordinal_table().entries.len(), 100);
+    assert_eq!(reader.ordinal_table().len(), 100);
     assert_eq!(reader.ordinal_table().resolve(50), Some("chunk_50.parquet"));
 }
 

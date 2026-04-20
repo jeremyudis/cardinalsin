@@ -474,8 +474,8 @@ impl IndexPrefilter {
                 // the predicate cannot prune anything, so all chunks are potential matches.
                 let full_bitmap = {
                     let mut bm = PostingsList::new();
-                    for (ordinal, _) in &reader.ordinal_table().entries {
-                        bm.add(*ordinal);
+                    for (ordinal, _) in reader.ordinal_table().iter() {
+                        bm.add(ordinal);
                     }
                     bm
                 };
