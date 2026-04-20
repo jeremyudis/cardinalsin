@@ -346,15 +346,31 @@ pub struct IndexPrefilter {
     manifest_client: ManifestClient,
     #[allow(dead_code)]
     tenant_id: String,
+    segment_cache: moka::future::Cache<String, Arc<SegmentReader>>,
 }
 
 impl IndexPrefilter {
     pub fn new(object_store: Arc<dyn ObjectStore>, tenant_id: &str) -> Self {
+        Self::with_config(object_store, tenant_id, &IndexConfig::default())
+    }
+
+    pub fn with_config(
+        object_store: Arc<dyn ObjectStore>,
+        tenant_id: &str,
+        config: &IndexConfig,
+    ) -> Self {
         let manifest_client = ManifestClient::new(object_store.clone(), tenant_id);
+        let segment_cache = moka::future::Cache::builder()
+            .max_capacity(config.segment_cache_capacity)
+            .time_to_idle(std::time::Duration::from_secs(
+                config.segment_cache_idle_ttl_secs,
+            ))
+            .build();
         Self {
             object_store,
             manifest_client,
             tenant_id: tenant_id.to_string(),
+            segment_cache,
         }
     }
 
@@ -539,10 +555,17 @@ impl IndexPrefilter {
         Ok(result)
     }
 
-    async fn load_segment(&self, path: &str) -> Result<SegmentReader> {
-        let result = self.object_store.get(&path.into()).await?;
-        let bytes = result.bytes().await?;
-        SegmentReader::open(bytes.to_vec())
+    async fn load_segment(&self, path: &str) -> Result<Arc<SegmentReader>> {
+        let object_store = self.object_store.clone();
+        let path_owned = path.to_string();
+        self.segment_cache
+            .try_get_with(path_owned.clone(), async move {
+                let result = object_store.get(&path_owned.as_str().into()).await?;
+                let bytes = result.bytes().await?;
+                SegmentReader::open(bytes.to_vec()).map(Arc::new)
+            })
+            .await
+            .map_err(|e: Arc<Error>| Error::Index(format!("segment cache load failed: {e}")))
     }
 }
 

@@ -14,6 +14,10 @@ pub struct IndexConfig {
     /// Maximum distinct values for a column to be indexed.
     /// Columns with cardinality above this threshold are skipped.
     pub max_cardinality_for_inverted: usize,
+    /// Maximum number of segments held in the in-memory SegmentReader cache.
+    pub segment_cache_capacity: u64,
+    /// Idle TTL for the segment cache (seconds).
+    pub segment_cache_idle_ttl_secs: u64,
 }
 
 impl Default for IndexConfig {
@@ -29,6 +33,8 @@ impl Default for IndexConfig {
                 "value_u64".to_string(),
             ],
             max_cardinality_for_inverted: 100_000,
+            segment_cache_capacity: 10_000,
+            segment_cache_idle_ttl_secs: 600,
         }
     }
 }
